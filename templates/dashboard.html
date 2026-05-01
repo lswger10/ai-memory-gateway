@@ -188,6 +188,14 @@
                     <h1>对话记录</h1>
                     <p class="section-desc">浏览和管理历史对话</p>
                 </div>
+                <div class="card" style="margin-bottom: 16px;">
+                    <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="exportConversations()">📥 导出全部对话</button>
+                        <button class="btn" onclick="document.getElementById('conv-import-file').click()">📤 导入对话记录</button>
+                        <input type="file" id="conv-import-file" accept=".json" style="display:none" onchange="importConversations(event)">
+                        <span id="conv-import-status" style="font-size: 13px; color: var(--text-muted);"></span>
+                    </div>
+                </div>
                 <div class="card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                         <h4 id="conv-list-title">对话列表</h4>
