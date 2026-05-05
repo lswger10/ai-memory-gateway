@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 from memory_extractor import extract_memories, score_memories
 
 # ============================================================
@@ -1102,11 +1102,16 @@ async def dashboard_page(request: Request):
 # ============================================================
 
 @app.get("/api/memories")
-async def api_get_memories():
-    """获取所有记忆（管理页面用）"""
+async def api_get_memories(layer: int = None, active_only: bool = None):
+    """获取所有记忆（管理页面用）
+    
+    Query params:
+        layer: 筛选层级（1=碎片, 2=事件, 3=核心）
+        active_only: 是否只返回活跃记忆
+    """
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
-    memories = await get_all_memories_detail()
+    memories = await get_all_memories_detail(layer=layer, active_only=active_only)
     tz_offset = timezone(timedelta(hours=TIMEZONE_HOURS))
     for m in memories:
         if m.get("created_at"):
@@ -1114,7 +1119,16 @@ async def api_get_memories():
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             m["created_at"] = dt.astimezone(tz_offset).strftime("%Y-%m-%d %H:%M:%S")
-    return {"memories": memories}
+    # 获取层级统计
+    try:
+        layer_stats = await get_layer_statistics()
+    except Exception:
+        layer_stats = None
+    
+    result = {"memories": memories}
+    if layer_stats:
+        result["layer_stats"] = layer_stats
+    return result
 
 
 @app.get("/api/memories/search")
@@ -1144,24 +1158,33 @@ async def api_search_memories(q: str = "", limit: int = 20):
 
 @app.put("/api/memories/{memory_id}")
 async def api_update_memory(memory_id: int, request: Request):
-    """更新单条记忆"""
+    """更新单条记忆（支持 content / importance / title / layer）"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
     data = await request.json()
-    await update_memory(
+    await update_memory_with_layer(
         memory_id,
         content=data.get("content"),
         importance=data.get("importance"),
+        title=data.get("title"),
+        layer=data.get("layer"),
     )
     return {"status": "ok", "id": memory_id}
 
 
 @app.delete("/api/memories/{memory_id}")
-async def api_delete_memory(memory_id: int):
-    """删除单条记忆"""
+async def api_delete_memory(memory_id: int, soft: bool = False):
+    """删除单条记忆
+    
+    Query params:
+        soft: true=归档（is_active=false），false=永久删除
+    """
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
-    await delete_memory(memory_id)
+    if soft:
+        await update_memory_with_layer(memory_id, is_active=False)
+    else:
+        await delete_memory(memory_id)
     return {"status": "ok", "id": memory_id}
 
 
@@ -1175,10 +1198,12 @@ async def api_batch_update(request: Request):
     if not updates:
         return {"error": "没有要更新的记忆"}
     for item in updates:
-        await update_memory(
+        await update_memory_with_layer(
             item["id"],
             content=item.get("content"),
             importance=item.get("importance"),
+            title=item.get("title"),
+            layer=item.get("layer"),
         )
     return {"status": "ok", "updated": len(updates)}
 
@@ -1194,6 +1219,357 @@ async def api_batch_delete(request: Request):
         return {"error": "未选择记忆"}
     await delete_memories_batch(ids)
     return {"status": "ok", "deleted": len(ids)}
+
+
+# ============================================================
+# 三层记忆架构：整理 / 合并 / 升级 / 统计
+# ============================================================
+
+CONSOLIDATION_PROMPT = """
+你是记忆整理助手。请将以下对话碎片整理成完整的事件记录。
+
+要求：
+1. 按主题/事件分组，相关的碎片合并到一起
+2. 每个事件一条记录，不要太细碎也不要太笼统
+3. 每条记录包含：标题（10字内）+ 完整描述
+4. 合并重复内容，保留重要细节
+5. 保留原文中的主观感受、情绪表达和个人化用语，不要改写为客观陈述或第三方总结
+6. content字段中不要使用双引号，用单引号或书名号代替
+
+碎片记忆：
+{fragments}
+
+请用 JSON 格式输出：
+[
+  {{
+    "title": "事件标题（10字内）",
+    "content": "完整的事件描述",
+    "importance": 5,
+    "merged_ids": [1, 2, 3]
+  }}
+]
+
+只输出 JSON，不要其他内容。确保 JSON 语法正确。
+"""
+
+# 整理状态（异步执行，防重入）
+_consolidate_status = {
+    "running": False,
+    "started_at": None,
+    "result": None,
+    "error": None,
+}
+
+
+async def consolidate_memories_for_date(event_date):
+    """整理指定日期的碎片记忆"""
+    return await consolidate_memories_for_date_range(event_date, event_date)
+
+
+async def consolidate_memories_for_date_range(start_date, end_date):
+    """整理指定时间段的碎片记忆"""
+    from datetime import date
+    import re
+    
+    # 获取该时间段的碎片
+    fragments = await get_fragments_by_date_range(start_date, end_date)
+    
+    if not fragments:
+        return {"status": "no_fragments", "start_date": str(start_date), "end_date": str(end_date)}
+    
+    # 构建碎片文本
+    fragments_text = "\n".join([
+        f"[ID={f['id']}] ({f['created_at'].strftime('%m-%d') if hasattr(f['created_at'], 'strftime') else str(f['created_at'])[:10]}) {f['content']}"
+        for f in fragments
+    ])
+    
+    # 调用 AI 进行整理
+    prompt = CONSOLIDATION_PROMPT.format(fragments=fragments_text)
+    
+    # 使用环境变量配置的模型，默认 haiku 节省成本
+    consolidation_model = os.getenv("MEMORY_MODEL", "") or os.getenv("DEFAULT_MODEL", "anthropic/claude-haiku-4.5")
+    
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # 最多重试2次（应对429限流）
+            last_error = None
+            for attempt in range(3):
+                response = await client.post(
+                    API_BASE_URL,
+                    headers={
+                        "Authorization": f"Bearer {API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": consolidation_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 2000
+                    }
+                )
+                
+                if response.status_code == 429:
+                    wait_time = (attempt + 1) * 10
+                    print(f"⚠️ 整理API 429限流，{wait_time}秒后重试（第{attempt+1}次）")
+                    last_error = f"429 Too Many Requests (重试{attempt+1}次)"
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                if response.status_code != 200:
+                    last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    print(f"⚠️ 整理API返回 {response.status_code}: {response.text[:200]}")
+                    break
+                
+                last_error = None
+                break
+            
+            if last_error:
+                return {"status": "error", "error": f"API调用失败: {last_error}"}
+            
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            # 解析 JSON（三层容错）
+            json_match = re.search(r'\[[\s\S]*\]', content)
+            if json_match:
+                json_str = json_match.group()
+                try:
+                    events = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # 方案1：用 strict=False
+                    try:
+                        events = json.loads(json_str, strict=False)
+                    except json.JSONDecodeError:
+                        # 方案2：去掉控制字符后重试
+                        cleaned = re.sub(r'[\x00-\x1f\x7f]', ' ', json_str)
+                        try:
+                            events = json.loads(cleaned)
+                        except json.JSONDecodeError as e:
+                            # 方案3：让 AI 重新格式化
+                            print(f"⚠️ JSON解析失败，尝试让AI修复: {e}")
+                            fix_resp = await client.post(
+                                API_BASE_URL,
+                                headers={
+                                    "Authorization": f"Bearer {API_KEY}",
+                                    "Content-Type": "application/json"
+                                },
+                                json={
+                                    "model": consolidation_model,
+                                    "messages": [{"role": "user", "content": f"请修复以下JSON的语法错误，只输出修复后的JSON数组，不要其他内容：\n{json_str[:2000]}"}],
+                                    "max_tokens": 2000
+                                }
+                            )
+                            if fix_resp.status_code == 200:
+                                fix_content = fix_resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                                fix_match = re.search(r'\[[\s\S]*\]', fix_content)
+                                if fix_match:
+                                    try:
+                                        events = json.loads(fix_match.group())
+                                        print(f"✅ AI修复JSON成功")
+                                    except json.JSONDecodeError:
+                                        return {"status": "error", "error": f"JSON解析失败（AI修复也失败）", "raw": content[:500]}
+                                else:
+                                    return {"status": "error", "error": "AI修复未返回有效JSON", "raw": content[:500]}
+                            else:
+                                return {"status": "error", "error": f"JSON解析失败，AI修复请求失败: HTTP {fix_resp.status_code}", "raw": content[:500]}
+            else:
+                return {"status": "error", "error": "无法解析 AI 返回的 JSON", "raw": content}
+            
+            # 创建事件记忆并停用碎片
+            created_count = 0
+            for event in events:
+                merged_ids = event.get("merged_ids", [])
+                if merged_ids:
+                    await create_event_memory(
+                        title=event.get("title", ""),
+                        content=event.get("content", ""),
+                        importance=event.get("importance", 5),
+                        event_date=start_date,
+                        merged_from=merged_ids
+                    )
+                    created_count += 1
+            
+            # 停用所有已处理的碎片
+            all_fragment_ids = [f['id'] for f in fragments]
+            await deactivate_memories(all_fragment_ids)
+            
+            return {
+                "status": "ok",
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+                "fragments_processed": len(fragments),
+                "events_created": created_count
+            }
+            
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/memories/consolidate")
+async def api_manual_consolidate(request: Request):
+    """手动触发整理（异步，立即返回）
+    
+    Body:
+        start_date: 开始日期（YYYY-MM-DD 格式）
+        end_date: 结束日期（YYYY-MM-DD 格式）
+        或
+        date: 单个日期（兼容旧版）
+    """
+    from datetime import date as date_type
+    
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    if _consolidate_status.get("running"):
+        return {"status": "already_running", "started_at": _consolidate_status.get("started_at")}
+    
+    data = await request.json()
+    
+    # 解析日期参数
+    if "date" in data and "start_date" not in data:
+        start_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+        end_date = start_date
+    else:
+        start_date_str = data.get("start_date")
+        end_date_str = data.get("end_date")
+        
+        if not start_date_str or not end_date_str:
+            return {"error": "请提供开始和结束日期"}
+        
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+        
+        if start_date > end_date:
+            return {"error": "开始日期不能晚于结束日期"}
+    
+    async def _run():
+        _consolidate_status.update({"running": True, "started_at": f"{start_date}~{end_date}", "result": None, "error": None})
+        try:
+            result = await consolidate_memories_for_date_range(start_date, end_date)
+            _consolidate_status["result"] = result
+            print(f"[manual/consolidate] 整理 {start_date}~{end_date}: {result}")
+        except Exception as e:
+            _consolidate_status["error"] = str(e)
+            print(f"[manual/consolidate] 整理 {start_date}~{end_date} 失败: {e}")
+        finally:
+            _consolidate_status["running"] = False
+    
+    asyncio.create_task(_run())
+    return {"status": "started", "start_date": str(start_date), "end_date": str(end_date)}
+
+
+@app.get("/api/memories/consolidate/status")
+async def api_consolidate_status():
+    """查询整理任务状态"""
+    return _consolidate_status
+
+
+@app.post("/api/memories/{memory_id}/promote")
+async def api_promote_to_core(memory_id: int, request: Request):
+    """将记忆升级为核心记忆"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    data = await request.json()
+    title = data.get("title")
+    
+    await promote_to_core(memory_id, title=title)
+    return {"status": "ok", "memory_id": memory_id, "layer": 3}
+
+
+@app.post("/api/memories/merge")
+async def api_merge_memories(request: Request):
+    """手动合并多条记忆"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    data = await request.json()
+    memory_ids = data.get("ids", [])
+    new_title = data.get("title", "")
+    new_content = data.get("content", "")
+    importance = data.get("importance", 5)
+    layer = data.get("layer", 2)
+    
+    if not memory_ids or not new_content:
+        return {"error": "请提供记忆ID列表和合并后内容"}
+    
+    new_id = await merge_memories(memory_ids, new_title, new_content, importance, layer)
+    return {"status": "ok", "new_id": new_id, "merged": len(memory_ids)}
+
+
+@app.post("/api/memories/check-duplicate")
+async def api_check_duplicate(request: Request):
+    """检查记忆是否重复"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    data = await request.json()
+    content = data.get("content", "")
+    threshold = data.get("threshold", 0.7)
+    
+    if not content:
+        return {"error": "请提供记忆内容"}
+    
+    result = await check_duplicate_memory(content, threshold)
+    return result
+
+
+@app.post("/api/memories/cleanup-fragments")
+async def api_cleanup_fragments(request: Request):
+    """清理指定天数前的归档碎片
+    
+    Body:
+        days: 清理多少天前的归档碎片（默认30天）
+    """
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    data = await request.json()
+    days = data.get("days", 30)
+    
+    try:
+        deleted = await cleanup_old_fragments(days)
+        return {"status": "ok", "deleted": deleted, "days": days}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/memories/{memory_id}/revert-merge")
+async def api_revert_merge(memory_id: int):
+    """撤回合并操作：恢复原始碎片，删除合并后的事件记忆"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    try:
+        result = await revert_merge(memory_id)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/memories/{memory_id}/restore")
+async def api_restore_memory(memory_id: int):
+    """恢复已归档的记忆（将 is_active 设为 TRUE）"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    try:
+        await update_memory_with_layer(memory_id, is_active=True)
+        return {"status": "ok", "id": memory_id}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/memories/layer-stats")
+async def api_layer_statistics():
+    """获取各层记忆统计数据"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    try:
+        stats = await get_layer_statistics()
+        return stats
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/import/text")

@@ -142,6 +142,78 @@ async def init_tables():
             );
         """)
         
+        # ---- 三层记忆架构字段（layer / title / is_active / merged_from / event_date）----
+        # layer: 1=原始碎片, 2=事件记忆, 3=核心记忆
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'layer'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN layer INTEGER DEFAULT 1;
+                END IF;
+            END $$;
+        """)
+        
+        # title: 记忆标题（语义锚点，用于搜索加权）
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'title'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN title TEXT DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        
+        # is_active: 是否参与搜索（碎片合并后变为 false）
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'is_active'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
+                END IF;
+            END $$;
+        """)
+        
+        # merged_from: 合并来源的碎片ID列表
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'merged_from'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN merged_from INTEGER[] DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        
+        # event_date: 事件日期（用于按天整理）
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'event_date'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN event_date DATE DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        
+        # 三层记忆索引
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_layer ON memories (layer);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_active ON memories (is_active);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_event_date ON memories (event_date);
+        """)
+        
         # 尝试启用pgvector扩展（向量搜索）
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -558,9 +630,9 @@ async def search_memories(query: str, limit: int = 10):
         hit_count_expr = " + ".join(case_parts)
         max_hits = len(keywords)
         
-        # 至少命中一个关键词
+        # 至少命中一个关键词（只搜索活跃记忆）
         where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-        where_clause = " OR ".join(where_parts)
+        where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
         
         limit_idx = len(keywords) + 1
         params.append(limit)
@@ -635,7 +707,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             hit_count_expr = " + ".join(case_parts)
             max_hits = len(keywords)
             where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-            where_clause = " OR ".join(where_parts)
+            where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
             
             limit_idx = len(keywords) + 1
             params.append(limit * 3)
@@ -669,7 +741,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                     SELECT id, content, importance, created_at,
                            1 - (embedding <=> $1::vector) as similarity
                     FROM memories
-                    WHERE embedding IS NOT NULL
+                    WHERE embedding IS NOT NULL AND is_active = TRUE
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                 """, vec_str, limit * 3)
@@ -678,7 +750,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                 import json
                 all_mem = await conn.fetch("""
                     SELECT id, content, importance, created_at, embedding_json
-                    FROM memories WHERE embedding_json IS NOT NULL
+                    FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE
                 """)
                 
                 scored = []
@@ -872,13 +944,46 @@ async def get_all_memories():
         return [dict(r) for r in rows]
 
 
-async def get_all_memories_detail():
-    """获取所有记忆（含 id，用于管理页面）"""
+async def get_all_memories_detail(limit: int = None, layer: int = None, active_only: bool = None):
+    """获取所有记忆（含 id，用于管理页面）
+    
+    Args:
+        limit: 可选，限制返回数量
+        layer: 可选，筛选指定层级（1=原始碎片, 2=事件记忆, 3=核心记忆）
+        active_only: 可选，是否只返回 is_active=true 的记忆
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, content, importance, source_session, created_at FROM memories ORDER BY id"
-        )
+        conditions = []
+        params = []
+        param_idx = 1
+        
+        if layer is not None:
+            conditions.append(f"layer = ${param_idx}")
+            params.append(layer)
+            param_idx += 1
+        
+        if active_only is not None:
+            conditions.append(f"is_active = ${param_idx}")
+            params.append(active_only)
+            param_idx += 1
+        
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        
+        if limit is not None:
+            limit_clause = f"LIMIT ${param_idx}"
+            params.append(limit)
+        else:
+            limit_clause = ""
+        
+        rows = await conn.fetch(f"""
+            SELECT id, content, importance, source_session, created_at,
+                   layer, title, is_active, merged_from, event_date
+            FROM memories
+            {where_clause}
+            ORDER BY id
+            {limit_clause}
+        """, *params)
         return [dict(r) for r in rows]
 
 
@@ -1318,3 +1423,356 @@ async def import_conversations(records: list):
             print(f"📥 导入对话: {imported} 条新增")
         
         return imported, skipped
+
+
+# ============================================================
+# 三层记忆架构（碎片/事件/核心）
+# ============================================================
+
+async def get_fragments_by_date(event_date):
+    """获取指定日期的原始碎片（用于每日整理）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, content, importance, created_at
+            FROM memories
+            WHERE layer = 1 AND is_active = TRUE
+            AND DATE(created_at) = $1
+            ORDER BY created_at
+        """, event_date)
+        return [dict(r) for r in rows]
+
+
+async def get_fragments_by_date_range(start_date, end_date):
+    """获取指定时间段的原始碎片（用于跨天整理）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, content, importance, created_at
+            FROM memories
+            WHERE layer = 1 AND is_active = TRUE
+            AND DATE(created_at) BETWEEN $1 AND $2
+            ORDER BY created_at
+        """, start_date, end_date)
+        return [dict(r) for r in rows]
+
+
+async def create_event_memory(title: str, content: str, importance: int, 
+                               event_date, merged_from: list):
+    """创建事件记忆（从碎片合并而来）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date)
+            VALUES ($1, $2, 2, $3, TRUE, $4, $5)
+            RETURNING id
+        """, content, importance, title, merged_from, event_date)
+        
+        new_id = row['id'] if row else None
+        
+        # 向量搜索：计算并保存 embedding
+        if MEMORY_VECTOR_ENABLED and new_id:
+            try:
+                embedding = await compute_embedding(content)
+                if embedding:
+                    await save_memory_embedding(conn, new_id, embedding)
+            except Exception as e:
+                print(f"⚠️ 事件记忆embedding计算失败（id={new_id}）: {e}")
+        
+        return new_id
+
+
+async def deactivate_memories(memory_ids: list):
+    """将记忆标记为不活跃（合并后的碎片）"""
+    if not memory_ids:
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE memories SET is_active = FALSE
+            WHERE id = ANY($1::int[])
+        """, memory_ids)
+
+
+async def promote_to_core(memory_id: int, title: str = None):
+    """将记忆升级为核心记忆"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if title:
+            await conn.execute("""
+                UPDATE memories SET layer = 3, title = $2
+                WHERE id = $1
+            """, memory_id, title)
+        else:
+            await conn.execute("""
+                UPDATE memories SET layer = 3
+                WHERE id = $1
+            """, memory_id)
+
+
+async def merge_memories(memory_ids: list, new_title: str, new_content: str, 
+                         importance: int, layer: int = 2):
+    """合并多条记忆为一条新记忆"""
+    if not memory_ids:
+        return None
+    
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 获取原记忆的日期（取最早的）
+        rows = await conn.fetch("""
+            SELECT MIN(DATE(created_at)) as event_date
+            FROM memories WHERE id = ANY($1::int[])
+        """, memory_ids)
+        event_date = rows[0]['event_date'] if rows else None
+        
+        # 创建新记忆
+        row = await conn.fetchrow("""
+            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date)
+            VALUES ($1, $2, $3, $4, TRUE, $5, $6)
+            RETURNING id
+        """, new_content, importance, layer, new_title, memory_ids, event_date)
+        
+        new_id = row['id'] if row else None
+        
+        # 向量搜索：计算并保存 embedding
+        if MEMORY_VECTOR_ENABLED and new_id:
+            try:
+                embedding = await compute_embedding(new_content)
+                if embedding:
+                    await save_memory_embedding(conn, new_id, embedding)
+            except Exception as e:
+                print(f"⚠️ 合并记忆embedding计算失败（id={new_id}）: {e}")
+        
+        # 将原记忆标记为不活跃
+        if new_id:
+            await deactivate_memories(memory_ids)
+        
+        return new_id
+
+
+async def check_duplicate_memory(new_content: str, threshold: float = 0.7) -> dict:
+    """检查新记忆是否与现有记忆重复
+    
+    三层去重策略：
+    1. 精确匹配：内容完全相同
+    2. 包含关系：新内容包含旧内容，或旧内容包含新内容
+    3. 关键词重叠度：Jaccard 相似度 > threshold
+    
+    Returns:
+        {
+            "is_duplicate": bool,
+            "reason": str,  # "exact" / "containment" / "similarity"
+            "matched_id": int or None,
+            "similarity": float or None
+        }
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 获取所有活跃记忆
+        rows = await conn.fetch("""
+            SELECT id, content FROM memories 
+            WHERE is_active = TRUE
+        """)
+        
+        new_content_lower = new_content.strip().lower()
+        new_keywords = set(extract_search_keywords(new_content))
+        
+        for row in rows:
+            old_content = row['content']
+            old_content_lower = old_content.strip().lower()
+            
+            # 第一层：精确匹配
+            if new_content_lower == old_content_lower:
+                return {
+                    "is_duplicate": True,
+                    "reason": "exact",
+                    "matched_id": row['id'],
+                    "similarity": 1.0
+                }
+            
+            # 第二层：包含关系
+            if new_content_lower in old_content_lower:
+                return {
+                    "is_duplicate": True,
+                    "reason": "containment",
+                    "matched_id": row['id'],
+                    "similarity": len(new_content) / len(old_content)
+                }
+            if old_content_lower in new_content_lower:
+                return {
+                    "is_duplicate": True,
+                    "reason": "containment_update",
+                    "matched_id": row['id'],
+                    "similarity": len(old_content) / len(new_content)
+                }
+            
+            # 第三层：关键词重叠度（Jaccard 相似度）
+            old_keywords = set(extract_search_keywords(old_content))
+            if new_keywords and old_keywords:
+                intersection = new_keywords & old_keywords
+                union = new_keywords | old_keywords
+                similarity = len(intersection) / len(union) if union else 0
+                
+                if similarity > threshold:
+                    return {
+                        "is_duplicate": True,
+                        "reason": "similarity",
+                        "matched_id": row['id'],
+                        "similarity": similarity
+                    }
+        
+        return {
+            "is_duplicate": False,
+            "reason": None,
+            "matched_id": None,
+            "similarity": None
+        }
+
+
+async def update_memory_with_layer(memory_id: int, content: str = None, 
+                                    importance: int = None, title: str = None,
+                                    layer: int = None, is_active: bool = None):
+    """更新记忆（支持三层架构新字段）"""
+    updates = []
+    params = []
+    param_idx = 2  # $1 给 memory_id
+    
+    if content is not None:
+        updates.append(f"content = ${param_idx}")
+        params.append(content)
+        param_idx += 1
+    
+    if importance is not None:
+        updates.append(f"importance = ${param_idx}")
+        params.append(importance)
+        param_idx += 1
+    
+    if title is not None:
+        updates.append(f"title = ${param_idx}")
+        params.append(title)
+        param_idx += 1
+    
+    if layer is not None:
+        updates.append(f"layer = ${param_idx}")
+        params.append(layer)
+        param_idx += 1
+    
+    if is_active is not None:
+        updates.append(f"is_active = ${param_idx}")
+        params.append(is_active)
+        param_idx += 1
+    
+    if not updates:
+        return
+    
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE memories SET {', '.join(updates)} WHERE id = $1",
+            memory_id, *params
+        )
+
+
+async def get_layer_statistics():
+    """获取各层记忆的统计数据"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                layer,
+                COUNT(*) as count,
+                COUNT(*) FILTER (WHERE is_active = TRUE) as active_count
+            FROM memories
+            GROUP BY layer
+            ORDER BY layer
+        """)
+        
+        stats = {
+            "layer_1": {"total": 0, "active": 0},  # 原始碎片
+            "layer_2": {"total": 0, "active": 0},  # 事件记忆
+            "layer_3": {"total": 0, "active": 0},  # 核心记忆
+        }
+        
+        for row in rows:
+            layer = row['layer'] or 1  # 默认为层级1
+            key = f"layer_{layer}"
+            if key in stats:
+                stats[key] = {
+                    "total": row['count'],
+                    "active": row['active_count']
+                }
+        
+        return stats
+
+
+async def cleanup_old_fragments(days: int = 30):
+    """清理指定天数前的归档碎片
+    
+    只清理满足以下条件的记忆：
+    - layer = 1（原始碎片）
+    - is_active = FALSE（已归档）
+    - created_at 在 days 天之前
+    
+    Returns:
+        删除的记忆数量
+    """
+    from datetime import datetime, timedelta
+    
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        cutoff_date = datetime.now() - timedelta(days=days)
+        
+        result = await conn.execute("""
+            DELETE FROM memories
+            WHERE layer = 1
+            AND is_active = FALSE
+            AND created_at < $1
+        """, cutoff_date)
+        
+        # 解析删除数量，格式如 "DELETE 5"
+        deleted = int(result.split()[-1]) if result else 0
+        return deleted
+
+
+async def revert_merge(memory_id: int):
+    """撤回合并操作
+    
+    恢复原始碎片（is_active = TRUE），删除合并后的事件记忆
+    
+    Args:
+        memory_id: 要撤回的事件记忆ID
+        
+    Returns:
+        {"status": "ok", "restored": 恢复的碎片数量}
+        或 {"error": "错误信息"}
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 获取事件记忆信息
+        row = await conn.fetchrow("""
+            SELECT id, layer, merged_from FROM memories WHERE id = $1
+        """, memory_id)
+        
+        if not row:
+            return {"error": "记忆不存在"}
+        
+        if row['layer'] != 2:
+            return {"error": "只能撤回事件记忆的合并"}
+        
+        merged_from = row['merged_from']
+        if not merged_from or len(merged_from) == 0:
+            return {"error": "没有合并来源，无法撤回"}
+        
+        # 恢复原始碎片
+        result = await conn.execute("""
+            UPDATE memories SET is_active = TRUE
+            WHERE id = ANY($1::int[])
+        """, merged_from)
+        restored = int(result.split()[-1]) if result else 0
+        
+        # 删除事件记忆
+        await conn.execute("""
+            DELETE FROM memories WHERE id = $1
+        """, memory_id)
+        
+        return {"status": "ok", "restored": restored}
