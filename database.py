@@ -1044,6 +1044,14 @@ async def set_gateway_config(key: str, value: str):
         """, key, value)
 
 
+async def get_all_gateway_config() -> dict:
+    """获取所有配置项"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT key, value FROM gateway_config")
+        return {r['key']: r['value'] for r in rows}
+
+
 # ============================================================
 # 对话历史读取（分区缓存用）
 # ============================================================

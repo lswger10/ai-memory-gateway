@@ -24,7 +24,8 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
 # ============================================================
@@ -45,11 +46,6 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
 
 # 网关端口
 PORT = int(os.getenv("PORT", "8080"))
-
-# 网关鉴权密钥（设置后所有 API 端点需要携带此密钥）
-# 方式一：Header  X-Gateway-Key: 你的密钥
-# 方式二：URL参数 ?gateway_key=你的密钥（方便浏览器访问 dashboard）
-GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
 
 # 记忆系统开关（数据库出问题时可以临时关掉）
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
@@ -109,10 +105,41 @@ def load_system_prompt():
 
 
 SYSTEM_PROMPT = load_system_prompt()
+_DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT  # 保留文件原始版本
 if SYSTEM_PROMPT:
     print(f"✅ 人设已加载，长度：{len(SYSTEM_PROMPT)} 字符")
 else:
     print("ℹ️  无人设，纯转发模式")
+
+# System Prompt 缓存（支持设置面板热更新）
+_cached_system_prompt = None
+_cached_system_prompt_loaded = False
+
+async def get_system_prompt() -> str:
+    """获取 system prompt（数据库优先，fallback 到文件）"""
+    global _cached_system_prompt, _cached_system_prompt_loaded
+    if _cached_system_prompt_loaded:
+        return _cached_system_prompt or ""
+    try:
+        db_prompt = await get_gateway_config("systemPrompt", "")
+        if db_prompt:
+            _cached_system_prompt = db_prompt
+        else:
+            _cached_system_prompt = _DEFAULT_SYSTEM_PROMPT
+            if _DEFAULT_SYSTEM_PROMPT:
+                await set_gateway_config("systemPrompt", _DEFAULT_SYSTEM_PROMPT)
+        _cached_system_prompt_loaded = True
+        return _cached_system_prompt or ""
+    except Exception:
+        _cached_system_prompt = _DEFAULT_SYSTEM_PROMPT
+        _cached_system_prompt_loaded = True
+        return _cached_system_prompt or ""
+
+def invalidate_system_prompt_cache():
+    """清除 system prompt 缓存（设置面板更新后调用）"""
+    global _cached_system_prompt, _cached_system_prompt_loaded
+    _cached_system_prompt = None
+    _cached_system_prompt_loaded = False
 
 
 # ============================================================
@@ -155,52 +182,7 @@ async def lifespan(app: FastAPI):
         await close_pool()
 
 
-app = FastAPI(title="AI Memory Gateway", version="3.3.0", lifespan=lifespan)
-
-# ============================================================
-# 网关鉴权中间件
-# ============================================================
-
-# 不需要鉴权的路径前缀
-PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico")
-
-@app.middleware("http")
-async def gateway_auth_middleware(request: Request, call_next):
-    """检查 GATEWAY_SECRET，保护所有非公开端点"""
-    # 未设置密钥时跳过鉴权（兼容旧部署，但会打印警告）
-    if not GATEWAY_SECRET:
-        if not hasattr(gateway_auth_middleware, "_warned"):
-            print("⚠️  GATEWAY_SECRET 未设置！所有 API 端点不受保护！")
-            print("⚠️  请在环境变量中设置 GATEWAY_SECRET 以启用鉴权")
-            gateway_auth_middleware._warned = True
-        return await call_next(request)
-
-    path = request.url.path
-
-    # 公开路径不需要鉴权（根路径精确匹配）
-    if path == "/":
-        return await call_next(request)
-    for prefix in PUBLIC_PATHS[1:]:
-        if path.startswith(prefix):
-            return await call_next(request)
-
-    # OPTIONS 预检请求放行（CORS 需要）
-    if request.method == "OPTIONS":
-        return await call_next(request)
-
-    # 从 header 或 query 参数获取密钥
-    provided_key = (
-        request.headers.get("X-Gateway-Key", "")
-        or request.query_params.get("gateway_key", "")
-    )
-
-    if provided_key != GATEWAY_SECRET:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Unauthorized. Provide X-Gateway-Key header or gateway_key parameter."},
-        )
-
-    return await call_next(request)
+app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -2057,6 +2039,278 @@ async def api_backfill_memory_embeddings_status():
         "error": _backfill_mem_status["error"],
         "finished_at": _backfill_mem_status["finished_at"],
     }
+
+
+# ============================================================
+# 模型列表 API（/api/models）
+# 设置面板的 combo-box 用，根据 API_BASE_URL 自动适配
+# ============================================================
+
+@app.get("/api/models")
+async def get_models():
+    """获取可用模型列表（根据 API_BASE_URL 自动适配）"""
+    is_openrouter = "openrouter.ai" in API_BASE_URL
+    is_google = "googleapis.com" in API_BASE_URL or "generativelanguage" in API_BASE_URL
+    is_openai = "api.openai.com" in API_BASE_URL
+
+    try:
+        if is_openrouter:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {API_KEY}"}
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    models = data.get("data", [])
+                    simplified = [{"id": m.get("id"), "name": m.get("name"), "context_length": m.get("context_length")} for m in models]
+                    simplified.sort(key=lambda x: x.get("name", ""))
+                    return {"models": simplified, "total": len(simplified), "provider": "openrouter"}
+
+        elif is_google:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    models = data.get("models", [])
+                    simplified = []
+                    for m in models:
+                        full_name = m.get("name", "")
+                        model_id = full_name.replace("models/", "") if full_name.startswith("models/") else full_name
+                        display_name = m.get("displayName", model_id)
+                        supported_methods = m.get("supportedGenerationMethods", [])
+                        if "generateContent" in supported_methods:
+                            simplified.append({"id": model_id, "name": display_name, "context_length": m.get("inputTokenLimit"), "output_limit": m.get("outputTokenLimit")})
+                    def sort_key(x):
+                        name = x.get("id", "")
+                        if "gemini-3" in name: return "0" + name
+                        elif "gemini-2.5" in name: return "1" + name
+                        elif "gemini-2.0" in name: return "2" + name
+                        else: return "9" + name
+                    simplified.sort(key=sort_key)
+                    return {"models": simplified, "total": len(simplified), "provider": "google"}
+                else:
+                    print(f"[get_models] Google API 返回 {response.status_code}: {response.text}")
+                    return {"error": f"Google API 返回 {response.status_code}", "models": [], "provider": "google"}
+
+        elif is_openai:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {API_KEY}"}
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    models = data.get("data", [])
+                    simplified = [{"id": m.get("id", ""), "name": m.get("id", "")} for m in models if m.get("id", "").startswith(("gpt-", "o1", "o3", "o4"))]
+                    simplified.sort(key=lambda x: x.get("id", ""))
+                    return {"models": simplified, "total": len(simplified), "provider": "openai"}
+            openai_models = [
+                {"id": "gpt-4.1", "name": "GPT-4.1"},
+                {"id": "gpt-4o", "name": "GPT-4o"},
+                {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+                {"id": "o3-mini", "name": "o3-mini"},
+            ]
+            return {"models": openai_models, "total": len(openai_models), "provider": "openai"}
+
+        else:
+            return {"models": [], "total": 0, "provider": "unknown", "note": "未识别的 API，请手动输入模型名"}
+
+    except Exception as e:
+        print(f"[get_models] 错误: {e}")
+        return {"error": str(e), "models": []}
+
+
+# ============================================================
+# 高级设置面板 API（/api/settings）
+# Dashboard 前端设置面板用，管理所有运行时可调配置
+# ============================================================
+
+def _mask_key(key_value: str) -> str:
+    """API Key 打码：只露前5位和后4位"""
+    if not key_value:
+        return ""
+    if len(key_value) < 10:
+        return "****"
+    return key_value[:5] + "****" + key_value[-4:]
+
+
+def _is_masked(value: str) -> bool:
+    """判断值是否是打码值（用户没改过）"""
+    return "****" in str(value)
+
+
+def _parse_bool(val, fallback=False) -> bool:
+    """解析布尔值（兼容字符串/布尔/None）"""
+    if val is None:
+        return fallback
+    if isinstance(val, bool):
+        return val
+    return str(val).lower() in ("true", "1", "yes")
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """获取高级设置（数据库优先，fallback 到环境变量/运行时默认值）"""
+    try:
+        db = await get_all_gateway_config()
+
+        # --- 基础连接 ---
+        api_key_raw = db.get("API_KEY") or API_KEY
+        embedding_key_raw = db.get("EMBEDDING_API_KEY") or _db_module.EMBEDDING_API_KEY
+
+        settings = {
+            # 基础连接
+            "API_BASE_URL":     db.get("API_BASE_URL") or str(API_BASE_URL),
+            "API_KEY":          _mask_key(api_key_raw),
+            "DEFAULT_MODEL":    db.get("DEFAULT_MODEL") or str(DEFAULT_MODEL),
+
+            # 记忆系统
+            "MEMORY_ENABLED":          _parse_bool(db.get("MEMORY_ENABLED"), MEMORY_ENABLED),
+            "MEMORY_MODEL":            db.get("MEMORY_MODEL") or os.environ.get("MEMORY_MODEL", ""),
+            "MAX_MEMORIES_INJECT":     int(db.get("MAX_MEMORIES_INJECT") or MAX_MEMORIES_INJECT),
+            "MIN_SCORE_THRESHOLD":     float(db.get("MIN_SCORE_THRESHOLD") or _db_module.MIN_SCORE_THRESHOLD),
+            "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
+
+            # 缓存分区
+            "CACHE_PARTITION_ENABLED": _parse_bool(db.get("CACHE_PARTITION_ENABLED"), CACHE_PARTITION_ENABLED),
+            "CACHE_PARTITION_X":       int(db.get("CACHE_PARTITION_X") or CACHE_PARTITION_X),
+            "CACHE_SUMMARY_MODEL":     db.get("CACHE_SUMMARY_MODEL") or str(CACHE_SUMMARY_MODEL),
+
+            # 向量搜索（开源版用 EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
+            "MEMORY_VECTOR_ENABLED":   _parse_bool(db.get("MEMORY_VECTOR_ENABLED"), _db_module.MEMORY_VECTOR_ENABLED),
+            "EMBEDDING_API_KEY":       _mask_key(embedding_key_raw),
+            "EMBEDDING_BASE_URL":      db.get("EMBEDDING_BASE_URL") or str(_db_module.EMBEDDING_BASE_URL),
+            "EMBEDDING_MODEL":         db.get("EMBEDDING_MODEL") or str(_db_module.EMBEDDING_MODEL),
+            "EMBEDDING_DIM":           int(db.get("EMBEDDING_DIM") or _db_module.EMBEDDING_DIM),
+
+            # 搜索权重
+            "MEMORY_HW_KEYWORD":        float(db.get("MEMORY_HW_KEYWORD") or _db_module.MEMORY_HW_KEYWORD),
+            "MEMORY_HW_SEMANTIC":       float(db.get("MEMORY_HW_SEMANTIC") or _db_module.MEMORY_HW_SEMANTIC),
+            "MEMORY_HW_IMPORTANCE":     float(db.get("MEMORY_HW_IMPORTANCE") or _db_module.MEMORY_HW_IMPORTANCE),
+            "MEMORY_HW_RECENCY":        float(db.get("MEMORY_HW_RECENCY") or _db_module.MEMORY_HW_RECENCY),
+            "MEMORY_SEMANTIC_THRESHOLD": float(db.get("MEMORY_SEMANTIC_THRESHOLD") or _db_module.MEMORY_SEMANTIC_THRESHOLD),
+
+            # 其他
+            "FORCE_STREAM":       _parse_bool(db.get("FORCE_STREAM"), FORCE_STREAM),
+            "REASONING_EFFORT":   db.get("REASONING_EFFORT") or str(REASONING_EFFORT),
+
+            # System Prompt
+            "systemPrompt": db.get("systemPrompt") or _DEFAULT_SYSTEM_PROMPT or "",
+        }
+
+        return {"status": "ok", "settings": settings}
+    except Exception as e:
+        print(f"[get_settings] 错误: {e}")
+        return {"error": str(e)}
+
+
+@app.put("/api/settings")
+async def save_settings(request: Request):
+    """保存高级设置（写入数据库 + 热更新运行时变量，立即生效无需重启）"""
+    try:
+        data = await request.json()
+        updated = []
+        skipped = []
+
+        # main.py 全局变量映射（key → 类型转换函数）
+        _MAIN_VARS = {
+            "API_BASE_URL":          str,
+            "API_KEY":               str,
+            "DEFAULT_MODEL":         str,
+            "MEMORY_ENABLED":        lambda v: _parse_bool(v),
+            "MAX_MEMORIES_INJECT":   int,
+            "MEMORY_EXTRACT_INTERVAL": int,
+            "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
+            "CACHE_PARTITION_X":     int,
+            "CACHE_SUMMARY_MODEL":   str,
+            "FORCE_STREAM":          lambda v: _parse_bool(v),
+            "REASONING_EFFORT":      str,
+        }
+
+        # database.py 全局变量映射（开源版用 EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
+        _DB_VARS = {
+            "EMBEDDING_API_KEY":       str,
+            "EMBEDDING_BASE_URL":      str,
+            "EMBEDDING_MODEL":         str,
+            "EMBEDDING_DIM":           int,
+            "MIN_SCORE_THRESHOLD":     float,
+            "MEMORY_VECTOR_ENABLED":   lambda v: _parse_bool(v),
+            "MEMORY_HW_KEYWORD":       float,
+            "MEMORY_HW_SEMANTIC":      float,
+            "MEMORY_HW_IMPORTANCE":    float,
+            "MEMORY_HW_RECENCY":       float,
+            "MEMORY_SEMANTIC_THRESHOLD": float,
+        }
+
+        # 只存 os.environ 的变量
+        _ENV_ONLY = {"MEMORY_MODEL": str}
+
+        # 打码字段
+        _MASKED_KEYS = {"API_KEY", "EMBEDDING_API_KEY"}
+
+        for key, value in data.items():
+            # --- 打码字段特殊处理 ---
+            if key in _MASKED_KEYS:
+                str_val = str(value).strip()
+                if _is_masked(str_val):
+                    skipped.append(key)
+                    continue
+                if not str_val:
+                    await set_gateway_config(key, "")
+                    if key in _MAIN_VARS:
+                        globals()[key] = ""
+                    elif key in _DB_VARS:
+                        setattr(_db_module, key, "")
+                    os.environ[key] = ""
+                    updated.append(key)
+                    continue
+
+            # --- systemPrompt 特殊处理 ---
+            if key == "systemPrompt":
+                await set_gateway_config("systemPrompt", str(value))
+                invalidate_system_prompt_cache()
+                updated.append("systemPrompt")
+                print(f"[settings] systemPrompt 已更新（{len(str(value))} 字）")
+                continue
+
+            # --- 常规字段 ---
+            await set_gateway_config(key, str(value))
+
+            if key in _MAIN_VARS:
+                typed_value = _MAIN_VARS[key](value)
+                globals()[key] = typed_value
+                os.environ[key] = str(value)
+                updated.append(key)
+                print(f"[settings] {key} = {typed_value}")
+
+            elif key in _DB_VARS:
+                typed_value = _DB_VARS[key](value)
+                setattr(_db_module, key, typed_value)
+                os.environ[key] = str(value)
+                updated.append(key)
+                print(f"[settings] {key} = {typed_value} (database)")
+
+            elif key in _ENV_ONLY:
+                typed_value = _ENV_ONLY[key](value)
+                os.environ[key] = str(typed_value)
+                updated.append(key)
+                print(f"[settings] {key} = {typed_value} (env)")
+
+            else:
+                skipped.append(key)
+
+        return {
+            "status": "ok",
+            "updated": updated,
+            "skipped": skipped,
+            "message": f"已更新 {len(updated)} 项配置，立即生效"
+        }
+    except Exception as e:
+        print(f"[save_settings] 错误: {e}")
+        return {"error": str(e)}
 
 
 # ============================================================
