@@ -73,7 +73,15 @@ CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
 CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "")  # 留空=不生成摘要，轮转时A区直接滑出（纯轮转模式）
 CACHE_PARTITION_TRIGGER = os.getenv("CACHE_PARTITION_TRIGGER", "rounds")  # rounds=按轮次 | time=按时间窗口
 CACHE_PARTITION_WINDOW = int(os.getenv("CACHE_PARTITION_WINDOW", "30"))  # 时间窗口（分钟），仅 trigger=time 时生效
+CACHE_TTL = os.getenv("CACHE_TTL", "5m")  # 缓存TTL：5m(默认) | 1h。1h写入费2x(5m是1.25x)读都0.1x，消息间隔常超5分钟的慢聊场景1h更划算
 PARTITION_SESSION_ID = os.getenv("PARTITION_SESSION_ID", "")
+
+
+def make_cache_control() -> dict:
+    """构造cache_control块。CACHE_TTL=1h时显式带ttl字段，其余值不带（上游默认5m）"""
+    if CACHE_TTL == "1h":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
 
 def get_active_session_id() -> str:
     return PARTITION_SESSION_ID
@@ -185,6 +193,7 @@ async def lifespan(app: FastAPI):
                         "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
                         "CACHE_PARTITION_X": int, "CACHE_PARTITION_TRIGGER": str,
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
+                        "CACHE_TTL": str,
                         "FORCE_STREAM": lambda v: _parse_bool(v),
                         "REASONING_EFFORT": str,
                     }
@@ -599,7 +608,7 @@ def _apply_breakpoint(msg: dict) -> bool:
     
     # content 是纯字符串
     if isinstance(content, str) and content.strip():
-        msg['content'] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        msg['content'] = [{"type": "text", "text": content, "cache_control": make_cache_control()}]
         return True
     
     # content 是 block 数组（多模态消息）
@@ -608,7 +617,7 @@ def _apply_breakpoint(msg: dict) -> bool:
         for i in range(len(content) - 1, -1, -1):
             block = content[i]
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
-                block["cache_control"] = {"type": "ephemeral"}
+                block["cache_control"] = make_cache_control()
                 return True
     
     return False
@@ -713,7 +722,7 @@ async def build_partitioned_messages(
     if base_prompt:
         result.append({
             "role": "system",
-            "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
+            "content": [{"type": "text", "text": base_prompt, "cache_control": make_cache_control()}]
         })
     
     # 摘要区（多block，尾部追加模式）
@@ -722,7 +731,7 @@ async def build_partitioned_messages(
         for i, part in enumerate(summary_parts):
             item = {"type": "text", "text": part}
             if i == len(summary_parts) - 1:
-                item["cache_control"] = {"type": "ephemeral"}
+                item["cache_control"] = make_cache_control()
             blocks.append(item)
         result.append({"role": "user", "content": blocks})
         result.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
@@ -794,7 +803,7 @@ async def _build_basic_cached(
     if base_prompt:
         result.append({
             "role": "system",
-            "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
+            "content": [{"type": "text", "text": base_prompt, "cache_control": make_cache_control()}]
         })
 
     # 新建/继承的对话线在历史不足 X 轮时也必须读到继承摘要。
@@ -804,7 +813,7 @@ async def _build_basic_cached(
         for i, part in enumerate(summary_parts):
             item = {"type": "text", "text": part}
             if i == len(summary_parts) - 1:
-                item["cache_control"] = {"type": "ephemeral"}
+                item["cache_control"] = make_cache_control()
             blocks.append(item)
         result.append({"role": "user", "content": blocks})
         result.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
@@ -2574,6 +2583,7 @@ async def get_settings():
             "CACHE_PARTITION_TRIGGER": db.get("CACHE_PARTITION_TRIGGER") or CACHE_PARTITION_TRIGGER,
             "CACHE_PARTITION_WINDOW":  int(db.get("CACHE_PARTITION_WINDOW") or CACHE_PARTITION_WINDOW),
             "CACHE_SUMMARY_MODEL":     db.get("CACHE_SUMMARY_MODEL") or str(CACHE_SUMMARY_MODEL),
+            "CACHE_TTL":               db.get("CACHE_TTL") or str(CACHE_TTL),
 
             # 向量搜索（开源版用 EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
             "MEMORY_VECTOR_ENABLED":   _parse_bool(db.get("MEMORY_VECTOR_ENABLED"), _db_module.MEMORY_VECTOR_ENABLED),
@@ -2625,6 +2635,7 @@ async def save_settings(request: Request):
             "CACHE_PARTITION_TRIGGER": str,
             "CACHE_PARTITION_WINDOW": int,
             "CACHE_SUMMARY_MODEL":   str,
+            "CACHE_TTL":             str,
             "FORCE_STREAM":          lambda v: _parse_bool(v),
             "REASONING_EFFORT":      str,
         }
