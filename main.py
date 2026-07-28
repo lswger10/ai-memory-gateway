@@ -20,7 +20,7 @@ import secrets
 import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -85,6 +85,55 @@ def make_cache_control() -> dict:
 
 def get_active_session_id() -> str:
     return PARTITION_SESSION_ID
+
+
+GATEWAY_SESSION_HEADER = "X-Gateway-Session-ID"
+GATEWAY_REQUEST_HEADER = "X-Gateway-Request-ID"
+LEGACY_TIDAL_SESSION_ID = "legacy-main"
+INTERNAL_UPSTREAM_FIELDS = frozenset(
+    {
+        "window_id",
+        "request_id",
+        "session_id",
+        "gateway_session_id",
+        "gateway_request_id",
+        "source_session",
+        "provenance",
+    }
+)
+
+
+def resolve_gateway_request_identity(headers) -> tuple[str | None, str | None]:
+    raw_session_id = str(headers.get(GATEWAY_SESSION_HEADER, "") or "").strip()
+    raw_request_id = str(headers.get(GATEWAY_REQUEST_HEADER, "") or "").strip()
+
+    if not raw_session_id and not raw_request_id:
+        return None, None
+    if not raw_session_id or not raw_request_id:
+        raise HTTPException(
+            status_code=400,
+            detail="gateway session and request headers must be provided together",
+        )
+
+    if raw_session_id == LEGACY_TIDAL_SESSION_ID:
+        session_id = raw_session_id
+    else:
+        try:
+            session_id = str(uuid.UUID(raw_session_id))
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(status_code=400, detail="invalid gateway session id")
+
+    try:
+        request_id = str(uuid.UUID(raw_request_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="invalid gateway request id")
+    return session_id, request_id
+
+
+def strip_internal_upstream_fields(body: dict) -> dict:
+    for field in INTERNAL_UPSTREAM_FIELDS:
+        body.pop(field, None)
+    return body
 
 # 时区偏移（小时），用于记忆注入时的日期显示，默认 UTC+8
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
@@ -897,7 +946,7 @@ async def build_memory_text(user_message: str) -> str:
 # 后台记忆处理
 # ============================================================
 
-async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None):
+async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None, request_id: str | None = None):
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
@@ -1037,6 +1086,10 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 content=mem["content"],
                 importance=mem["importance"],
                 source_session=session_id,
+                provenance={
+                    "source_type": "chat_extraction",
+                    "request_id": request_id,
+                },
             )
         
         if filtered_memories:
@@ -1099,6 +1152,8 @@ async def chat_completions(request: Request):
     
     try:
         return await _chat_completions_inner(request)
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1109,7 +1164,10 @@ async def chat_completions(request: Request):
 
 
 async def _chat_completions_inner(request: Request):
-    body = await request.json()
+    tidal_session_id, request_id = resolve_gateway_request_identity(
+        request.headers
+    )
+    body = strip_internal_upstream_fields(await request.json())
     messages = body.get("messages", [])
     
     # ---------- 检测是否应跳过对话存储 ----------
@@ -1144,11 +1202,11 @@ async def _chat_completions_inner(request: Request):
         print(f"🔧 检测到 {len(tool_messages)} 条工具结果消息")
     
     # ---------- 生成 session ID ----------
-    session_id = str(uuid.uuid4())[:8]
+    session_id = tidal_session_id or str(uuid.uuid4())[:8]
     
     # ---------- 分区缓存模式 ----------
     if CACHE_PARTITION_ENABLED and not skip_conversation_log:
-        active_sid = get_active_session_id()
+        active_sid = None if tidal_session_id else get_active_session_id()
         if active_sid:
             session_id = active_sid
         
@@ -1304,7 +1362,7 @@ async def _chat_completions_inner(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, request_id=request_id),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -1334,7 +1392,7 @@ async def _chat_completions_inner(request: Request):
                         process_memories_background(session_id, user_message, assistant_msg, model, 
                                                     context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                                     tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                                    assistant_reasoning=assistant_reasoning)
+                                                    assistant_reasoning=assistant_reasoning, request_id=request_id)
                     )
                 
                 return JSONResponse(status_code=200, content=resp_data)
@@ -1346,7 +1404,7 @@ async def _chat_completions_inner(request: Request):
                 return JSONResponse(status_code=response.status_code, content=error_content)
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, request_id: str | None = None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -1449,7 +1507,7 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             process_memories_background(session_id, user_message, assistant_msg, model, 
                                         context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                         tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning)
+                                        assistant_reasoning=assistant_reasoning, request_id=request_id)
         )
 
 

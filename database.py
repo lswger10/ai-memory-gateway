@@ -9,6 +9,7 @@
 
 import os
 import re
+import json
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -95,9 +96,23 @@ async def init_tables():
                 content         TEXT NOT NULL,
                 importance      INTEGER DEFAULT 5,
                 source_session  TEXT,
+                provenance      JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at      TIMESTAMPTZ DEFAULT NOW(),
                 last_accessed   TIMESTAMPTZ DEFAULT NOW()
             );
+        """)
+
+        # Existing memories keep an empty provenance object; no source is inferred.
+        await conn.execute("""
+            ALTER TABLE memories
+                ADD COLUMN IF NOT EXISTS provenance JSONB;
+            UPDATE memories
+                SET provenance = '{}'::jsonb
+                WHERE provenance IS NULL;
+            ALTER TABLE memories
+                ALTER COLUMN provenance SET DEFAULT '{}'::jsonb;
+            ALTER TABLE memories
+                ALTER COLUMN provenance SET NOT NULL;
         """)
         
         await conn.execute("""
@@ -599,12 +614,22 @@ async def delete_single_message(message_id: int):
 # 记忆操作
 # ============================================================
 
-async def save_memory(content: str, importance: int = 5, source_session: str = ""):
+async def save_memory(
+    content: str,
+    importance: int = 5,
+    source_session: str = "",
+    provenance: dict | None = None,
+):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO memories (content, importance, source_session) VALUES ($1, $2, $3) RETURNING id",
-            content, importance, source_session,
+            "INSERT INTO memories "
+            "(content, importance, source_session, provenance) "
+            "VALUES ($1, $2, $3, $4::jsonb) RETURNING id",
+            content,
+            importance,
+            source_session,
+            json.dumps(provenance or {}, ensure_ascii=False),
         )
         
         # MEMORY_VECTOR_ENABLED 时自动计算 embedding
