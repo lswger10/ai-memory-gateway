@@ -207,6 +207,31 @@ class GatewayRequestIdentityContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Gateway-Session-ID", upstream_call["headers"])
         self.assertNotIn("X-Gateway-Request-ID", upstream_call["headers"])
 
+    async def test_multimodal_content_survives_gateway_upstream_forwarding(self):
+        image_block = {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,cG5nZGF0YQ=="},
+        }
+        body = dict(self.body)
+        body["messages"] = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect this image"},
+                    image_block,
+                ],
+            }
+        ]
+
+        await self.invoke(self.tidal_headers(), body)
+
+        upstream_call = RecordingAsyncClient.calls[-1]
+        user_message = upstream_call["json"]["messages"][-1]
+        self.assertEqual("user", user_message["role"])
+        self.assertIn(image_block, user_message["content"])
+        self.assertNotIn("window_id", upstream_call["json"])
+        self.assertNotIn("request_id", upstream_call["json"])
+
 
 class LongTermMemoryContractTests(unittest.IsolatedAsyncioTestCase):
     def test_memory_storage_accepts_provenance_metadata(self):
