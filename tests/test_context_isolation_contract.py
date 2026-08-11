@@ -238,14 +238,32 @@ class LongTermMemoryContractTests(unittest.IsolatedAsyncioTestCase):
         session_id = str(uuid.uuid4())
         request_id = str(uuid.uuid4())
         save_memory = AsyncMock()
+        persisted_rows = [
+            {"id": 1, "role": "user", "content": "hello", "metadata": None},
+            {"id": 2, "role": "assistant", "content": "answer", "metadata": None},
+        ]
 
         with (
             patch.object(gateway, "MEMORY_EXTRACT_ENABLED", True),
             patch.object(gateway, "MEMORY_EXTRACT_INTERVAL", 1),
-            patch.dict(gateway._memory_extraction_pending, {}, clear=True),
             patch.dict(gateway._memory_extraction_locks, {}, clear=True),
             patch.object(gateway, "get_last_user_content", AsyncMock(return_value="")),
-            patch.object(gateway, "save_message", AsyncMock()),
+            patch.object(gateway, "save_message", AsyncMock(side_effect=[1, 2])),
+            patch.object(
+                gateway,
+                "ensure_memory_extraction_cursor",
+                AsyncMock(return_value=0),
+            ),
+            patch.object(
+                gateway,
+                "get_memory_extraction_messages",
+                AsyncMock(return_value=persisted_rows),
+            ),
+            patch.object(
+                gateway,
+                "save_memory_extraction_cursor",
+                AsyncMock(),
+            ),
             patch.object(gateway, "get_recent_memories", AsyncMock(return_value=[])),
             patch.object(
                 gateway,

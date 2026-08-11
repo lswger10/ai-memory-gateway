@@ -160,6 +160,16 @@ async def init_tables():
                 updated_at      TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+
+        # 每个 session 的记忆提取游标。未处理消息仍以 conversations 为唯一来源，
+        # 此表只记录已经消费到哪一条消息，不复制对话内容。
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_extraction_state (
+                session_id                  TEXT PRIMARY KEY,
+                last_processed_message_id   BIGINT NOT NULL DEFAULT 0,
+                updated_at                  TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
         
         # ---- 三层记忆架构字段（layer / title / is_active / merged_from / event_date）----
         # layer: 1=原始碎片, 2=事件记忆, 3=核心记忆
@@ -471,8 +481,8 @@ def _min_max_normalize(scores: dict) -> dict:
 async def save_message(session_id: str, role: str, content: str, model: str = "", metadata: str = None):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO conversations (session_id, role, content, model, metadata) VALUES ($1, $2, $3, $4, $5)",
+        return await conn.fetchval(
+            "INSERT INTO conversations (session_id, role, content, model, metadata) VALUES ($1, $2, $3, $4, $5) RETURNING id",
             session_id, role, content, model, metadata,
         )
 
@@ -505,8 +515,8 @@ async def update_last_assistant_message(session_id: str, new_content: str, model
                 "UPDATE conversations SET content = $1, model = $2 WHERE id = $3",
                 new_content, model, row['id']
             )
-            return True
-        return False
+            return row['id']
+        return None
 
 
 async def get_recent_messages(session_id: str, limit: int = 20):
@@ -1109,6 +1119,70 @@ async def get_conversation_messages(session_id: str, limit: int = 100):
             LIMIT $2
         """, session_id, limit)
         return [dict(r) for r in rows]
+
+
+# ============================================================
+# 记忆提取进度（消息内容仍只存于 conversations）
+# ============================================================
+
+async def ensure_memory_extraction_cursor(session_id: str) -> int:
+    """返回 session 游标；首次升级时以已有历史末尾作为安全基线。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        inserted = await conn.fetchrow("""
+            INSERT INTO memory_extraction_state (
+                session_id, last_processed_message_id, updated_at
+            )
+            SELECT $1, COALESCE(MAX(id), 0), NOW()
+            FROM conversations
+            WHERE session_id = $1
+            ON CONFLICT (session_id) DO NOTHING
+            RETURNING last_processed_message_id
+        """, session_id)
+        if inserted:
+            return int(inserted['last_processed_message_id'] or 0)
+        value = await conn.fetchval(
+            "SELECT last_processed_message_id FROM memory_extraction_state WHERE session_id = $1",
+            session_id,
+        )
+        return int(value or 0)
+
+
+async def get_memory_extraction_messages(
+    session_id: str,
+    after_id: int,
+    through_id: int,
+) -> list:
+    """读取游标之后、当前请求末尾之前的持久化消息。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, role, content, metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND id > $2
+              AND id <= $3
+            ORDER BY id ASC
+        """, session_id, after_id, through_id)
+        return [dict(row) for row in rows]
+
+
+async def save_memory_extraction_cursor(session_id: str, message_id: int):
+    """单调推进游标，防止并发或迟到任务把进度倒退。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO memory_extraction_state (
+                session_id, last_processed_message_id, updated_at
+            )
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (session_id) DO UPDATE
+            SET last_processed_message_id = GREATEST(
+                    memory_extraction_state.last_processed_message_id,
+                    EXCLUDED.last_processed_message_id
+                ),
+                updated_at = NOW()
+        """, session_id, message_id)
 
 
 # ============================================================

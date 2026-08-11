@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
 
@@ -139,9 +139,7 @@ def strip_internal_upstream_fields(body: dict) -> dict:
 # 时区偏移（小时），用于记忆注入时的日期显示，默认 UTC+8
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
-# 每个 session 各自积累尚未提取的完整对话轮次。显式记忆请求会立即
-# 处理该 session 当前积累并清空，后续 interval 批次不会重复发送这些内容。
-_memory_extraction_pending: dict[str, list[list[dict]]] = {}
+# 锁只协调当前进程中的并发；真正的提取进度由 PostgreSQL 游标持久化。
 _memory_extraction_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -151,6 +149,32 @@ def _get_memory_extraction_lock(session_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _memory_extraction_locks[session_id] = lock
     return lock
+
+
+def _build_memory_extraction_rounds(rows: list[dict]) -> tuple[list[list[dict]], int]:
+    """从持久化消息重建完整的 user/assistant 轮次及最后消费的消息 ID。"""
+    rounds = []
+    pending_user = None
+    last_message_id = 0
+    for row in rows:
+        role = row.get("role")
+        if role == "user":
+            pending_user = {
+                "role": "user",
+                "content": row.get("content") or "",
+            }
+            continue
+        if role == "assistant" and pending_user is not None:
+            rounds.append([
+                pending_user,
+                {
+                    "role": "assistant",
+                    "content": row.get("content") or "",
+                },
+            ])
+            last_message_id = int(row.get("id") or 0)
+            pending_user = None
+    return rounds, last_message_id
 
 # 强制流式传输（部分客户端不发stream=true导致thinking数据丢失，开启后强制所有请求走流式）
 FORCE_STREAM = os.getenv("FORCE_STREAM", "false").lower() == "true"
@@ -965,11 +989,12 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     - 0: 禁用自动批量提取（显式记忆请求仍立即处理）
     - 1: 每轮提取（默认）
     - N: 每个 session 各自每 N 轮提取一次
-    显式处理过的轮次会从该 session 的待处理批次移除，不会在下一批重复发送。
+    每个 session 只持久化最后处理的 conversation message ID；未处理轮次在需要时
+    从 conversations 重建。显式处理后推进同一游标，不会在下一批重复发送。
     对话记录始终保存，不受间隔影响（除非 skip_conversation_log=True）。
     
-    context_messages: 为兼容现有调用保留。提取上下文由该 session 尚未处理的
-                      新轮次组成，避免旧内容在后续 interval 中重复发送。
+    context_messages: 为兼容现有调用保留。提取上下文由该 session 游标之后尚未
+                      处理的持久化轮次组成，避免旧内容在后续 interval 中重复发送。
     skip_conversation_log: 跳过对话存储（标题生成等辅助请求时使用）
     tool_messages: 客户端发来的工具结果消息列表
     assistant_tool_calls: response中assistant的工具调用列表（如果有）
@@ -981,6 +1006,12 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
               f"assistant_tool_calls={len(assistant_tool_calls) if assistant_tool_calls else 0}, skip={skip_conversation_log}")
         if tool_messages:
             print(f"💾 tool详情: {[{'role': m.get('role'), 'tool_call_id': m.get('tool_call_id', '?')} for m in tool_messages]}")
+
+        conversation_end_id = None
+        if not skip_conversation_log:
+            # 必须在写入本轮消息前建立迁移基线。这样首次升级不会把所有旧历史
+            # 当成待处理内容，而游标已存在的 session 在重启后仍会保留旧进度。
+            await ensure_memory_extraction_cursor(session_id)
         
         # 1. 存储对话记录（除非明确跳过）
         if skip_conversation_log:
@@ -994,7 +1025,9 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 if tm.get("name"):
                     meta_dict["name"] = tm["name"]
                 meta = json.dumps(meta_dict) if meta_dict else None
-                await save_message(session_id, "tool", tm.get("content", ""), model, metadata=meta)
+                conversation_end_id = await save_message(
+                    session_id, "tool", tm.get("content", ""), model, metadata=meta
+                )
             
             if assistant_msg or assistant_tool_calls:
                 ast_meta_dict = {}
@@ -1003,7 +1036,9 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 if assistant_reasoning:
                     ast_meta_dict["reasoning_content"] = assistant_reasoning
                 ast_meta = json.dumps(ast_meta_dict) if ast_meta_dict else None
-                await save_message(session_id, "assistant", assistant_msg or "", model, metadata=ast_meta)
+                conversation_end_id = await save_message(
+                    session_id, "assistant", assistant_msg or "", model, metadata=ast_meta
+                )
                 print(f"🔧 存储: {len(tool_messages)}条tool + 1条assistant" + (" (含tool_calls)" if assistant_tool_calls else "") + (" (含reasoning)" if assistant_reasoning else ""))
         else:
             # 普通对话或首次工具调用
@@ -1017,26 +1052,35 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             if assistant_tool_calls:
                 # 首次工具调用：assistant回复包含tool_calls，存user + assistant(tool_calls)
                 await save_message(session_id, "user", user_msg, model)
-                await save_message(session_id, "assistant", assistant_msg or "", model, metadata=assistant_meta)
+                conversation_end_id = await save_message(
+                    session_id, "assistant", assistant_msg or "", model, metadata=assistant_meta
+                )
                 print(f"🔧 存储: user + assistant (含{len(assistant_tool_calls)}个tool_calls)" + (" (含reasoning)" if assistant_reasoning else ""))
             else:
                 # 纯文字对话：re-roll检测 + 存user + assistant
                 last_user = await get_last_user_content(session_id)
                 if last_user and last_user.strip() == user_msg.strip():
-                    updated = await update_last_assistant_message(session_id, assistant_msg, model)
-                    if updated:
+                    conversation_end_id = await update_last_assistant_message(
+                        session_id, assistant_msg, model
+                    )
+                    if conversation_end_id:
                         print(f"🔄 检测到re-roll，已覆盖最后一条assistant回复")
                     else:
                         await save_message(session_id, "user", user_msg, model)
-                        await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
+                        conversation_end_id = await save_message(
+                            session_id, "assistant", assistant_msg, model, metadata=assistant_meta
+                        )
                 else:
                     await save_message(session_id, "user", user_msg, model)
-                    await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
+                    conversation_end_id = await save_message(
+                        session_id, "assistant", assistant_msg, model, metadata=assistant_meta
+                    )
         
         # 2. 检查是否需要提取记忆
         if not MEMORY_EXTRACT_ENABLED:
             print(f"⏭️  记忆提取已关闭（MEMORY_EXTRACT_ENABLED=false）")
-            _memory_extraction_pending.pop(session_id, None)
+            if conversation_end_id:
+                await save_memory_extraction_cursor(session_id, conversation_end_id)
             return
 
         # 标题生成、tool continuation 等不是新的用户对话轮次，不能推进 interval。
@@ -1047,19 +1091,30 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         explicit_request = is_explicit_memory_request(user_msg)
         interval = max(0, MEMORY_EXTRACT_INTERVAL)
         if interval == 0 and not explicit_request:
-            _memory_extraction_pending.pop(session_id, None)
+            if conversation_end_id:
+                await save_memory_extraction_cursor(session_id, conversation_end_id)
             print("⏭️  记忆自动批量提取已禁用；本轮不是显式记忆请求")
             return
 
-        current_round = [
-            {"role": "user", "content": user_msg},
-            {"role": "assistant", "content": assistant_msg or ""},
-        ]
+        if not conversation_end_id:
+            print("⏭️  本轮没有新的持久化 assistant 消息，不推进记忆提取间隔")
+            return
+
         lock = _get_memory_extraction_lock(session_id)
         async with lock:
-            pending_rounds = _memory_extraction_pending.setdefault(session_id, [])
-            pending_rounds.append(current_round)
+            cursor = await ensure_memory_extraction_cursor(session_id)
+            persisted_messages = await get_memory_extraction_messages(
+                session_id,
+                cursor,
+                conversation_end_id,
+            )
+            pending_rounds, batch_end_id = _build_memory_extraction_rounds(
+                persisted_messages
+            )
             pending_count = len(pending_rounds)
+            if pending_count == 0:
+                print("⏭️  游标之后没有完整的新 user/assistant 轮次")
+                return
             should_extract = explicit_request or (interval > 0 and pending_count >= interval)
             if not should_extract:
                 print(
@@ -1085,9 +1140,6 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 messages_for_extraction,
                 existing_memories=existing_contents,
             )
-            # 提取调用完成即消费该批次。即使没有产生新记忆，也不能在下一批
-            # 再次为相同文本花费 token。
-            _memory_extraction_pending.pop(session_id, None)
 
             # 同一个 session 在完成保存前继续持锁，避免紧邻的显式请求在
             # 已有记忆尚未可见时再次提取出语义重复内容。
@@ -1119,6 +1171,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                         "batch_rounds": pending_count,
                     },
                 )
+
+            # 只有提取和保存流程完成后才推进。提取失败会保留旧游标，下一次
+            # 请求或进程重启后可从 conversations 重新构建同一批；已保存部分
+            # 仍由现有语义去重保护。
+            await save_memory_extraction_cursor(session_id, batch_end_id)
 
             if filtered_memories:
                 total = await get_all_memories_count()
