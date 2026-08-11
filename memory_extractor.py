@@ -9,6 +9,7 @@ v2.3 改进：提取时注入已有记忆，让模型对比后只提取全新信
 
 import os
 import json
+import re
 import httpx
 from typing import List, Dict
 
@@ -24,6 +25,58 @@ MEMORY_MODEL = os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4")
 
 def get_memory_api_key() -> str:
     return MEMORY_API_KEY or API_KEY
+
+
+_EXPLICIT_MEMORY_NEGATION_RE = re.compile(
+    r"(?:不要|别|不用|无需|禁止)(?:再|去|帮我|把|将)?(?:记住|记下|记录|保存|存入|写入)"
+    r"|(?:do\s+not|don't|never)\s+(?:remember|save|store|memorize)",
+    re.IGNORECASE,
+)
+
+_EXPLICIT_MEMORY_REQUEST_RES = (
+    # Verb first: "请记住：我的猫叫豆豆". Requiring an imperative-shaped
+    # prefix avoids treating questions such as "你能记住多少？" as commands.
+    re.compile(
+        r"^\s*(?:请|麻烦你?|务必|一定要|帮我|你要)?\s*"
+        r"(?:记住|记下来|记录下来)\s*[：:,，]?\s*\S.{1,}$"
+    ),
+    # Object first: "请把 X 保存为长期记忆". A memory destination is
+    # mandatory, so ordinary file-save requests do not match.
+    re.compile(
+        r"(?:^|[。！？；\n])\s*(?:请|麻烦你?|务必|帮我)?\s*(?:把|将)\s*\S.+?"
+        r"(?:记住|记下来|记录下来|保存(?:为|到|进)?|存入|写入)\s*"
+        r"(?:一条)?\s*(?:长期)?\s*(?:记忆|记忆库|记忆系统)(?:[。！？；]|$)"
+    ),
+    # Destination first: "保存为长期记忆：...".
+    re.compile(
+        r"^\s*(?:请|麻烦你?|务必|帮我)?\s*(?:保存|存入|写入)\s*"
+        r"(?:为|到|进)?\s*(?:一条)?\s*(?:长期)?\s*(?:记忆|记忆库|记忆系统)"
+        r"\s*[：:,，]\s*\S.+$"
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?remember\s+(?:that\s+)?"
+        r"(?!(?:how|what|whether|if|when|where|why|who)\b).+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:please\s+)?(?:save|store|commit)\s+.+?\s+"
+        r"(?:as|to|in)\s+(?:a\s+)?(?:long[- ]term\s+)?memor(?:y|ies)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def is_explicit_memory_request(text: str) -> bool:
+    """Return whether text is an explicit command to persist a memory.
+
+    This is only a high-precision scheduling gate. It never writes a memory:
+    the existing extraction model still decides what is worth storing and
+    compares it with existing memories for semantic deduplication.
+    """
+    normalized = " ".join(str(text or "").strip().split())
+    if not normalized or _EXPLICIT_MEMORY_NEGATION_RE.search(normalized):
+        return False
+    return any(pattern.search(normalized) for pattern in _EXPLICIT_MEMORY_REQUEST_RES)
 
 
 EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提取值得长期记住的关键信息。
@@ -46,6 +99,8 @@ EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提
 # 提取要求
 - 事件类记忆保留双方的关键原话，用引号标注是谁说的
 - 项目/技术进展只记要点（改了什么、解决了什么），不记调试过程
+- 如果用户明确要求“记住”或“保存为长期记忆”，优先提取用户要求保存的事实本身；
+  不要把“用户要求系统记住”这类操作描述写进记忆内容
 
 # 不要提取
 - 日常寒暄（"你好""在吗"）

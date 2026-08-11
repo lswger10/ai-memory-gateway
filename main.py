@@ -27,7 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
-from memory_extractor import extract_memories, score_memories
+from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -61,7 +61,8 @@ MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
 # 每次注入的最大记忆条数
 MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "15"))
 
-# 记忆提取间隔（0 = 禁用自动提取，1 = 每轮提取，N = 每 N 轮提取一次）
+# 自动记忆提取间隔（0 = 禁用自动批量，1 = 每轮，N = 每个 session 各自每 N 轮）
+# 用户显式要求保存为长期记忆时不受这个间隔限制。
 MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
 
 # 记忆提取+注入总开关（false时数据库仍连接、消息仍存储，但不提取也不注入记忆）
@@ -138,8 +139,18 @@ def strip_internal_upstream_fields(body: dict) -> dict:
 # 时区偏移（小时），用于记忆注入时的日期显示，默认 UTC+8
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
-# 轮次计数器
-_round_counter = 0
+# 每个 session 各自积累尚未提取的完整对话轮次。显式记忆请求会立即
+# 处理该 session 当前积累并清空，后续 interval 批次不会重复发送这些内容。
+_memory_extraction_pending: dict[str, list[list[dict]]] = {}
+_memory_extraction_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_memory_extraction_lock(session_id: str) -> asyncio.Lock:
+    lock = _memory_extraction_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _memory_extraction_locks[session_id] = lock
+    return lock
 
 # 强制流式传输（部分客户端不发stream=true导致thinking数据丢失，开启后强制所有请求走流式）
 FORCE_STREAM = os.getenv("FORCE_STREAM", "false").lower() == "true"
@@ -950,21 +961,20 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
-    记忆提取受 MEMORY_EXTRACT_INTERVAL 控制：
-    - 0: 禁用自动提取
+    记忆自动提取受 MEMORY_EXTRACT_INTERVAL 控制：
+    - 0: 禁用自动批量提取（显式记忆请求仍立即处理）
     - 1: 每轮提取（默认）
-    - N: 每 N 轮提取一次
+    - N: 每个 session 各自每 N 轮提取一次
+    显式处理过的轮次会从该 session 的待处理批次移除，不会在下一批重复发送。
     对话记录始终保存，不受间隔影响（除非 skip_conversation_log=True）。
     
-    context_messages: 客户端发来的原始对话上下文（不含system prompt），
-                      用于让提取模型从完整上下文中提取记忆。
+    context_messages: 为兼容现有调用保留。提取上下文由该 session 尚未处理的
+                      新轮次组成，避免旧内容在后续 interval 中重复发送。
     skip_conversation_log: 跳过对话存储（标题生成等辅助请求时使用）
     tool_messages: 客户端发来的工具结果消息列表
     assistant_tool_calls: response中assistant的工具调用列表（如果有）
     assistant_reasoning: response中assistant的reasoning_content（deepseek thinking mode）
     """
-    global _round_counter
-    
     try:
         # Debug: 打印存储分支判断依据
         print(f"💾 process_memories_background: user_msg={bool(user_msg)}, tool_messages={len(tool_messages) if tool_messages else 0}, "
@@ -1026,75 +1036,93 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         # 2. 检查是否需要提取记忆
         if not MEMORY_EXTRACT_ENABLED:
             print(f"⏭️  记忆提取已关闭（MEMORY_EXTRACT_ENABLED=false）")
+            _memory_extraction_pending.pop(session_id, None)
             return
-        
-        if MEMORY_EXTRACT_INTERVAL == 0:
-            print(f"⏭️  记忆自动提取已禁用，跳过")
+
+        # 标题生成、tool continuation 等不是新的用户对话轮次，不能推进 interval。
+        if skip_conversation_log or tool_messages or not str(user_msg or "").strip():
+            print("⏭️  非用户对话轮次，不推进记忆提取间隔")
             return
-        
-        _round_counter += 1
-        
-        if MEMORY_EXTRACT_INTERVAL > 1 and (_round_counter % MEMORY_EXTRACT_INTERVAL != 0):
-            print(f"⏭️  轮次 {_round_counter}，跳过记忆提取（每 {MEMORY_EXTRACT_INTERVAL} 轮提取一次）")
+
+        explicit_request = is_explicit_memory_request(user_msg)
+        interval = max(0, MEMORY_EXTRACT_INTERVAL)
+        if interval == 0 and not explicit_request:
+            _memory_extraction_pending.pop(session_id, None)
+            print("⏭️  记忆自动批量提取已禁用；本轮不是显式记忆请求")
             return
-        
-        if MEMORY_EXTRACT_INTERVAL > 1:
-            print(f"📝 轮次 {_round_counter}，执行记忆提取")
-        
-        # 3. 获取已有记忆，传给提取模型做对比去重
-        existing = await get_recent_memories(limit=80)
-        existing_contents = [r["content"] for r in existing]
-        
-        # 4. 构建用于提取的消息列表
-        #    截取最近 MEMORY_EXTRACT_INTERVAL 轮对话（每轮=user+assistant共2条）
-        #    而非发送完整上下文，省token
-        if context_messages:
-            # 截取最近N轮（interval×2条），加上最新的assistant回复
-            tail_count = MEMORY_EXTRACT_INTERVAL * 2
-            recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
-            messages_for_extraction = recent_msgs + [
-                {"role": "assistant", "content": assistant_msg}
-            ]
-            print(f"📝 截取最近 {MEMORY_EXTRACT_INTERVAL} 轮对话提取记忆（{len(messages_for_extraction)} 条消息）")
-        else:
-            messages_for_extraction = [
-                {"role": "user", "content": user_msg},
-                {"role": "assistant", "content": assistant_msg},
-            ]
-        
-        new_memories = await extract_memories(messages_for_extraction, existing_memories=existing_contents)
-        
-        # 过滤垃圾记忆（不靠模型自觉，硬过滤）
-        META_BLACKLIST = [
-            "记忆库", "记忆系统", "检索", "没有被记录", "没有被提取",
-            "记忆遗漏", "尚未被记录", "写入不完整", "检索功能",
-            "系统没有返回", "关键词匹配", "语义匹配", "语义检索",
-            "阈值", "数据库", "seed", "导入", "部署",
-            "bug", "debug", "端口", "网关",
+
+        current_round = [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": assistant_msg or ""},
         ]
-        
-        filtered_memories = []
-        for mem in new_memories:
-            content = mem["content"]
-            if any(kw in content for kw in META_BLACKLIST):
-                print(f"🚫 过滤掉meta记忆: {content[:60]}...")
-                continue
-            filtered_memories.append(mem)
-        
-        for mem in filtered_memories:
-            await save_memory(
-                content=mem["content"],
-                importance=mem["importance"],
-                source_session=session_id,
-                provenance={
-                    "source_type": "chat_extraction",
-                    "request_id": request_id,
-                },
+        lock = _get_memory_extraction_lock(session_id)
+        async with lock:
+            pending_rounds = _memory_extraction_pending.setdefault(session_id, [])
+            pending_rounds.append(current_round)
+            pending_count = len(pending_rounds)
+            should_extract = explicit_request or (interval > 0 and pending_count >= interval)
+            if not should_extract:
+                print(
+                    f"⏭️  session={session_id[:8]} 待提取 {pending_count}/{interval} 轮"
+                )
+                return
+
+            trigger = "explicit" if explicit_request else "interval"
+            messages_for_extraction = [
+                message
+                for round_messages in pending_rounds
+                for message in round_messages
+            ]
+            print(
+                f"📝 session={session_id[:8]} 触发={trigger}，处理 {pending_count} 轮 / "
+                f"{len(messages_for_extraction)} 条消息"
             )
-        
-        if filtered_memories:
-            total = await get_all_memories_count()
-            print(f"💾 已保存 {len(filtered_memories)} 条新记忆（过滤了 {len(new_memories) - len(filtered_memories)} 条），总计 {total} 条")
+
+            # 现有提取器负责判断是否值得保存，并与已有记忆做语义去重。
+            existing = await get_recent_memories(limit=80)
+            existing_contents = [r["content"] for r in existing]
+            new_memories = await extract_memories(
+                messages_for_extraction,
+                existing_memories=existing_contents,
+            )
+            # 提取调用完成即消费该批次。即使没有产生新记忆，也不能在下一批
+            # 再次为相同文本花费 token。
+            _memory_extraction_pending.pop(session_id, None)
+
+            # 同一个 session 在完成保存前继续持锁，避免紧邻的显式请求在
+            # 已有记忆尚未可见时再次提取出语义重复内容。
+            META_BLACKLIST = [
+                "记忆库", "记忆系统", "检索", "没有被记录", "没有被提取",
+                "记忆遗漏", "尚未被记录", "写入不完整", "检索功能",
+                "系统没有返回", "关键词匹配", "语义匹配", "语义检索",
+                "阈值", "数据库", "seed", "导入", "部署",
+                "bug", "debug", "端口", "网关",
+            ]
+
+            filtered_memories = []
+            for mem in new_memories:
+                content = mem["content"]
+                if any(kw in content for kw in META_BLACKLIST):
+                    print(f"🚫 过滤掉meta记忆: {content[:60]}...")
+                    continue
+                filtered_memories.append(mem)
+
+            for mem in filtered_memories:
+                await save_memory(
+                    content=mem["content"],
+                    importance=mem["importance"],
+                    source_session=session_id,
+                    provenance={
+                        "source_type": "chat_extraction",
+                        "request_id": request_id,
+                        "trigger": trigger,
+                        "batch_rounds": pending_count,
+                    },
+                )
+
+            if filtered_memories:
+                total = await get_all_memories_count()
+                print(f"💾 已保存 {len(filtered_memories)} 条新记忆（过滤了 {len(new_memories) - len(filtered_memories)} 条），总计 {total} 条")
             
     except Exception as e:
         print(f"⚠️  后台记忆处理失败: {e}")
@@ -2805,7 +2833,7 @@ if __name__ == "__main__":
     print(f"🧠 记忆系统：{'开启' if MEMORY_ENABLED else '关闭'}")
     if MEMORY_ENABLED:
         print(f"📝 记忆提取+注入：{'开启' if MEMORY_EXTRACT_ENABLED else '关闭'}")
-    print(f"🔄 记忆提取间隔：{'禁用' if MEMORY_EXTRACT_INTERVAL == 0 else '每轮提取' if MEMORY_EXTRACT_INTERVAL == 1 else f'每 {MEMORY_EXTRACT_INTERVAL} 轮提取一次'}")
+    print(f"🔄 记忆提取间隔：{'禁用自动批量（显式请求仍处理）' if MEMORY_EXTRACT_INTERVAL == 0 else '每轮提取' if MEMORY_EXTRACT_INTERVAL == 1 else f'每个 session 每 {MEMORY_EXTRACT_INTERVAL} 轮提取一次'}")
     if CACHE_PARTITION_ENABLED:
         print(f"🔒 分区缓存：开启 (X={CACHE_PARTITION_X}, session={PARTITION_SESSION_ID or '未设置'})")
     if FORCE_STREAM:

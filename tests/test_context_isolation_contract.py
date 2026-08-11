@@ -242,7 +242,8 @@ class LongTermMemoryContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(gateway, "MEMORY_EXTRACT_ENABLED", True),
             patch.object(gateway, "MEMORY_EXTRACT_INTERVAL", 1),
-            patch.object(gateway, "_round_counter", 0),
+            patch.dict(gateway._memory_extraction_pending, {}, clear=True),
+            patch.dict(gateway._memory_extraction_locks, {}, clear=True),
             patch.object(gateway, "get_last_user_content", AsyncMock(return_value="")),
             patch.object(gateway, "save_message", AsyncMock()),
             patch.object(gateway, "get_recent_memories", AsyncMock(return_value=[])),

@@ -101,7 +101,7 @@ Give your AI long-term memory. A lightweight proxy gateway that adds a memory la
 | `MEMORY_MODEL` | 提取记忆用的模型（推荐便宜的小模型） | `anthropic/claude-haiku-4.5` |
 | `MAX_MEMORIES_INJECT` | 每次注入的最大记忆条数 | `15` |
 | `MIN_SCORE_THRESHOLD` | 记忆搜索最低分数阈值，低于此分数的记忆不注入（0=不过滤） | `0.15` |
-| `MEMORY_EXTRACT_INTERVAL` | 记忆提取间隔（0=禁用/1=每轮/N=每N轮） | `1` |
+| `MEMORY_EXTRACT_INTERVAL` | 自动记忆提取间隔（0=禁用自动批量/1=每轮/N=每个 session 各自每N轮；显式记忆请求不受此间隔限制） | `1` |
 | `MEMORY_EXTRACT_ENABLED（可选）` | 记忆提取+注入总开关，false时只存消息不提取记忆 | `true` |
 | `TIMEZONE_HOURS` | 时区偏移（小时），用于记忆注入时的日期显示 | `8`（UTC+8） |
 | `FORCE_STREAM（可选）` | 强制所有请求走流式传输（解决部分客户端thinking不显示） | `false` |
@@ -250,7 +250,7 @@ ai-memory-gateway/
 4. **后台提取** → 用小模型（如 Haiku）从完整对话上下文中提取关键信息
 5. **存入数据库** → 下次对话时可以检索到
 
-提取记忆时，网关会把客户端发来的完整对话上下文（不含 system prompt）传给提取模型，这样能捕捉到跨轮次的信息。通过 `MEMORY_EXTRACT_INTERVAL` 可以控制提取频率：设为 0 禁用自动提取，设为 1 每轮都提，设为 N 则每 N 轮提取一次（适合控制成本）。
+网关按 session 缓存尚未处理的新对话轮次，再交给现有记忆提取模型判断、提炼并与已有记忆去重。通过 `MEMORY_EXTRACT_INTERVAL` 可以控制自动提取频率：设为 0 禁用自动批量提取，设为 1 每轮都提，设为 N 则每个 session 各自每 N 轮提取一次（适合控制成本）。当用户以完整指令明确要求“记住”或“保存为长期记忆”时，该 session 当前尚未处理的轮次会立即送入同一个提取器；处理后批次清空，不会在下一次 interval 中重复发送。否定、询问记忆能力或普通文件保存请求不会触发该快速路径。
 
 > **关于向量搜索：** 当前版本支持可选的记忆向量搜索功能。默认使用 jieba 中文分词 + 关键词匹配（ILIKE），适合大多数场景。如果需要语义搜索（说"过年"能搜到"春节"），可以设置 `MEMORY_VECTOR_ENABLED=true` + `EMBEDDING_API_KEY`，系统会同时走关键词和向量两路搜索，四维加权排序。支持任何 OpenAI 兼容的 Embedding API（OpenAI、Jina、Voyage、本地 Ollama 等）。如果数据库支持 pgvector 扩展会自动启用，否则回退到 Python 端计算余弦相似度。
 
@@ -280,7 +280,7 @@ A: 检查端口设置。Render 默认用 `PORT` 环境变量，确保设置为 `
 A: 如果数据库和网关不在同一个平台，连接字符串末尾可能需要加 `?sslmode=require`。
 
 **Q: 记忆会越来越多影响性能吗？**
-A: 每次最多注入 15 条记忆（可调），不会无限增长地消耗 token。提取记忆时会用客户端发来的完整上下文，token 用量比单轮提取大一些，可以通过 `MEMORY_EXTRACT_INTERVAL` 降低提取频率来控制成本。
+A: 每次最多注入 15 条记忆（可调），不会无限增长地消耗 token。自动提取只发送该 session 尚未处理的 interval 批次；可以调大 `MEMORY_EXTRACT_INTERVAL` 降低提取频率，显式记忆请求则立即处理当前待处理批次。
 
 **Q: 能用免费额度跑吗？**
 A: Render 免费层支持 Web Service + PostgreSQL，网关资源消耗很低，够用（注意免费 PostgreSQL 有 90 天期限）。也可以用 Neon 或 Supabase 的免费 PostgreSQL 作为长期方案。LLM API 费用另算（推荐 OpenRouter，按量付费）。
@@ -373,7 +373,7 @@ A: 能。这个项目的第一个部署者就是不会写代码的——代码�
 ### v2.0（2026-03-01）
 
 - **记忆提取间隔** — 新增 `MEMORY_EXTRACT_INTERVAL` 环境变量，可设置每 N 轮提取一次记忆或禁用自动提取，方便控制 API 成本
-- **完整上下文提取** — 提取记忆时不再只看最新一轮对话，而是使用客户端发来的完整对话上下文，能捕捉到跨轮次的信息
+- **分批上下文提取** — 提取记忆时使用同一 session 尚未处理的连续轮次，保留跨轮信息且不反复发送已处理历史
 - **优化记忆注入提示词** — 注入的记忆附带应用规则和交流方式指引，让 AI 更自然地运用记忆而非机械引用
 
 ### v1.0（2026-02-26）
