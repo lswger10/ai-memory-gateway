@@ -207,6 +207,56 @@ class GatewayRequestIdentityContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Gateway-Session-ID", upstream_call["headers"])
         self.assertNotIn("X-Gateway-Request-ID", upstream_call["headers"])
 
+    async def test_tool_continuation_survives_before_background_assistant_save(self):
+        tool_call = {
+            "id": "call_react",
+            "type": "function",
+            "function": {
+                "name": "tidal_react_current_message",
+                "arguments": '{"message_id":"42","emoji":"❤️"}',
+            },
+        }
+        body = {
+            "model": "contract-model",
+            "stream": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "React only; do not send text.",
+                },
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tool_call],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_react",
+                    "content": '{"ok":true}',
+                },
+            ],
+        }
+
+        _, _, _, background_sessions = await self.invoke(
+            self.tidal_headers(), body
+        )
+
+        upstream_messages = RecordingAsyncClient.calls[-1]["json"]["messages"]
+        self.assertEqual(
+            [message["role"] for message in upstream_messages],
+            ["user", "assistant", "tool"],
+        )
+        self.assertEqual(
+            upstream_messages[0]["content"], "React only; do not send text."
+        )
+        self.assertEqual(
+            upstream_messages[1]["tool_calls"][0]["id"], "call_react"
+        )
+        self.assertEqual(
+            upstream_messages[2]["tool_call_id"], "call_react"
+        )
+        self.assertEqual(background_sessions, [self.session_id])
+
 
 class LongTermMemoryContractTests(unittest.IsolatedAsyncioTestCase):
     def test_memory_storage_accepts_provenance_metadata(self):
