@@ -78,6 +78,30 @@ class ContextPackRequest(FrozenPayload):
         return cls._freeze(value)
 
 
+@dataclass(frozen=True)
+class ContextFactsRequest(FrozenPayload):
+    @classmethod
+    def from_dict(cls, payload: Any) -> "ContextFactsRequest":
+        value = _exact_object(
+            payload,
+            {
+                "contract_version", "room_id", "conversation_id", "current_event_id",
+                "burst_id", "fence_epoch", "recent_limit", "require_closed",
+            },
+            "context facts request",
+        )
+        if value["room_id"] not in ROOM_IDS:
+            raise ContractError("invalid facts room")
+        _nonempty(value["conversation_id"], "conversation_id")
+        _nonempty(value["burst_id"], "burst_id")
+        _positive(value["current_event_id"], "current_event_id")
+        _positive(value["fence_epoch"], "fence_epoch")
+        _positive(value["recent_limit"], "recent_limit")
+        if not isinstance(value["require_closed"], bool):
+            raise ContractError("require_closed must be boolean")
+        return cls._freeze(value)
+
+
 def _validate_group_event(value: Any) -> None:
     required = {
         "contract_version", "event_id", "room_id", "conversation_id", "burst_id",

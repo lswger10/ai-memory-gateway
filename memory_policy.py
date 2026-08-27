@@ -86,6 +86,13 @@ _ROOM_MEMBERS = {
 }
 
 
+def room_members(room_id: str) -> frozenset[str]:
+    members = _ROOM_MEMBERS.get(room_id)
+    if members is None:
+        raise ValueError("unknown room")
+    return members
+
+
 def build_retrieval_policy(
     actor_id: str,
     room_id: str,

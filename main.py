@@ -27,7 +27,11 @@ from fastapi.templating import Jinja2Templates
 
 from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
+from group_contracts import CONTRACT_VERSION, ContractError, ContextPackRequest
+from group_memory import GroupContextPackService
 from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
+from memory_policy import group_memory_features_from_env
+from relay_group_client import RelayGroupClient, RelayGroupError
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -344,6 +348,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
+_group_context_service = None
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -360,6 +365,10 @@ PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico")
 @app.middleware("http")
 async def gateway_auth_middleware(request: Request, call_next):
     """检查 GATEWAY_SECRET，保护所有非公开端点"""
+    path = request.url.path
+    if path.startswith("/internal/group/context-packs/"):
+        return await call_next(request)
+
     # 未设置密钥时跳过鉴权（兼容旧部署，但会打印警告）
     if not GATEWAY_SECRET:
         if not hasattr(gateway_auth_middleware, "_warned"):
@@ -367,8 +376,6 @@ async def gateway_auth_middleware(request: Request, call_next):
             print("⚠️  请在环境变量中设置 GATEWAY_SECRET 以启用鉴权")
             gateway_auth_middleware._warned = True
         return await call_next(request)
-
-    path = request.url.path
 
     # 公开路径不需要鉴权（根路径精确匹配）
     if path == "/":
@@ -395,6 +402,71 @@ async def gateway_auth_middleware(request: Request, call_next):
         )
 
     return await call_next(request)
+
+
+def _group_error(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "contract_version": CONTRACT_VERSION,
+            "error": {"code": code, "message": message},
+        },
+    )
+
+
+def _group_bearer(request: Request) -> str:
+    authorization = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    return authorization[len(prefix):] if authorization.startswith(prefix) else ""
+
+
+def _get_group_context_service() -> GroupContextPackService:
+    global _group_context_service
+    if _group_context_service is None:
+        relay_url = os.environ.get("GROUP_RELAY_BASE_URL", "").strip()
+        relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
+        if not relay_url or not relay_key:
+            raise RelayGroupError(503, "dependency_unavailable")
+        _group_context_service = GroupContextPackService(
+            RelayGroupClient(relay_url, relay_key)
+        )
+    return _group_context_service
+
+
+async def _build_group_context_pack(request: Request, pack_kind: str):
+    if not group_memory_features_from_env()["group_memory"]:
+        return _group_error(404, "group_feature_disabled", "Group memory is disabled")
+    if request.headers.get("X-Group-Contract-Version") != CONTRACT_VERSION:
+        return _group_error(
+            409, "contract_version_mismatch", "Unsupported Group contract version"
+        )
+    expected_key = os.environ.get("GROUP_ORCHESTRATOR_SERVICE_KEY", "")
+    if not expected_key or not secrets.compare_digest(_group_bearer(request), expected_key):
+        return _group_error(401, "invalid_service_key", "Invalid service key")
+    try:
+        payload = await request.json()
+        pack_request = ContextPackRequest.from_dict(payload)
+    except (ValueError, json.JSONDecodeError, ContractError, TypeError):
+        return _group_error(422, "invalid_group_payload", "Invalid Group payload")
+    try:
+        pack = await _get_group_context_service().build(
+            pack_request, pack_kind=pack_kind
+        )
+    except RelayGroupError as exc:
+        return _group_error(exc.status_code, exc.code, "Group dependency rejected request")
+    except ContractError:
+        return _group_error(422, "invalid_group_payload", "Invalid Group payload")
+    return JSONResponse(status_code=200, content=pack.to_dict())
+
+
+@app.post("/internal/group/context-packs/probe")
+async def group_context_pack_probe(request: Request):
+    return await _build_group_context_pack(request, "probe")
+
+
+@app.post("/internal/group/context-packs/full")
+async def group_context_pack_full(request: Request):
+    return await _build_group_context_pack(request, "full")
 
 
 # ============================================================
