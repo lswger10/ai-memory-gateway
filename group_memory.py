@@ -7,6 +7,7 @@ import json
 import os
 from typing import Awaitable, Callable
 
+from actor_prompt_profiles import ActorPromptProfile, load_actor_prompt_profiles
 from database import search_authorized_memories
 from group_contracts import (
     CONTRACT_VERSION,
@@ -28,6 +29,10 @@ SearchFunction = Callable[
 
 
 _ACTOR_NAMES = {"jiao": "椒椒", "laoke": "老克", "weiwei": "薇薇"}
+_COMMON_RUNTIME_KERNEL = (
+    "Group runtime kernel: Relay facts are authoritative; use only the authorized "
+    "context in this pack; never invent private facts or another actor's position."
+)
 
 
 def _pack_id(pack_kind: str, request: dict) -> str:
@@ -78,15 +83,41 @@ def _render_public_context(facts: dict, *, maximum_events: int) -> str:
     return "\n".join(lines)
 
 
+def _compose_system_content(
+    profile: ActorPromptProfile,
+    policy: RetrievalPolicy,
+    memories,
+    actor_private_stance: str | None,
+) -> str:
+    lines = [
+        _COMMON_RUNTIME_KERNEL,
+        f"Actor prompt [{profile.prompt_version}]: {profile.prompt_text}",
+        (
+            "Room policy: speak only as "
+            f"{profile.actor_id} in {policy.room_id}; authorized relationship scopes are "
+            + ", ".join(policy.allowed_scopes)
+            + "."
+        ),
+    ]
+    if memories:
+        lines.append("Authorized relationship and memory context:")
+        lines.extend(f"- {row['content']}" for row in memories)
+    if actor_private_stance:
+        lines.append("Your private burst stance: " + actor_private_stance)
+    return "\n".join(lines)
+
+
 class GroupContextPackService:
     def __init__(
         self,
         relay_client,
         *,
         search: SearchFunction = search_authorized_memories,
+        prompt_profiles=None,
     ) -> None:
         self.relay_client = relay_client
         self.search = search
+        self.prompt_profiles = prompt_profiles or load_actor_prompt_profiles()
         self.last_search: AuthorizedMemorySearchResult | None = None
 
     async def build(
@@ -109,25 +140,24 @@ class GroupContextPackService:
             3 if pack_kind == "probe" else 10,
         )
         self.last_search = result
+        profile = self.prompt_profiles[requested["actor_id"]]
+        system_content = _compose_system_content(
+            profile,
+            policy,
+            result.memories,
+            requested["actor_private_stance"],
+        )
 
         if pack_kind == "probe":
             content = _render_public_context(facts, maximum_events=4)
-            if requested["actor_private_stance"]:
-                content += "\nYour private burst stance: " + requested["actor_private_stance"]
-            messages = [{"role": "user", "content": content}]
+            messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": content},
+            ]
             token_budget = int(os.environ.get("GROUP_PROBE_TOKEN_BUDGET", "512"))
         else:
-            actor_name = _ACTOR_NAMES[requested["actor_id"]]
-            system_lines = [f"你是{actor_name}。只根据以下已授权上下文回应。"]
-            if result.memories:
-                system_lines.append("Authorized memories:")
-                system_lines.extend(f"- {row['content']}" for row in result.memories)
-            if requested["actor_private_stance"]:
-                system_lines.append(
-                    "Your private burst stance: " + requested["actor_private_stance"]
-                )
             messages = [
-                {"role": "system", "content": "\n".join(system_lines)},
+                {"role": "system", "content": system_content},
                 {
                     "role": "user",
                     "content": _render_public_context(facts, maximum_events=20),
