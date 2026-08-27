@@ -18,6 +18,8 @@
   "provenance": {
     "provider": "fixture-gpt-provider",
     "provider_family": "gpt",
+    "protocol": "openai_responses",
+    "route_id": "fixture-gpt-route",
     "model": "fixture-gpt-model",
     "model_snapshot": null,
     "adapter_version": "group-room.v1.0-test",

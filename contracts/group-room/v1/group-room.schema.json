@@ -113,6 +113,8 @@
       "required": [
         "provider",
         "provider_family",
+        "protocol",
+        "route_id",
         "model",
         "model_snapshot",
         "adapter_version",
@@ -122,6 +124,15 @@
       "properties": {
         "provider": { "type": "string", "minLength": 1 },
         "provider_family": { "enum": ["gpt", "claude"] },
+        "protocol": {
+          "enum": [
+            "openai_responses",
+            "openai_chat_completions",
+            "anthropic_messages",
+            "anthropic_messages_compatible"
+          ]
+        },
+        "route_id": { "type": "string", "minLength": 1 },
         "model": { "type": "string", "minLength": 1 },
         "model_snapshot": { "type": ["string", "null"] },
         "adapter_version": { "type": "string", "minLength": 1 },

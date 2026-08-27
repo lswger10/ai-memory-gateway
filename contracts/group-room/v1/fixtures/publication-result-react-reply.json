@@ -23,6 +23,8 @@
     "provenance": {
       "provider": "fixture-claude-provider",
       "provider_family": "claude",
+      "protocol": "anthropic_messages",
+      "route_id": "fixture-claude-route",
       "model": "fixture-claude-model",
       "model_snapshot": "fixture-snapshot",
       "adapter_version": "group-room.v1.0-test",
