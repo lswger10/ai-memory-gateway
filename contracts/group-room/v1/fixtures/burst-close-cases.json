@@ -1,0 +1,23 @@
+{
+  "contract_version": "group-room.v1.0",
+  "cases": [
+    {
+      "close_reason": "budget_exhausted"
+    },
+    {
+      "close_reason": "all_pass"
+    },
+    {
+      "close_reason": "reaction_only"
+    },
+    {
+      "close_reason": "no_available_candidate"
+    },
+    {
+      "close_reason": "user_preempted"
+    },
+    {
+      "close_reason": "crash_terminated"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "contract_version": "group-room.v1.0",
+  "cases": [
+    {
+      "event_type": "group_draft",
+      "factual": false,
+      "payload": {
+        "type": "group_draft",
+        "actor_id": "jiao",
+        "generation_request_id": "gen-1",
+        "burst_id": "burst-101",
+        "sequence": 3,
+        "text": "当前累计可见 draft"
+      }
+    },
+    {
+      "event_type": "group_status",
+      "factual": false,
+      "payload": {
+        "type": "group_status",
+        "actor_id": "jiao",
+        "generation_request_id": "gen-1",
+        "burst_id": "burst-101",
+        "status": "thinking"
+      }
+    },
+    {
+      "event_type": "group_unavailable",
+      "factual": false,
+      "payload": {
+        "type": "group_unavailable",
+        "actor_id": "laoke",
+        "generation_request_id": "gen-2",
+        "burst_id": "burst-101",
+        "reason_code": "generation_unavailable"
+      }
+    },
+    {
+      "event_type": "group_fence_closed",
+      "factual": false,
+      "payload": {
+        "type": "group_fence_closed",
+        "burst_id": "burst-101",
+        "fence_epoch": 4,
+        "close_reason": "all_pass"
+      }
+    }
+  ]
+}

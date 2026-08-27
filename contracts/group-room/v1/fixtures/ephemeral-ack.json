@@ -1,0 +1,6 @@
+{
+  "contract_version": "group-room.v1.0",
+  "accepted": true,
+  "burst_id": "burst-101",
+  "fence_epoch": 4
+}

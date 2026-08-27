@@ -1,0 +1,22 @@
+{
+  "contract_version": "group-room.v1.0",
+  "pack_id": "pack-full-jiao-201",
+  "pack_kind": "full",
+  "actor_id": "jiao",
+  "room_id": "room_group_home",
+  "conversation_id": "group-home-conversation",
+  "current_event_id": 101,
+  "burst_id": "burst-101",
+  "fence_epoch": 4,
+  "provider_neutral_messages": [
+    {
+      "role": "system",
+      "content": "你是椒椒。只根据已授权的上下文回应。"
+    },
+    {
+      "role": "user",
+      "content": "椒椒，你先说说看。"
+    }
+  ],
+  "token_budget": 12000
+}

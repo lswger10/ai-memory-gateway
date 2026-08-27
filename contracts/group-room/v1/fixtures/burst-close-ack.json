@@ -1,0 +1,9 @@
+{
+  "contract_version": "group-room.v1.0",
+  "accepted": true,
+  "burst_id": "burst-101",
+  "fence_epoch": 4,
+  "status": "closed",
+  "close_reason": "all_pass",
+  "closed_at": "2026-08-27T13:01:02Z"
+}

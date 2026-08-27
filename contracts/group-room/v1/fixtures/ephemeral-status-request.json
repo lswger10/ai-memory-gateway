@@ -1,0 +1,15 @@
+{
+  "contract_version": "group-room.v1.0",
+  "actor_id": "jiao",
+  "generation_request_id": "gen-1",
+  "fence": {
+    "room_id": "room_group_home",
+    "conversation_id": "group-home-conversation",
+    "burst_id": "burst-101",
+    "trigger_event_id": 101,
+    "fence_epoch": 4,
+    "lease_epoch": 2,
+    "orchestrator_instance": "orchestrator-test-1"
+  },
+  "status": "thinking"
+}

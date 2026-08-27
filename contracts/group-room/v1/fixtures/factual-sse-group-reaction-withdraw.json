@@ -1,0 +1,10 @@
+{
+  "type": "group_reaction",
+  "contract_version": "group-room.v1.0",
+  "room_id": "room_group_home",
+  "conversation_id": "group-home-conversation",
+  "event_id": 101,
+  "actor_id": "jiao",
+  "emoji": "",
+  "request_id": "generation-request-jiao-withdraw-1"
+}

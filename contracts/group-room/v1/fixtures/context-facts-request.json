@@ -1,0 +1,10 @@
+{
+  "contract_version": "group-room.v1.0",
+  "room_id": "room_group_home",
+  "conversation_id": "group-home-conversation",
+  "current_event_id": 201,
+  "burst_id": "burst-101",
+  "fence_epoch": 4,
+  "recent_limit": 20,
+  "require_closed": false
+}

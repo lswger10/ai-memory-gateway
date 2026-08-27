@@ -1,0 +1,38 @@
+{
+  "contract_version": "group-room.v1.0",
+  "accepted": true,
+  "publication_kind": "react+reply",
+  "generation_request_id": "generation-request-laoke-202",
+  "burst_id": "burst-101",
+  "fence_epoch": 4,
+  "event": {
+    "contract_version": "group-room.v1.0",
+    "event_id": 202,
+    "room_id": "room_group_home",
+    "conversation_id": "group-home-conversation",
+    "burst_id": "burst-101",
+    "actor_id": "laoke",
+    "role": "agent",
+    "event_type": "agent_final",
+    "content": "这点我有一个不同角度。",
+    "reply_to_event_id": 201,
+    "mentions": [],
+    "created_at": "2026-08-27T12:00:04Z",
+    "request_id": "generation-request-laoke-202",
+    "visibility": "room",
+    "provenance": {
+      "provider": "fixture-claude-provider",
+      "provider_family": "claude",
+      "model": "fixture-claude-model",
+      "model_snapshot": "fixture-snapshot",
+      "adapter_version": "group-room.v1.0-test",
+      "generation_request_id": "generation-request-laoke-202",
+      "fallback_used": false
+    }
+  },
+  "reaction": {
+    "target_event_id": 101,
+    "actor_id": "laoke",
+    "emoji": "🙄"
+  }
+}

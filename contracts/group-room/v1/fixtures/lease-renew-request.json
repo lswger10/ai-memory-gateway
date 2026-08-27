@@ -1,0 +1,6 @@
+{
+  "contract_version": "group-room.v1.0",
+  "orchestrator_instance": "orchestrator-process-7",
+  "lease_epoch": 7,
+  "ttl_seconds": 30
+}

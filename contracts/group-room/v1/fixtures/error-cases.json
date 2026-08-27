@@ -1,0 +1,173 @@
+{
+  "contract_version": "group-room.v1.0",
+  "cases": [
+    {
+      "status": 401,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "invalid_service_key",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 403,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "principal_not_allowed",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 404,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "group_feature_disabled",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 404,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "fact_not_visible",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 409,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "contract_version_mismatch",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 409,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "group_dispatch_disabled",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 409,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "lease_held",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 409,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "stale_lease",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 409,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "stale_fence",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 409,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "burst_not_closed",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 422,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "invalid_group_payload",
+          "message": "bounded non-secret text"
+        }
+      }
+    },
+    {
+      "status": 503,
+      "required_headers": {
+        "Authorization": "Bearer <service-specific-group-key>",
+        "X-Group-Contract-Version": "group-room.v1.0"
+      },
+      "response": {
+        "contract_version": "group-room.v1.0",
+        "error": {
+          "code": "dependency_unavailable",
+          "message": "bounded non-secret text"
+        }
+      }
+    }
+  ]
+}

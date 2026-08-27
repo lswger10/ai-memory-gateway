@@ -1,0 +1,27 @@
+{
+  "contract_version": "group-room.v1.0",
+  "publication_kind": "final",
+  "actor_id": "jiao",
+  "generation_request_id": "generation-request-jiao-201",
+  "fence": {
+    "room_id": "room_group_home",
+    "conversation_id": "group-home-conversation",
+    "burst_id": "burst-101",
+    "trigger_event_id": 101,
+    "fence_epoch": 4,
+    "lease_epoch": 2,
+    "orchestrator_instance": "orchestrator-test-1"
+  },
+  "final_text": "我先接住这个话题。",
+  "reply_to_event_id": 101,
+  "reaction": null,
+  "provenance": {
+    "provider": "fixture-gpt-provider",
+    "provider_family": "gpt",
+    "model": "fixture-gpt-model",
+    "model_snapshot": null,
+    "adapter_version": "group-room.v1.0-test",
+    "generation_request_id": "generation-request-jiao-201",
+    "fallback_used": false
+  }
+}

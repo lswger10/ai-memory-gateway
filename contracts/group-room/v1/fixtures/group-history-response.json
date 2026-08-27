@@ -1,0 +1,32 @@
+{
+  "contract_version": "group-room.v1.0",
+  "room_id": "room_group_home",
+  "conversation_id": "group-home-conversation",
+  "events": [
+    {
+      "contract_version": "group-room.v1.0",
+      "event_id": 101,
+      "room_id": "room_group_home",
+      "conversation_id": "group-home-conversation",
+      "burst_id": "burst-101",
+      "actor_id": "weiwei",
+      "role": "human",
+      "event_type": "human_message",
+      "content": "椒椒，你先说说看。",
+      "reply_to_event_id": null,
+      "mentions": [
+        "jiao"
+      ],
+      "created_at": "2026-08-27T12:00:00Z",
+      "request_id": "human-request-101",
+      "visibility": "room",
+      "provenance": null
+    }
+  ],
+  "reactions_by_event": {
+    "101": {
+      "jiao": "❤️",
+      "laoke": "🙄"
+    }
+  }
+}

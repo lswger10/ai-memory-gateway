@@ -1,0 +1,25 @@
+{
+  "contract_version": "group-room.v1.0",
+  "event_id": 201,
+  "room_id": "room_group_home",
+  "conversation_id": "group-home-conversation",
+  "burst_id": "burst-101",
+  "actor_id": "jiao",
+  "role": "agent",
+  "event_type": "agent_final",
+  "content": "我先接住这个话题。",
+  "reply_to_event_id": 101,
+  "mentions": [],
+  "created_at": "2026-08-27T12:00:02Z",
+  "request_id": "generation-request-jiao-201",
+  "visibility": "room",
+  "provenance": {
+    "provider": "fixture-gpt-provider",
+    "provider_family": "gpt",
+    "model": "fixture-gpt-model",
+    "model_snapshot": null,
+    "adapter_version": "group-room.v1.0-test",
+    "generation_request_id": "generation-request-jiao-201",
+    "fallback_used": false
+  }
+}

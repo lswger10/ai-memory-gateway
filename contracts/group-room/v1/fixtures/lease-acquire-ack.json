@@ -1,0 +1,9 @@
+{
+  "contract_version": "group-room.v1.0",
+  "accepted": true,
+  "lease": {
+    "orchestrator_instance": "orchestrator-process-7",
+    "lease_epoch": 7,
+    "expires_at": "2026-08-27T13:00:30Z"
+  }
+}

@@ -70,6 +70,61 @@ async def close_pool():
         print("✅ 数据库连接池已关闭")
 
 
+SCOPED_MEMORY_MIGRATION_SQL = """
+ALTER TABLE memories
+    ADD COLUMN IF NOT EXISTS scope TEXT,
+    ADD COLUMN IF NOT EXISTS memory_type TEXT,
+    ADD COLUMN IF NOT EXISTS perspective TEXT,
+    ADD COLUMN IF NOT EXISTS confidential BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+    ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS evidence_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS last_supported_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS superseded_by INTEGER,
+    ADD COLUMN IF NOT EXISTS derived_from INTEGER,
+    ADD COLUMN IF NOT EXISTS source_kind TEXT,
+    ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+UPDATE memories SET scope = 'legacy_unscoped' WHERE scope IS NULL;
+ALTER TABLE memories ALTER COLUMN scope SET DEFAULT 'legacy_unscoped';
+ALTER TABLE memories ALTER COLUMN scope SET NOT NULL;
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memories_scope_check') THEN
+        ALTER TABLE memories ADD CONSTRAINT memories_scope_check CHECK (
+            scope IN ('legacy_unscoped', 'weiwei-jiao', 'weiwei-laoke', 'jiao-laoke', 'group')
+        );
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memories_scoped_dimensions_check') THEN
+        ALTER TABLE memories ADD CONSTRAINT memories_scoped_dimensions_check CHECK (
+            (scope = 'legacy_unscoped' AND memory_type IS NULL AND perspective IS NULL AND source_kind IS NULL)
+            OR
+            (scope <> 'legacy_unscoped'
+             AND memory_type IN ('fact', 'inference')
+             AND perspective IN ('shared', 'weiwei', 'jiao', 'laoke')
+             AND source_kind IN ('chat_extraction', 'explicit_user_memory', 'agent_candidate', 'user_attested_memory', 'synthetic_test'))
+        );
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_memories_scope_status
+    ON memories(scope, status, confidential);
+
+CREATE TABLE IF NOT EXISTS actor_identity_profiles (
+    actor_id TEXT PRIMARY KEY CHECK (actor_id IN ('weiwei', 'jiao', 'laoke')),
+    profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+
+async def apply_scoped_memory_schema(conn) -> None:
+    """Apply the additive Group memory schema without classifying legacy rows."""
+    await conn.execute(SCOPED_MEMORY_MIGRATION_SQL)
+
+
 # ============================================================
 # 表结构初始化
 # ============================================================
@@ -114,6 +169,8 @@ async def init_tables():
             ALTER TABLE memories
                 ALTER COLUMN provenance SET NOT NULL;
         """)
+
+        await apply_scoped_memory_schema(conn)
         
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_fts 
