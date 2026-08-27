@@ -15,6 +15,12 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 import asyncpg
 
+from memory_policy import (
+    AuthorizedMemorySearchResult,
+    CandidateAudit,
+    RetrievalPolicy,
+)
+
 # 时区偏移（和 main.py 保持一致）
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
@@ -710,7 +716,7 @@ async def save_memory(
         return row["id"] if row else None
 
 
-async def search_memories(query: str, limit: int = 10):
+async def search_legacy_memories(query: str, limit: int = 10):
     """
     搜索相关记忆
     
@@ -718,7 +724,7 @@ async def search_memories(query: str, limit: int = 10):
     否则走纯关键词搜索
     """
     if MEMORY_VECTOR_ENABLED:
-        return await search_memories_hybrid(query, limit)
+        return await search_legacy_memories_hybrid(query, limit)
     
     # ---- 纯关键词搜索 ----
     keywords = extract_search_keywords(query)
@@ -740,7 +746,7 @@ async def search_memories(query: str, limit: int = 10):
         
         # 至少命中一个关键词（只搜索活跃记忆）
         where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-        where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
+        where_clause = f"scope = 'legacy_unscoped' AND is_active = TRUE AND ({' OR '.join(where_parts)})"
         
         limit_idx = len(keywords) + 1
         params.append(limit)
@@ -786,7 +792,7 @@ async def search_memories(query: str, limit: int = 10):
         return results
 
 
-async def search_memories_hybrid(query: str, limit: int = 10):
+async def search_legacy_memories_hybrid(query: str, limit: int = 10):
     """
     记忆混合搜索：关键词 + 向量，归一化后四维加权
     
@@ -815,7 +821,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             hit_count_expr = " + ".join(case_parts)
             max_hits = len(keywords)
             where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-            where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
+            where_clause = f"scope = 'legacy_unscoped' AND is_active = TRUE AND ({' OR '.join(where_parts)})"
             
             limit_idx = len(keywords) + 1
             params.append(limit * 3)
@@ -849,7 +855,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                     SELECT id, content, importance, created_at,
                            1 - (embedding <=> $1::vector) as similarity
                     FROM memories
-                    WHERE embedding IS NOT NULL AND is_active = TRUE
+                    WHERE scope = 'legacy_unscoped' AND embedding IS NOT NULL AND is_active = TRUE
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                 """, vec_str, limit * 3)
@@ -858,7 +864,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                 import json
                 all_mem = await conn.fetch("""
                     SELECT id, content, importance, created_at, embedding_json
-                    FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE
+                    FROM memories WHERE scope = 'legacy_unscoped' AND embedding_json IS NOT NULL AND is_active = TRUE
                 """)
                 
                 scored = []
@@ -958,6 +964,135 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             print(f"🔍 混合搜索 '{query}' → 无结果" + (f"（{filtered} 条被过滤）" if filtered else ""))
         
         return [dict(r) for r in results]
+
+
+def _authorized_predicate(policy: RetrievalPolicy, start_index: int) -> tuple[str, list]:
+    if not isinstance(policy, RetrievalPolicy):
+        raise TypeError("search_authorized_memories requires RetrievalPolicy")
+    scope_index = start_index
+    confidential_index = start_index + 1
+    predicate = (
+        f"scope = ANY(${scope_index}::text[]) "
+        "AND status = 'active' AND is_active = TRUE "
+        f"AND (confidential = FALSE OR scope = ANY(${confidential_index}::text[]))"
+    )
+    return predicate, [list(policy.allowed_scopes), list(policy.confidential_scopes)]
+
+
+async def search_authorized_archive_candidates(
+    query: str, policy: RetrievalPolicy
+) -> tuple[dict, ...]:
+    """Stage A hook; Stage B archive implementation must apply this policy itself."""
+    if not isinstance(policy, RetrievalPolicy):
+        raise TypeError("archive search requires RetrievalPolicy")
+    return ()
+
+
+async def search_authorized_summary_candidates(
+    query: str, policy: RetrievalPolicy
+) -> tuple[dict, ...]:
+    """Stage A hook; Stage B summary selection must apply this policy itself."""
+    if not isinstance(policy, RetrievalPolicy):
+        raise TypeError("summary search requires RetrievalPolicy")
+    return ()
+
+
+async def search_authorized_memories(
+    query: str,
+    policy: RetrievalPolicy,
+    limit: int = 10,
+) -> AuthorizedMemorySearchResult:
+    """Create candidates only from rows already filtered by actor/room policy."""
+    if not isinstance(policy, RetrievalPolicy):
+        raise TypeError("search_authorized_memories requires RetrievalPolicy")
+    keywords = extract_search_keywords(query)
+    query_embedding = (
+        await compute_embedding(query)
+        if MEMORY_VECTOR_ENABLED and EMBEDDING_API_KEY
+        else []
+    )
+    if not keywords and not query_embedding:
+        return AuthorizedMemorySearchResult((), (), CandidateAudit())
+
+    pool = await get_pool()
+    candidates: dict[int, dict] = {}
+    sql_ids: list[int] = []
+    vector_ids: list[int] = []
+    python_loaded_ids: list[int] = []
+    async with pool.acquire() as conn:
+        if keywords:
+            keyword_parts = []
+            params: list = []
+            for index, keyword in enumerate(keywords, start=1):
+                keyword_parts.append(f"content ILIKE '%' || ${index} || '%'")
+                params.append(keyword)
+            predicate, policy_params = _authorized_predicate(policy, len(params) + 1)
+            params.extend(policy_params)
+            limit_index = len(params) + 1
+            params.append(limit * 3)
+            rows = await conn.fetch(
+                "SELECT id, content, importance, created_at, scope, confidential, status "
+                "FROM memories WHERE "
+                f"{predicate} AND ({' OR '.join(keyword_parts)}) "
+                f"ORDER BY importance DESC, created_at DESC LIMIT ${limit_index}",
+                *params,
+            )
+            for row in rows:
+                item = dict(row)
+                candidates[item["id"]] = item
+                sql_ids.append(item["id"])
+
+        if query_embedding:
+            if HAS_PGVECTOR:
+                predicate, policy_params = _authorized_predicate(policy, 2)
+                vector = "[" + ",".join(str(value) for value in query_embedding) + "]"
+                rows = await conn.fetch(
+                    "SELECT id, content, importance, created_at, scope, confidential, status, "
+                    "1 - (embedding <=> $1::vector) AS similarity "
+                    f"FROM memories WHERE {predicate} AND embedding IS NOT NULL "
+                    "ORDER BY embedding <=> $1::vector LIMIT $4",
+                    vector,
+                    *policy_params,
+                    limit * 3,
+                )
+                vector_ids.extend(int(row["id"]) for row in rows)
+            else:
+                predicate, policy_params = _authorized_predicate(policy, 1)
+                rows = await conn.fetch(
+                    "SELECT id, content, importance, created_at, scope, confidential, status, embedding_json "
+                    f"FROM memories WHERE {predicate} AND embedding_json IS NOT NULL",
+                    *policy_params,
+                )
+                python_loaded_ids.extend(int(row["id"]) for row in rows)
+            for row in rows:
+                item = dict(row)
+                candidates.setdefault(item["id"], item)
+
+        selected = list(candidates.values())[:limit]
+        if selected:
+            await conn.execute(
+                "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
+                [row["id"] for row in selected],
+            )
+
+    archive = await search_authorized_archive_candidates(query, policy)
+    summaries = await search_authorized_summary_candidates(query, policy)
+    archive_ids = tuple(int(row["id"]) for row in archive)
+    summary_ids = tuple(int(row["id"]) for row in summaries)
+    rerank_ids = tuple(dict.fromkeys([*candidates, *archive_ids, *summary_ids]))
+    candidate_ids = tuple(dict.fromkeys([*candidates, *archive_ids, *summary_ids]))
+    return AuthorizedMemorySearchResult(
+        memories=tuple(selected),
+        candidate_ids=candidate_ids,
+        audit=CandidateAudit(
+            sql_candidate_ids=tuple(sql_ids),
+            vector_candidate_ids=tuple(vector_ids),
+            python_vector_loaded_ids=tuple(python_loaded_ids),
+            archive_candidate_ids=archive_ids,
+            summary_candidate_ids=summary_ids,
+            rerank_candidate_ids=rerank_ids,
+        ),
+    )
 
 
 async def get_pending_memory_embedding_count():
