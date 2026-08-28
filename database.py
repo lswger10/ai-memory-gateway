@@ -814,6 +814,120 @@ class CandidateIdentityConflict(ValueError):
     """A stable candidate identity was reused with different canonical bytes."""
 
 
+def _group_memory_source_link(write) -> dict:
+    provenance = dict(write.provenance or {})
+    link = {"source_kind": write.source_kind.value}
+    for key in (
+        "source_event_id",
+        "generation_request_id",
+        "candidate_index",
+        "burst_id",
+        "trigger_event_id",
+        "fence_epoch",
+    ):
+        if provenance.get(key) is not None:
+            link[key] = provenance[key]
+    link["evidence_event_ids"] = sorted(
+        {int(value) for value in provenance.get("evidence_event_ids", [])}
+    )
+    return link
+
+
+async def _persist_or_merge_group_memory(conn, write) -> int:
+    """One lock, dedupe, and evidence pipeline for every typed Group source."""
+    provenance = dict(write.provenance or {})
+    evidence_ids = sorted(
+        {int(value) for value in provenance.get("evidence_event_ids", [])}
+    )
+    normalized_content = " ".join(write.content.split()).casefold()
+    lock_material = "|".join(
+        (
+            write.scope.value,
+            write.perspective.value,
+            write.memory_type.value,
+            "1" if write.confidential else "0",
+            normalized_content,
+        )
+    )
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        f"group-memory:{lock_material}",
+    )
+    existing = await conn.fetchrow(
+        """
+        SELECT id, evidence, provenance
+        FROM memories
+        WHERE scope=$1 AND perspective=$2 AND memory_type=$3
+          AND confidential=$4 AND status='active' AND is_active=TRUE
+          AND LOWER(REGEXP_REPLACE(BTRIM(content), '\\s+', ' ', 'g'))=$5
+        ORDER BY id LIMIT 1
+        """,
+        write.scope.value,
+        write.perspective.value,
+        write.memory_type.value,
+        bool(write.confidential),
+        normalized_content,
+    )
+    source_link = _group_memory_source_link(write)
+    if existing is not None:
+        current_evidence = existing["evidence"] or []
+        if isinstance(current_evidence, str):
+            current_evidence = json.loads(current_evidence)
+        merged_evidence = sorted(
+            {int(value) for value in current_evidence} | set(evidence_ids)
+        )
+        current_provenance = existing["provenance"] or {}
+        if isinstance(current_provenance, str):
+            current_provenance = json.loads(current_provenance)
+        merged_provenance = dict(current_provenance)
+        source_links = list(merged_provenance.get("source_links") or [])
+        if source_link not in source_links:
+            source_links.append(source_link)
+        merged_provenance["source_links"] = source_links
+        await conn.execute(
+            """
+            UPDATE memories
+            SET evidence=$1::jsonb, evidence_count=$2, provenance=$3::jsonb,
+                updated_at=NOW(),
+                last_supported_at=COALESCE($4::timestamptz,last_supported_at)
+            WHERE id=$5
+            """,
+            json.dumps(merged_evidence),
+            len(merged_evidence),
+            json.dumps(merged_provenance, ensure_ascii=False),
+            provenance.get("last_supported_at"),
+            int(existing["id"]),
+        )
+        return int(existing["id"])
+
+    provenance["source_links"] = [source_link]
+    memory_id = await conn.fetchval(
+        """
+        INSERT INTO memories (
+            content, importance, source_session, provenance,
+            scope, memory_type, perspective, confidential, status,
+            confidence, evidence_count, last_supported_at, source_kind, evidence
+        )
+        VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+        RETURNING id
+        """,
+        write.content,
+        provenance.get("conversation_id", ""),
+        json.dumps(provenance, ensure_ascii=False),
+        write.scope.value,
+        write.memory_type.value,
+        write.perspective.value,
+        bool(write.confidential),
+        write.status.value,
+        write.confidence,
+        len(evidence_ids),
+        provenance.get("last_supported_at"),
+        write.source_kind.value,
+        json.dumps(evidence_ids),
+    )
+    return int(memory_id)
+
+
 async def persist_group_memory_candidate(
     *,
     identity: tuple[str, str, int],
@@ -857,42 +971,7 @@ async def persist_group_memory_candidate(
 
             provenance = dict(write.provenance or {})
             source_event_id = int(provenance["source_event_id"])
-            memory_id = await conn.fetchval(
-                """
-                SELECT id FROM memories
-                WHERE scope=$1 AND perspective=$2 AND status='active'
-                  AND LOWER(BTRIM(content))=LOWER(BTRIM($3))
-                ORDER BY id LIMIT 1
-                """,
-                write.scope.value,
-                write.perspective.value,
-                write.content,
-            )
-            if memory_id is None:
-                memory_id = await conn.fetchval(
-                    """
-                    INSERT INTO memories (
-                        content, importance, source_session, provenance,
-                        scope, memory_type, perspective, confidential, status,
-                        confidence, evidence_count, last_supported_at, source_kind, evidence
-                    )
-                    VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
-                    RETURNING id
-                    """,
-                    write.content,
-                    provenance.get("conversation_id", ""),
-                    json.dumps(provenance, ensure_ascii=False),
-                    write.scope.value,
-                    write.memory_type.value,
-                    write.perspective.value,
-                    bool(write.confidential),
-                    write.status.value,
-                    write.confidence,
-                    int(write.evidence_count),
-                    provenance.get("last_supported_at"),
-                    write.source_kind.value,
-                    json.dumps(provenance.get("evidence_event_ids", [])),
-                )
+            memory_id = await _persist_or_merge_group_memory(conn, write)
             await conn.execute(
                 """
                 INSERT INTO group_memory_candidate_receipts (
@@ -925,72 +1004,10 @@ async def persist_group_extracted_memory(write, auth_context) -> int:
         "weiwei-jiao", "weiwei-laoke", "jiao-laoke", "group"
     }:
         raise PermissionError("invalid batch extraction scope")
-    provenance = dict(write.provenance or {})
-    evidence_ids = sorted({int(value) for value in provenance["evidence_event_ids"]})
-    lock_material = "|".join(
-        (write.scope.value, write.perspective.value, " ".join(write.content.split()).casefold())
-    )
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1))",
-                f"group-memory:{lock_material}",
-            )
-            existing = await conn.fetchrow(
-                """
-                SELECT id, evidence
-                FROM memories
-                WHERE scope=$1 AND perspective=$2 AND status='active'
-                  AND LOWER(BTRIM(content))=LOWER(BTRIM($3))
-                ORDER BY id LIMIT 1
-                """,
-                write.scope.value,
-                write.perspective.value,
-                write.content,
-            )
-            if existing is not None:
-                current = existing["evidence"] or []
-                if isinstance(current, str):
-                    current = json.loads(current)
-                merged = sorted({int(value) for value in current} | set(evidence_ids))
-                await conn.execute(
-                    """
-                    UPDATE memories
-                    SET evidence=$1::jsonb, evidence_count=$2, updated_at=NOW(),
-                        last_supported_at=COALESCE($3::timestamptz,last_supported_at)
-                    WHERE id=$4
-                    """,
-                    json.dumps(merged),
-                    len(merged),
-                    provenance.get("last_supported_at"),
-                    int(existing["id"]),
-                )
-                return int(existing["id"])
-            memory_id = await conn.fetchval(
-                """
-                INSERT INTO memories (
-                    content, importance, source_session, provenance,
-                    scope, memory_type, perspective, confidential, status,
-                    confidence, evidence_count, last_supported_at, source_kind, evidence
-                )
-                VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,FALSE,$7,$8,$9,$10,$11,$12::jsonb)
-                RETURNING id
-                """,
-                write.content,
-                provenance.get("conversation_id", ""),
-                json.dumps(provenance, ensure_ascii=False),
-                write.scope.value,
-                write.memory_type.value,
-                write.perspective.value,
-                write.status.value,
-                write.confidence,
-                len(evidence_ids),
-                provenance.get("last_supported_at"),
-                write.source_kind.value,
-                json.dumps(evidence_ids),
-            )
-            return int(memory_id)
+            return await _persist_or_merge_group_memory(conn, write)
 
 
 async def enqueue_group_closed_burst(

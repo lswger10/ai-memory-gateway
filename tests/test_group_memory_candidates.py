@@ -1,5 +1,6 @@
 import json
 import asyncio
+import inspect
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -172,14 +173,87 @@ def test_candidate_cannot_cite_an_event_outside_relay_visible_facts():
 
 
 def test_database_boundary_reasserts_private_candidate_class_and_cross_source_dedupe():
-    import inspect
     import database
 
     source = inspect.getsource(database.persist_group_memory_candidate)
     assert '"jiao": "weiwei-jiao"' in source
     assert '"laoke": "weiwei-laoke"' in source
     assert 'write.source_kind.value != "agent_candidate"' in source
-    assert "LOWER(BTRIM(content))=LOWER(BTRIM($3))" in source
+    assert "_persist_or_merge_group_memory" in source
+
+
+def test_candidate_and_batch_share_one_content_lock_and_dedupe_helper():
+    import database
+
+    candidate_source = inspect.getsource(database.persist_group_memory_candidate)
+    batch_source = inspect.getsource(database.persist_group_extracted_memory)
+    helper_source = inspect.getsource(database._persist_or_merge_group_memory)
+
+    assert "_persist_or_merge_group_memory" in candidate_source
+    assert "_persist_or_merge_group_memory" in batch_source
+    assert "pg_advisory_xact_lock" in helper_source
+    assert helper_source.index("pg_advisory_xact_lock") < helper_source.index(
+        "SELECT id, evidence, provenance"
+    )
+
+
+def test_shared_dedupe_helper_merges_evidence_and_source_links():
+    import database
+    from memory_policy import (
+        MemoryScope,
+        MemoryType,
+        MemoryWrite,
+        Perspective,
+        SourceKind,
+    )
+
+    class FakeConnection:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, sql, *args):
+            self.calls.append(("execute", sql, args))
+
+        async def fetchrow(self, sql, *args):
+            self.calls.append(("fetchrow", sql, args))
+            return {
+                "id": 77,
+                "evidence": [101],
+                "provenance": {
+                    "source_links": [
+                        {"source_kind": "explicit_user_memory", "source_event_id": 101}
+                    ]
+                },
+            }
+
+    write = MemoryWrite(
+        content="same normalized memory",
+        scope=MemoryScope.WEIWEI_JIAO,
+        memory_type=MemoryType.FACT,
+        perspective=Perspective.JIAO,
+        confidential=False,
+        source_kind=SourceKind.AGENT_CANDIDATE,
+        evidence_count=2,
+        provenance={
+            "source_event_id": 201,
+            "generation_request_id": "gen-merge",
+            "candidate_index": 0,
+            "evidence_event_ids": [101, 201],
+        },
+    )
+    conn = FakeConnection()
+
+    memory_id = asyncio.run(database._persist_or_merge_group_memory(conn, write))
+
+    assert memory_id == 77
+    update = next(call for call in conn.calls if "UPDATE memories" in call[1])
+    merged_evidence = json.loads(update[2][0])
+    merged_provenance = json.loads(update[2][2])
+    assert merged_evidence == [101, 201]
+    assert {link["source_kind"] for link in merged_provenance["source_links"]} == {
+        "explicit_user_memory",
+        "agent_candidate",
+    }
 
 
 def candidate_headers(key):
