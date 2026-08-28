@@ -50,6 +50,7 @@ def group_memory_features_from_env() -> dict[str, bool]:
     return {
         "group_memory": _enabled("GATEWAY_GROUP_MEMORY_ENABLED"),
         "agent_candidates": _enabled("GROUP_AGENT_CANDIDATES_ENABLED"),
+        "burst_extraction": _enabled("GROUP_BURST_EXTRACTION_ENABLED"),
     }
 
 

@@ -252,6 +252,30 @@ class MemoryCandidateRequest(FrozenPayload):
 
 
 @dataclass(frozen=True)
+class ClosedBurstExtractionRequest(FrozenPayload):
+    @classmethod
+    def from_dict(cls, payload: Any) -> "ClosedBurstExtractionRequest":
+        value = _exact_object(
+            payload,
+            {"contract_version", "closed_fence"},
+            "closed burst extraction request",
+        )
+        ref = value["closed_fence"]
+        keys = {
+            "room_id", "conversation_id", "trigger_event_id", "burst_id", "fence_epoch"
+        }
+        if not isinstance(ref, dict) or set(ref) != keys:
+            raise ContractError("closed fence has non-canonical fields")
+        if ref["room_id"] not in ROOM_IDS:
+            raise ContractError("invalid closed fence room")
+        _nonempty(ref["conversation_id"], "conversation_id")
+        _positive(ref["trigger_event_id"], "trigger_event_id")
+        _nonempty(ref["burst_id"], "burst_id")
+        _positive(ref["fence_epoch"], "fence_epoch")
+        return cls._freeze(value)
+
+
+@dataclass(frozen=True)
 class ContractBundleReport:
     contract_version: str
     fixture_count: int

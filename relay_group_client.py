@@ -10,6 +10,7 @@ from group_contracts import (
     CONTRACT_VERSION,
     ContextFactsRequest,
     ContextPackRequest,
+    ClosedBurstExtractionRequest,
     MemoryCandidateRequest,
     PublicContextFacts,
 )
@@ -159,5 +160,36 @@ class RelayGroupClient:
             or source["provenance"].get("generation_request_id")
             != candidate["generation_request_id"]
         ):
+            raise RelayFactsMismatch()
+        return factual
+
+    async def fetch_closed_burst_facts(
+        self, request: ClosedBurstExtractionRequest
+    ) -> dict[str, Any]:
+        ref = request.to_dict()["closed_fence"]
+        facts_request = ContextFactsRequest.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "room_id": ref["room_id"],
+                "conversation_id": ref["conversation_id"],
+                "current_event_id": ref["trigger_event_id"],
+                "burst_id": ref["burst_id"],
+                "fence_epoch": ref["fence_epoch"],
+                "recent_limit": 20,
+                "require_closed": True,
+            }
+        )
+        factual = (await self._post_context_facts(facts_request)).to_dict()
+        if factual["fence_status"] != "closed":
+            raise RelayFactsMismatch()
+        exact = {
+            "room_id": ref["room_id"],
+            "conversation_id": ref["conversation_id"],
+            "burst_id": ref["burst_id"],
+            "fence_epoch": ref["fence_epoch"],
+        }
+        if any(factual[key] != value for key, value in exact.items()):
+            raise RelayFactsMismatch()
+        if factual["trigger_event"]["event_id"] != ref["trigger_event_id"]:
             raise RelayFactsMismatch()
         return factual

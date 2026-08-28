@@ -159,6 +159,18 @@ CREATE TABLE IF NOT EXISTS group_memory_candidate_receipts (
     PRIMARY KEY (actor_id, generation_request_id, candidate_index)
 );
 
+CREATE TABLE IF NOT EXISTS group_burst_extraction_progress (
+    burst_id TEXT NOT NULL,
+    fence_epoch INTEGER NOT NULL,
+    room_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    trigger_event_id BIGINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processed')),
+    enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ,
+    PRIMARY KEY (burst_id, fence_epoch)
+);
+
 CREATE TABLE IF NOT EXISTS cold_archive_raw (
     id BIGSERIAL PRIMARY KEY,
     source_system TEXT NOT NULL,
@@ -868,6 +880,83 @@ async def persist_group_memory_candidate(
                 source_event_id,
             )
             return f"memory-{int(memory_id)}"
+
+
+async def enqueue_group_closed_burst(closed_ref: dict) -> dict:
+    """Persist only the closed fence cursor; Relay retains all source content."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"group-extraction:{closed_ref['burst_id']}:{closed_ref['fence_epoch']}",
+            )
+            existing = await conn.fetchrow(
+                """
+                SELECT room_id, conversation_id, trigger_event_id, burst_id,
+                       fence_epoch, status
+                FROM group_burst_extraction_progress
+                WHERE burst_id=$1 AND fence_epoch=$2
+                """,
+                closed_ref["burst_id"],
+                closed_ref["fence_epoch"],
+            )
+            if existing:
+                row = dict(existing)
+                for field in (
+                    "room_id", "conversation_id", "trigger_event_id", "burst_id", "fence_epoch"
+                ):
+                    if row[field] != closed_ref[field]:
+                        raise CandidateIdentityConflict("closed fence identity conflict")
+                return {"closed_fence": {k: row[k] for k in closed_ref}, "status": row["status"]}
+            await conn.execute(
+                """
+                INSERT INTO group_burst_extraction_progress (
+                    burst_id, fence_epoch, room_id, conversation_id, trigger_event_id
+                ) VALUES ($1,$2,$3,$4,$5)
+                """,
+                closed_ref["burst_id"],
+                closed_ref["fence_epoch"],
+                closed_ref["room_id"],
+                closed_ref["conversation_id"],
+                closed_ref["trigger_event_id"],
+            )
+            return {"closed_fence": dict(closed_ref), "status": "queued"}
+
+
+async def get_pending_group_closed_bursts(limit: int = 10) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT room_id, conversation_id, trigger_event_id, burst_id, fence_epoch
+            FROM group_burst_extraction_progress
+            WHERE status='queued' ORDER BY enqueued_at, burst_id LIMIT $1
+            """,
+            limit,
+        )
+    return [
+        {"closed_fence": dict(row), "status": "queued"}
+        for row in rows
+    ]
+
+
+async def complete_group_closed_burst(closed_ref: dict) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE group_burst_extraction_progress
+            SET status='processed', processed_at=NOW()
+            WHERE burst_id=$1 AND fence_epoch=$2
+              AND room_id=$3 AND conversation_id=$4 AND trigger_event_id=$5
+            """,
+            closed_ref["burst_id"],
+            closed_ref["fence_epoch"],
+            closed_ref["room_id"],
+            closed_ref["conversation_id"],
+            closed_ref["trigger_event_id"],
+        )
 
 
 async def search_legacy_memories(query: str, limit: int = 10):

@@ -31,14 +31,17 @@ import database as _db_module  # 用于 /api/settings 热更新 database.py 全�
 from group_contracts import (
     CONTRACT_VERSION,
     ContractError,
+    ClosedBurstExtractionRequest,
     ContextPackRequest,
     MemoryCandidateRequest,
 )
 from group_memory import (
     CandidateIngressService,
+    ClosedBurstExtractionService,
     GroupContextPackService,
     SensitiveCandidateError,
     StaleCandidateError,
+    UnstableBurstError,
     build_synthetic_scoped_search,
 )
 from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
@@ -362,6 +365,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
 _group_context_service = None
 _group_candidate_service = None
+_group_extraction_service = None
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -379,7 +383,11 @@ PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico")
 async def gateway_auth_middleware(request: Request, call_next):
     """检查 GATEWAY_SECRET，保护所有非公开端点"""
     path = request.url.path
-    if path.startswith("/internal/group/context-packs/") or path == "/internal/group/memory-candidates":
+    if (
+        path.startswith("/internal/group/context-packs/")
+        or path == "/internal/group/memory-candidates"
+        or path == "/internal/group/extraction/closed-bursts"
+    ):
         return await call_next(request)
 
     # 未设置密钥时跳过鉴权（兼容旧部署，但会打印警告）
@@ -469,6 +477,19 @@ def _get_group_candidate_service() -> CandidateIngressService:
     return _group_candidate_service
 
 
+def _get_group_extraction_service() -> ClosedBurstExtractionService:
+    global _group_extraction_service
+    if _group_extraction_service is None:
+        relay_url = os.environ.get("GROUP_RELAY_BASE_URL", "").strip()
+        relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
+        if not relay_url or not relay_key:
+            raise RelayGroupError(503, "dependency_unavailable")
+        _group_extraction_service = ClosedBurstExtractionService(
+            RelayGroupClient(relay_url, relay_key)
+        )
+    return _group_extraction_service
+
+
 def _derive_candidate_actor(request: Request) -> str | None:
     provided = _group_bearer(request)
     matches = []
@@ -543,6 +564,44 @@ async def group_memory_candidate(request: Request):
         code = "stale_fence" if exc.code in {"stale_fence", "fact_not_visible"} else exc.code
         return _group_error(exc.status_code, code, "Group dependency rejected request")
     return JSONResponse(status_code=200, content=receipt.to_dict())
+
+
+@app.post("/internal/group/extraction/closed-bursts")
+async def group_closed_burst_extraction(request: Request):
+    features = group_memory_features_from_env()
+    if not features["group_memory"] or not features["burst_extraction"]:
+        return _group_error(404, "group_feature_disabled", "Group extraction is disabled")
+    if request.headers.get("X-Group-Contract-Version") != CONTRACT_VERSION:
+        return _group_error(
+            409, "contract_version_mismatch", "Unsupported Group contract version"
+        )
+    expected_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "")
+    if not expected_key or not secrets.compare_digest(_group_bearer(request), expected_key):
+        return _group_error(403, "principal_not_allowed", "Principal is not allowed")
+    try:
+        body = ClosedBurstExtractionRequest.from_dict(await request.json())
+        queued = await _get_group_extraction_service().enqueue(body)
+    except (ValueError, json.JSONDecodeError, ContractError, TypeError):
+        return _group_error(422, "invalid_group_payload", "Invalid Group payload")
+    except UnstableBurstError as exc:
+        return _group_error(409, exc.code, "Closed burst is not stable")
+    except RelayGroupError as exc:
+        code = (
+            "burst_not_closed"
+            if exc.code == "burst_not_closed"
+            else ("stale_fence" if exc.code == "fact_not_visible" else exc.code)
+        )
+        return _group_error(exc.status_code, code, "Group dependency rejected request")
+    ref = queued["closed_fence"]
+    return JSONResponse(
+        status_code=200,
+        content={
+            "contract_version": CONTRACT_VERSION,
+            "accepted": True,
+            "burst_id": ref["burst_id"],
+            "fence_epoch": ref["fence_epoch"],
+        },
+    )
 
 
 # ============================================================

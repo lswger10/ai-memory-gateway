@@ -12,12 +12,16 @@ from typing import Awaitable, Callable
 
 from actor_prompt_profiles import ActorPromptProfile, load_actor_prompt_profiles
 from database import (
+    complete_group_closed_burst,
+    enqueue_group_closed_burst,
+    get_pending_group_closed_bursts,
     persist_group_memory_candidate,
     search_authorized_memories,
     search_authorized_summary_candidates,
 )
 from group_contracts import (
     CONTRACT_VERSION,
+    ClosedBurstExtractionRequest,
     ContractError,
     ContextPackRequest,
     MemoryCandidateReceipt,
@@ -58,6 +62,12 @@ class StaleCandidateError(RuntimeError):
 
 class SensitiveCandidateError(PermissionError):
     pass
+
+
+class UnstableBurstError(RuntimeError):
+    def __init__(self, message: str, code: str = "stale_fence"):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -465,6 +475,96 @@ class CandidateIngressService:
                 "source_event_id": payload["source_event_id"],
             }
         )
+
+
+class DatabaseClosedBurstQueue:
+    async def enqueue(self, closed_ref: dict) -> dict:
+        return await enqueue_group_closed_burst(closed_ref)
+
+    async def pending(self) -> list[dict]:
+        return await get_pending_group_closed_bursts()
+
+    async def complete(self, closed_ref: dict) -> None:
+        await complete_group_closed_burst(closed_ref)
+
+
+async def _no_group_extractor(_facts: dict) -> None:
+    """Queue-only default; a configured worker supplies the real extractor."""
+
+
+class ClosedBurstExtractionService:
+    """Durable coordinate queue whose source text is always re-fetched from Relay."""
+
+    _CLOSE_REASONS = {
+        "budget_exhausted", "all_pass", "reaction_only",
+        "no_available_candidate", "user_preempted", "crash_terminated",
+    }
+
+    def __init__(self, relay_client, queue=None, *, extractor=None) -> None:
+        self.relay_client = relay_client
+        self.queue = queue or DatabaseClosedBurstQueue()
+        self.extractor = extractor or _no_group_extractor
+        self._seen: set[tuple[str, int]] = set()
+        self.threshold_burst_count = 0
+        self.extraction_unit_count = 0
+
+    @staticmethod
+    def _validate_facts(ref: dict, facts: dict) -> None:
+        expected = {
+            "room_id": ref["room_id"],
+            "conversation_id": ref["conversation_id"],
+            "burst_id": ref["burst_id"],
+            "fence_epoch": ref["fence_epoch"],
+        }
+        if any(facts.get(key) != value for key, value in expected.items()):
+            raise UnstableBurstError("closed burst coordinates do not match Relay")
+        if facts.get("fence_status") != "closed":
+            raise UnstableBurstError("burst is not stably closed", "burst_not_closed")
+        if facts.get("close_reason") not in ClosedBurstExtractionService._CLOSE_REASONS:
+            raise UnstableBurstError("closed burst reason is not canonical")
+        trigger = facts.get("trigger_event") or {}
+        if trigger.get("event_id") != ref["trigger_event_id"]:
+            raise UnstableBurstError("closed burst trigger does not match Relay")
+        for event in [trigger] + list(facts.get("accepted_burst_public_events") or []):
+            if (
+                event.get("room_id") != ref["room_id"]
+                or event.get("conversation_id") != ref["conversation_id"]
+                or event.get("burst_id") != ref["burst_id"]
+                or event.get("visibility") != "room"
+            ):
+                raise UnstableBurstError("closed burst contains mismatched facts")
+
+    async def enqueue(self, request: ClosedBurstExtractionRequest) -> dict:
+        ref = request.to_dict()["closed_fence"]
+        try:
+            facts = await self.relay_client.fetch_closed_burst_facts(request)
+        except Exception as exc:
+            from relay_group_client import RelayFactsMismatch
+
+            if isinstance(exc, RelayFactsMismatch):
+                raise UnstableBurstError("Relay rejected closed burst") from exc
+            raise
+        self._validate_facts(ref, facts)
+        row = await self.queue.enqueue(ref)
+        key = (ref["burst_id"], ref["fence_epoch"])
+        if key not in self._seen:
+            self._seen.add(key)
+            self.threshold_burst_count += 1
+        return row
+
+    async def process_once(self) -> int:
+        processed = 0
+        for row in await self.queue.pending():
+            request = ClosedBurstExtractionRequest.from_dict(
+                {"contract_version": CONTRACT_VERSION, "closed_fence": row["closed_fence"]}
+            )
+            facts = await self.relay_client.fetch_closed_burst_facts(request)
+            self._validate_facts(row["closed_fence"], facts)
+            await self.extractor(facts)
+            await self.queue.complete(row["closed_fence"])
+            self.extraction_unit_count += 1
+            processed += 1
+        return processed
 
 
 SearchFunction = Callable[
