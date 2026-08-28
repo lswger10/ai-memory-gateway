@@ -18,6 +18,7 @@ import uuid
 import asyncio
 import secrets
 import httpx
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
@@ -28,7 +29,7 @@ from fastapi.templating import Jinja2Templates
 from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from group_contracts import CONTRACT_VERSION, ContractError, ContextPackRequest
-from group_memory import GroupContextPackService
+from group_memory import GroupContextPackService, build_synthetic_scoped_search
 from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
 from memory_policy import group_memory_features_from_env
 from relay_group_client import RelayGroupClient, RelayGroupError
@@ -427,8 +428,18 @@ def _get_group_context_service() -> GroupContextPackService:
         relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
         if not relay_url or not relay_key:
             raise RelayGroupError(503, "dependency_unavailable")
+        synthetic_fixture = os.environ.get(
+            "GROUP_SYNTHETIC_MEMORY_FIXTURE", ""
+        ).strip()
+        search = None
+        if synthetic_fixture:
+            rows = json.loads(Path(synthetic_fixture).read_text(encoding="utf-8"))
+            if not isinstance(rows, list):
+                raise ValueError("synthetic memory fixture must be a JSON array")
+            search = build_synthetic_scoped_search(rows)
         _group_context_service = GroupContextPackService(
-            RelayGroupClient(relay_url, relay_key)
+            RelayGroupClient(relay_url, relay_key),
+            **({"search": search} if search is not None else {}),
         )
     return _group_context_service
 

@@ -17,6 +17,7 @@ from group_contracts import (
 )
 from memory_policy import (
     AuthorizedMemorySearchResult,
+    CandidateAudit,
     RetrievalPolicy,
     build_retrieval_policy,
     room_members,
@@ -26,6 +27,56 @@ from memory_policy import (
 SearchFunction = Callable[
     [str, RetrievalPolicy, int], Awaitable[AuthorizedMemorySearchResult]
 ]
+
+
+def build_synthetic_scoped_search(rows) -> SearchFunction:
+    """Build an explicit Stage A fixture repository behind real RetrievalPolicy.
+
+    The fixture is never a global/no-policy search: unauthorized and confidential
+    rows are excluded before candidate IDs are created.
+    """
+    normalized = []
+    seen_ids: set[int] = set()
+    for raw in rows:
+        row = dict(raw)
+        row_id = row.get("id")
+        if (
+            isinstance(row_id, bool)
+            or not isinstance(row_id, int)
+            or row_id <= 0
+            or row_id in seen_ids
+            or row.get("source_kind") != "synthetic_test"
+            or not isinstance(row.get("content"), str)
+            or not row["content"].strip()
+            or not isinstance(row.get("confidential"), bool)
+        ):
+            raise ValueError("invalid synthetic scoped memory fixture")
+        seen_ids.add(row_id)
+        normalized.append(row)
+    fixture_rows = tuple(normalized)
+
+    async def search(
+        _query: str, policy: RetrievalPolicy, limit: int
+    ) -> AuthorizedMemorySearchResult:
+        if not isinstance(policy, RetrievalPolicy) or limit <= 0:
+            raise TypeError("synthetic search requires RetrievalPolicy and limit")
+        authorized = tuple(
+            row
+            for row in fixture_rows
+            if row.get("scope") in policy.allowed_scopes
+            and (
+                not row["confidential"]
+                or row.get("scope") in policy.confidential_scopes
+            )
+        )[:limit]
+        candidate_ids = tuple(int(row["id"]) for row in authorized)
+        return AuthorizedMemorySearchResult(
+            memories=authorized,
+            candidate_ids=candidate_ids,
+            audit=CandidateAudit(),
+        )
+
+    return search
 
 
 _ACTOR_NAMES = {"jiao": "椒椒", "laoke": "老克", "weiwei": "薇薇"}

@@ -54,6 +54,24 @@ class FakeContextService:
 
 
 class GroupContextPackServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_synthetic_fixture_search_filters_before_candidate_creation(self):
+        from group_memory import build_synthetic_scoped_search
+        from memory_policy import build_retrieval_policy, room_members
+
+        rows = [
+            {"id": 901, "content": "椒椒可见", "scope": "weiwei-jiao", "confidential": False, "source_kind": "synthetic_test"},
+            {"id": 902, "content": "老克私密", "scope": "weiwei-laoke", "confidential": True, "source_kind": "synthetic_test"},
+            {"id": 903, "content": "群共享", "scope": "group", "confidential": False, "source_kind": "synthetic_test"},
+        ]
+        search = build_synthetic_scoped_search(rows)
+        policy = build_retrieval_policy("jiao", "room_group_home", room_members("room_group_home"))
+
+        result = await search("椒椒", policy, 10)
+
+        self.assertEqual(result.candidate_ids, (901, 903))
+        self.assertNotIn(902, result.candidate_ids)
+        self.assertEqual([row["id"] for row in result.memories], [901, 903])
+
     async def test_gateway_fetches_relay_facts_and_builds_actor_pack(self):
         from group_contracts import ContextPackRequest
         from group_memory import GroupContextPackService
