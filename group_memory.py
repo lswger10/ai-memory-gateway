@@ -332,16 +332,21 @@ class ScopeAwareMemoryService:
         )
 
 
-_EVIDENCE_SCOPE = {
-    frozenset({"weiwei", "jiao"}): MemoryScope.WEIWEI_JIAO,
-    frozenset({"weiwei", "laoke"}): MemoryScope.WEIWEI_LAOKE,
-    frozenset({"jiao", "laoke"}): MemoryScope.JIAO_LAOKE,
+_ACTOR_CANDIDATE_SCOPE = {
+    "jiao": MemoryScope.WEIWEI_JIAO,
+    "laoke": MemoryScope.WEIWEI_LAOKE,
 }
 
 
-def _candidate_scope(events: dict[int, dict]) -> MemoryScope:
-    actors = frozenset(event["actor_id"] for event in events.values())
-    return _EVIDENCE_SCOPE.get(actors, MemoryScope.GROUP)
+def _candidate_scope(actor_id: str) -> MemoryScope:
+    """Keep untrusted agent proposals inside their private relationship scope.
+
+    Evidence links prove that the cited public events exist; they do not prove
+    that model-authored candidate text is safe to widen to Group or to the
+    other-agent relationship. Trusted closed-burst extraction owns those wider
+    classifications.
+    """
+    return _ACTOR_CANDIDATE_SCOPE[actor_id]
 
 
 class CandidateIngressService:
@@ -438,7 +443,7 @@ class CandidateIngressService:
         }
         write = MemoryWrite(
             content=candidate["content"],
-            scope=_candidate_scope(evidence),
+            scope=_candidate_scope(actor_id),
             memory_type=MemoryType(candidate["memory_type"]),
             perspective=perspective,
             confidential=False,

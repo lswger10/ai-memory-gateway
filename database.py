@@ -1244,16 +1244,46 @@ def _authorized_predicate(
 async def search_authorized_archive_candidates(
     query: str, policy: RetrievalPolicy
 ) -> tuple[dict, ...]:
-    """Search immutable archive only after scope/confidential SQL filtering."""
+    """Search annotation-normalized archive after ACL and redaction filtering."""
     if not isinstance(policy, RetrievalPolicy):
         raise TypeError("archive search requires RetrievalPolicy")
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, raw_content AS content, mapped_scope AS scope, confidential "
-            "FROM cold_archive_raw WHERE mapped_scope = ANY($1::text[]) "
-            "AND (confidential = FALSE OR mapped_scope = ANY($2::text[])) "
-            "AND raw_content ILIKE '%' || $3 || '%' ORDER BY id DESC LIMIT 30",
+            """
+            WITH normalized AS (
+                SELECT raw.id,
+                       COALESCE(correction.payload->>'content', raw.raw_content) AS content,
+                       COALESCE(mapping.payload->>'scope', raw.mapped_scope) AS scope,
+                       raw.confidential
+                FROM cold_archive_raw AS raw
+                LEFT JOIN LATERAL (
+                    SELECT annotation.payload
+                    FROM cold_archive_annotations AS annotation
+                    WHERE annotation.archive_id = raw.id
+                      AND annotation.annotation_type = 'correction'
+                    ORDER BY annotation.id DESC LIMIT 1
+                ) AS correction ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT annotation.payload
+                    FROM cold_archive_annotations AS annotation
+                    WHERE annotation.archive_id = raw.id
+                      AND annotation.annotation_type = 'identity_mapping'
+                    ORDER BY annotation.id DESC LIMIT 1
+                ) AS mapping ON TRUE
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM cold_archive_annotations AS annotation
+                    WHERE annotation.archive_id = raw.id
+                      AND annotation.annotation_type = 'redaction'
+                )
+            )
+            SELECT id, content, scope, confidential
+            FROM normalized
+            WHERE scope = ANY($1::text[])
+              AND (confidential = FALSE OR scope = ANY($2::text[]))
+              AND content ILIKE '%' || $3 || '%'
+            ORDER BY id DESC LIMIT 30
+            """,
             list(policy.allowed_scopes),
             list(policy.confidential_scopes),
             query,
@@ -1388,8 +1418,13 @@ async def search_authorized_memories(
     summary_ids = tuple(int(row["id"]) for row in summaries)
     rerank_ids = tuple(dict.fromkeys([*candidates, *archive_ids, *summary_ids]))
     candidate_ids = tuple(dict.fromkeys([*candidates, *archive_ids, *summary_ids]))
+    remaining = max(0, int(limit) - len(selected))
+    archive_context = tuple(
+        {**dict(row), "source_kind": "cold_archive"}
+        for row in archive[:remaining]
+    )
     return AuthorizedMemorySearchResult(
-        memories=tuple(selected),
+        memories=tuple(selected) + archive_context,
         candidate_ids=candidate_ids,
         audit=CandidateAudit(
             sql_candidate_ids=tuple(sql_ids),

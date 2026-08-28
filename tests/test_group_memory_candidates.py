@@ -117,6 +117,48 @@ def test_candidate_scope_comes_from_visible_evidence_not_agent_payload():
     assert auth.actor_id == "jiao"
 
 
+def test_candidate_with_only_its_source_final_cannot_widen_to_group_scope():
+    """Untrusted candidate text must never turn missing evidence into Group scope."""
+    from group_contracts import MemoryCandidateRequest
+    from group_memory import CandidateIngressService
+
+    body = json.loads(json.dumps(CANDIDATE))
+    body["candidate"]["evidence_event_ids"] = [body["source_event_id"]]
+    repository = FakeRepository()
+    service = CandidateIngressService(FakeRelay(), repository.persist)
+
+    asyncio.run(service.accept("jiao", MemoryCandidateRequest.from_dict(body)))
+
+    write, _auth = repository.writes[0]
+    assert write.scope.value == "weiwei-jiao"
+
+
+def test_candidate_cannot_launder_private_context_through_three_actor_evidence():
+    """Stage-B candidates stay in the submitter's pairwise namespace.
+
+    Public evidence can support a proposal, but model-authored content is not a
+    trustworthy classifier for widening it to a namespace visible to another
+    actor. Trusted closed-burst extraction remains responsible for shared scope.
+    """
+    from group_contracts import MemoryCandidateRequest
+    from group_memory import CandidateIngressService
+
+    body = json.loads(json.dumps(CANDIDATE))
+    facts = accepted_facts()
+    extra = json.loads(json.dumps(AGENT_FINAL))
+    extra.update({"event_id": 202, "actor_id": "laoke"})
+    extra["provenance"]["generation_request_id"] = "laoke-generation"
+    facts["recent_public_events"].append(extra)
+    body["candidate"]["evidence_event_ids"] = [101, 201, 202]
+    repository = FakeRepository()
+    service = CandidateIngressService(FakeRelay(facts), repository.persist)
+
+    asyncio.run(service.accept("jiao", MemoryCandidateRequest.from_dict(body)))
+
+    write, _auth = repository.writes[0]
+    assert write.scope.value == "weiwei-jiao"
+
+
 def test_candidate_cannot_cite_an_event_outside_relay_visible_facts():
     from group_contracts import MemoryCandidateRequest
     from group_memory import CandidateIngressService, StaleCandidateError

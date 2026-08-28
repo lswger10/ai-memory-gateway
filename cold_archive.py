@@ -58,7 +58,7 @@ class ArchiveAnnotation:
 
 @dataclass(frozen=True)
 class ArchiveSearchResult:
-    records: tuple[ArchiveRawRecord, ...]
+    records: tuple[Mapping[str, Any], ...]
     candidate_ids: tuple[int, ...]
     scanned_ids: tuple[int, ...]
 
@@ -168,20 +168,20 @@ class ColdArchiveService:
         if not isinstance(policy, RetrievalPolicy):
             raise TypeError("Cold Archive search requires RetrievalPolicy")
         authorized = tuple(
-            row
+            view
             for row in self._raw.values()
-            if row.mapped_scope in policy.allowed_scopes
+            if not (view := self.normalized_view(row.id))["redacted"]
+            and view["scope"] in policy.allowed_scopes
             and (
                 not row.confidential
-                or row.mapped_scope in policy.confidential_scopes
+                or view["scope"] in policy.confidential_scopes
             )
         )
         matches = tuple(
-            row for row in authorized if query.lower() in row.raw_content.lower()
+            view for view in authorized if query.lower() in view["content"].lower()
         )
         return ArchiveSearchResult(
             records=matches,
-            candidate_ids=tuple(row.id for row in matches),
-            scanned_ids=tuple(row.id for row in authorized),
+            candidate_ids=tuple(int(view["id"]) for view in matches),
+            scanned_ids=tuple(int(view["id"]) for view in authorized),
         )
-
