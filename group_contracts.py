@@ -38,6 +38,24 @@ def _positive(value: Any, label: str) -> int:
     return value
 
 
+def _fence_token(value: Any) -> dict[str, Any]:
+    keys = {
+        "room_id", "conversation_id", "burst_id", "trigger_event_id",
+        "fence_epoch", "lease_epoch", "orchestrator_instance",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ContractError("fence has non-canonical fields")
+    if value["room_id"] not in ROOM_IDS:
+        raise ContractError("invalid fence room")
+    _nonempty(value["conversation_id"], "conversation_id")
+    _nonempty(value["burst_id"], "burst_id")
+    _positive(value["trigger_event_id"], "trigger_event_id")
+    _positive(value["fence_epoch"], "fence_epoch")
+    _positive(value["lease_epoch"], "lease_epoch")
+    _nonempty(value["orchestrator_instance"], "orchestrator_instance")
+    return value
+
+
 @dataclass(frozen=True)
 class FrozenPayload:
     contract_version: str
@@ -182,6 +200,54 @@ class MemoryCandidateReceipt(FrozenPayload):
             raise ContractError("candidate receipt must be accepted")
         _nonempty(value["memory_id"], "memory_id")
         _positive(value["source_event_id"], "source_event_id")
+        return cls._freeze(value)
+
+
+@dataclass(frozen=True)
+class MemoryCandidateRequest(FrozenPayload):
+    @classmethod
+    def from_dict(cls, payload: Any) -> "MemoryCandidateRequest":
+        value = _exact_object(
+            payload,
+            {
+                "contract_version", "source_event_id", "fence",
+                "generation_request_id", "candidate_index", "candidate",
+            },
+            "memory candidate request",
+        )
+        _positive(value["source_event_id"], "source_event_id")
+        _fence_token(value["fence"])
+        _nonempty(value["generation_request_id"], "generation_request_id")
+        if value["candidate_index"] != 0:
+            raise ContractError("candidate_index must be zero")
+        candidate = value["candidate"]
+        required = {
+            "content", "memory_type", "perspective", "confidence",
+            "evidence_event_ids", "sensitivity_hint",
+        }
+        if not isinstance(candidate, dict) or set(candidate) != required:
+            raise ContractError("memory candidate has non-canonical fields")
+        _nonempty(candidate["content"], "candidate content")
+        if candidate["memory_type"] not in {"fact", "inference"}:
+            raise ContractError("invalid candidate memory_type")
+        if candidate["perspective"] not in {"shared", "weiwei", "jiao", "laoke"}:
+            raise ContractError("invalid candidate perspective")
+        confidence = candidate["confidence"]
+        if confidence is not None and (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1
+        ):
+            raise ContractError("invalid candidate confidence")
+        evidence = candidate["evidence_event_ids"]
+        if (
+            not isinstance(evidence, list)
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 1 for item in evidence)
+            or len(evidence) != len(set(evidence))
+        ):
+            raise ContractError("invalid evidence_event_ids")
+        if not isinstance(candidate["sensitivity_hint"], bool):
+            raise ContractError("sensitivity_hint must be boolean")
         return cls._freeze(value)
 
 

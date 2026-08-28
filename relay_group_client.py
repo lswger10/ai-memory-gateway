@@ -10,6 +10,7 @@ from group_contracts import (
     CONTRACT_VERSION,
     ContextFactsRequest,
     ContextPackRequest,
+    MemoryCandidateRequest,
     PublicContextFacts,
 )
 
@@ -56,32 +57,7 @@ class RelayGroupClient:
                 "require_closed": False,
             }
         )
-        headers = {
-            "Authorization": f"Bearer {self.service_key}",
-            "X-Group-Contract-Version": CONTRACT_VERSION,
-        }
-        url = f"{self.base_url}/internal/group/context-facts"
-        try:
-            if self.http_client is not None:
-                response = await self.http_client.post(
-                    url, headers=headers, json=facts_request.to_dict()
-                )
-            else:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                    response = await client.post(
-                        url, headers=headers, json=facts_request.to_dict()
-                    )
-        except httpx.HTTPError as exc:
-            raise RelayGroupError(503, "dependency_unavailable") from exc
-
-        payload = response.json()
-        if response.status_code != 200:
-            error = payload.get("error", {}) if isinstance(payload, dict) else {}
-            raise RelayGroupError(
-                response.status_code,
-                str(error.get("code") or "dependency_unavailable"),
-            )
-        facts = PublicContextFacts.from_dict(payload)
+        facts = await self._post_context_facts(facts_request)
         factual = facts.to_dict()
         if factual["fence_status"] != "active":
             raise RelayFactsMismatch()
@@ -107,3 +83,81 @@ class RelayGroupClient:
             ):
                 raise RelayFactsMismatch()
         return facts
+
+    async def _post_context_facts(
+        self, facts_request: ContextFactsRequest
+    ) -> PublicContextFacts:
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "X-Group-Contract-Version": CONTRACT_VERSION,
+        }
+        url = f"{self.base_url}/internal/group/context-facts"
+        try:
+            if self.http_client is not None:
+                response = await self.http_client.post(
+                    url, headers=headers, json=facts_request.to_dict()
+                )
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(
+                        url, headers=headers, json=facts_request.to_dict()
+                    )
+        except httpx.HTTPError as exc:
+            raise RelayGroupError(503, "dependency_unavailable") from exc
+
+        payload = response.json()
+        if response.status_code != 200:
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            raise RelayGroupError(
+                response.status_code,
+                str(error.get("code") or "dependency_unavailable"),
+            )
+        return PublicContextFacts.from_dict(payload)
+
+    async def verify_candidate_source(
+        self, request: MemoryCandidateRequest, actor_id: str
+    ) -> dict[str, Any]:
+        candidate = request.to_dict()
+        fence = candidate["fence"]
+        facts_request = ContextFactsRequest.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "room_id": fence["room_id"],
+                "conversation_id": fence["conversation_id"],
+                "current_event_id": candidate["source_event_id"],
+                "burst_id": fence["burst_id"],
+                "fence_epoch": fence["fence_epoch"],
+                "recent_limit": 20,
+                "require_closed": False,
+            }
+        )
+        factual = (await self._post_context_facts(facts_request)).to_dict()
+        if factual["fence_status"] != "active":
+            raise RelayFactsMismatch()
+        exact = {
+            "room_id": fence["room_id"],
+            "conversation_id": fence["conversation_id"],
+            "current_event_id": candidate["source_event_id"],
+            "burst_id": fence["burst_id"],
+            "fence_epoch": fence["fence_epoch"],
+        }
+        if any(factual[key] != value for key, value in exact.items()):
+            raise RelayFactsMismatch()
+        if factual["trigger_event"]["event_id"] != fence["trigger_event_id"]:
+            raise RelayFactsMismatch()
+        events = factual["accepted_burst_public_events"]
+        source = next(
+            (event for event in events if event["event_id"] == candidate["source_event_id"]),
+            None,
+        )
+        if (
+            source is None
+            or source["actor_id"] != actor_id
+            or source["role"] != "agent"
+            or source["event_type"] != "agent_final"
+            or not source.get("provenance")
+            or source["provenance"].get("generation_request_id")
+            != candidate["generation_request_id"]
+        ):
+            raise RelayFactsMismatch()
+        return factual

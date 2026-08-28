@@ -11,10 +11,17 @@ import math
 from typing import Awaitable, Callable
 
 from actor_prompt_profiles import ActorPromptProfile, load_actor_prompt_profiles
-from database import search_authorized_memories, search_authorized_summary_candidates
+from database import (
+    persist_group_memory_candidate,
+    search_authorized_memories,
+    search_authorized_summary_candidates,
+)
 from group_contracts import (
     CONTRACT_VERSION,
+    ContractError,
     ContextPackRequest,
+    MemoryCandidateReceipt,
+    MemoryCandidateRequest,
     OpaqueContextPack,
     PublicContextFacts,
 )
@@ -42,6 +49,14 @@ class ForbiddenSourceKind(PermissionError):
 
 
 class ForbiddenMemoryWrite(PermissionError):
+    pass
+
+
+class StaleCandidateError(RuntimeError):
+    pass
+
+
+class SensitiveCandidateError(PermissionError):
     pass
 
 
@@ -304,6 +319,151 @@ class ScopeAwareMemoryService:
             memories=tuple(row.__dict__ for row in selected),
             candidate_ids=ids,
             audit=CandidateAudit(sql_candidate_ids=ids, rerank_candidate_ids=ids),
+        )
+
+
+_EVIDENCE_SCOPE = {
+    frozenset({"weiwei", "jiao"}): MemoryScope.WEIWEI_JIAO,
+    frozenset({"weiwei", "laoke"}): MemoryScope.WEIWEI_LAOKE,
+    frozenset({"jiao", "laoke"}): MemoryScope.JIAO_LAOKE,
+}
+
+
+def _candidate_scope(events: dict[int, dict]) -> MemoryScope:
+    actors = frozenset(event["actor_id"] for event in events.values())
+    return _EVIDENCE_SCOPE.get(actors, MemoryScope.GROUP)
+
+
+class CandidateIngressService:
+    """Actor-bound accepted-final gate for untrusted memory proposals."""
+
+    def __init__(self, relay_client, persist=persist_group_memory_candidate) -> None:
+        self.relay_client = relay_client
+        self.persist = persist
+
+    async def accept(
+        self, actor_id: str, request: MemoryCandidateRequest
+    ) -> MemoryCandidateReceipt:
+        if actor_id not in {"jiao", "laoke"}:
+            raise PermissionError("actor principal is not allowed")
+        payload = request.to_dict()
+        try:
+            facts = await self.relay_client.verify_candidate_source(request, actor_id)
+        except Exception as exc:
+            from relay_group_client import RelayFactsMismatch
+
+            if isinstance(exc, RelayFactsMismatch):
+                raise StaleCandidateError("candidate final is stale") from exc
+            raise
+
+        fence = payload["fence"]
+        exact = {
+            "room_id": fence["room_id"],
+            "conversation_id": fence["conversation_id"],
+            "current_event_id": payload["source_event_id"],
+            "burst_id": fence["burst_id"],
+            "fence_epoch": fence["fence_epoch"],
+        }
+        if any(facts.get(key) != value for key, value in exact.items()):
+            raise StaleCandidateError("candidate coordinates do not match Relay facts")
+        if facts.get("fence_status") != "active":
+            raise StaleCandidateError("candidate fence is not active")
+        trigger = facts.get("trigger_event") or {}
+        if trigger.get("event_id") != fence["trigger_event_id"]:
+            raise StaleCandidateError("candidate trigger does not match Relay facts")
+
+        visible = {
+            int(event["event_id"]): event
+            for event in [trigger]
+            + list(facts.get("accepted_burst_public_events") or [])
+            + list(facts.get("recent_public_events") or [])
+            if event.get("visibility") == "room"
+            and event.get("room_id") == fence["room_id"]
+            and event.get("conversation_id") == fence["conversation_id"]
+        }
+        accepted_finals = {
+            int(event["event_id"]): event
+            for event in facts.get("accepted_burst_public_events") or []
+        }
+        source = accepted_finals.get(payload["source_event_id"])
+        if (
+            not source
+            or source.get("burst_id") != fence["burst_id"]
+            or source.get("actor_id") != actor_id
+            or source.get("role") != "agent"
+            or source.get("event_type") != "agent_final"
+            or (source.get("provenance") or {}).get("generation_request_id")
+            != payload["generation_request_id"]
+        ):
+            raise StaleCandidateError("candidate source is not the exact accepted final")
+
+        candidate = payload["candidate"]
+        evidence_ids = tuple(candidate["evidence_event_ids"])
+        if payload["source_event_id"] not in evidence_ids or any(
+            event_id not in visible for event_id in evidence_ids
+        ):
+            raise StaleCandidateError("candidate cites unauthorized evidence")
+        if candidate["sensitivity_hint"]:
+            raise SensitiveCandidateError(
+                "agent candidates cannot create confidential memory in v1"
+            )
+
+        evidence = {event_id: visible[event_id] for event_id in evidence_ids}
+        perspective = (
+            Perspective(actor_id)
+            if candidate["perspective"] != actor_id
+            else Perspective(candidate["perspective"])
+        )
+        provenance = {
+            "actor_id": actor_id,
+            "room_id": fence["room_id"],
+            "conversation_id": fence["conversation_id"],
+            "burst_id": fence["burst_id"],
+            "trigger_event_id": fence["trigger_event_id"],
+            "fence_epoch": fence["fence_epoch"],
+            "source_event_id": payload["source_event_id"],
+            "generation_request_id": payload["generation_request_id"],
+            "candidate_index": payload["candidate_index"],
+            "evidence_event_ids": list(evidence_ids),
+        }
+        write = MemoryWrite(
+            content=candidate["content"],
+            scope=_candidate_scope(evidence),
+            memory_type=MemoryType(candidate["memory_type"]),
+            perspective=perspective,
+            confidential=False,
+            source_kind=SourceKind.AGENT_CANDIDATE,
+            confidence=candidate["confidence"],
+            evidence_count=len(evidence_ids),
+            provenance=provenance,
+        )
+        auth_context = MemoryAuthContext(actor_id=actor_id, room_id=fence["room_id"])
+        identity = (
+            actor_id,
+            payload["generation_request_id"],
+            payload["candidate_index"],
+        )
+        payload_hash = hashlib.sha256(
+            json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            memory_id = await self.persist(
+                identity=identity,
+                payload_hash=payload_hash,
+                write=write,
+                auth_context=auth_context,
+            )
+        except ValueError as exc:
+            raise ContractError("candidate identity conflict") from exc
+        return MemoryCandidateReceipt.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "accepted": True,
+                "memory_id": memory_id,
+                "source_event_id": payload["source_event_id"],
+            }
         )
 
 

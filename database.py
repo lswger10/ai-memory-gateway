@@ -148,6 +148,17 @@ CREATE TABLE IF NOT EXISTS relationship_summaries (
 CREATE INDEX IF NOT EXISTS idx_relationship_summaries_scope
     ON relationship_summaries(scope, confidential, status, id);
 
+CREATE TABLE IF NOT EXISTS group_memory_candidate_receipts (
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    generation_request_id TEXT NOT NULL,
+    candidate_index INTEGER NOT NULL CHECK (candidate_index = 0),
+    payload_hash TEXT NOT NULL,
+    memory_id BIGINT NOT NULL REFERENCES memories(id),
+    source_event_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (actor_id, generation_request_id, candidate_index)
+);
+
 CREATE TABLE IF NOT EXISTS cold_archive_raw (
     id BIGSERIAL PRIMARY KEY,
     source_system TEXT NOT NULL,
@@ -781,6 +792,82 @@ async def save_memory(
             except Exception as e:
                 print(f"⚠️ 记忆 {row['id']} embedding自动计算失败: {e}")
         return row["id"] if row else None
+
+
+class CandidateIdentityConflict(ValueError):
+    """A stable candidate identity was reused with different canonical bytes."""
+
+
+async def persist_group_memory_candidate(
+    *,
+    identity: tuple[str, str, int],
+    payload_hash: str,
+    write,
+    auth_context,
+) -> str:
+    """Atomically persist one typed memory and its restart-safe receipt."""
+    actor_id, generation_request_id, candidate_index = identity
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            lock_key = f"group-candidate:{actor_id}:{generation_request_id}:{candidate_index}"
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", lock_key)
+            existing = await conn.fetchrow(
+                """
+                SELECT payload_hash, memory_id, source_event_id
+                FROM group_memory_candidate_receipts
+                WHERE actor_id=$1 AND generation_request_id=$2 AND candidate_index=$3
+                """,
+                actor_id,
+                generation_request_id,
+                candidate_index,
+            )
+            if existing:
+                if existing["payload_hash"] != payload_hash:
+                    raise CandidateIdentityConflict("candidate identity conflict")
+                return f"memory-{int(existing['memory_id'])}"
+
+            provenance = dict(write.provenance or {})
+            source_event_id = int(provenance["source_event_id"])
+            memory_id = await conn.fetchval(
+                """
+                INSERT INTO memories (
+                    content, importance, source_session, provenance,
+                    scope, memory_type, perspective, confidential, status,
+                    confidence, evidence_count, last_supported_at, source_kind, evidence
+                )
+                VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+                RETURNING id
+                """,
+                write.content,
+                provenance.get("conversation_id", ""),
+                json.dumps(provenance, ensure_ascii=False),
+                write.scope.value,
+                write.memory_type.value,
+                write.perspective.value,
+                bool(write.confidential),
+                write.status.value,
+                write.confidence,
+                int(write.evidence_count),
+                provenance.get("last_supported_at"),
+                write.source_kind.value,
+                json.dumps(provenance.get("evidence_event_ids", [])),
+            )
+            await conn.execute(
+                """
+                INSERT INTO group_memory_candidate_receipts (
+                    actor_id, generation_request_id, candidate_index,
+                    payload_hash, memory_id, source_event_id
+                ) VALUES ($1,$2,$3,$4,$5,$6)
+                """,
+                actor_id,
+                generation_request_id,
+                candidate_index,
+                payload_hash,
+                memory_id,
+                source_event_id,
+            )
+            return f"memory-{int(memory_id)}"
 
 
 async def search_legacy_memories(query: str, limit: int = 10):

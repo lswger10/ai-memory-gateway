@@ -28,8 +28,19 @@ from fastapi.templating import Jinja2Templates
 
 from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
-from group_contracts import CONTRACT_VERSION, ContractError, ContextPackRequest
-from group_memory import GroupContextPackService, build_synthetic_scoped_search
+from group_contracts import (
+    CONTRACT_VERSION,
+    ContractError,
+    ContextPackRequest,
+    MemoryCandidateRequest,
+)
+from group_memory import (
+    CandidateIngressService,
+    GroupContextPackService,
+    SensitiveCandidateError,
+    StaleCandidateError,
+    build_synthetic_scoped_search,
+)
 from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
 from memory_policy import group_memory_features_from_env
 from relay_group_client import RelayGroupClient, RelayGroupError
@@ -350,6 +361,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
 _group_context_service = None
+_group_candidate_service = None
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -367,7 +379,7 @@ PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico")
 async def gateway_auth_middleware(request: Request, call_next):
     """检查 GATEWAY_SECRET，保护所有非公开端点"""
     path = request.url.path
-    if path.startswith("/internal/group/context-packs/"):
+    if path.startswith("/internal/group/context-packs/") or path == "/internal/group/memory-candidates":
         return await call_next(request)
 
     # 未设置密钥时跳过鉴权（兼容旧部署，但会打印警告）
@@ -444,6 +456,32 @@ def _get_group_context_service() -> GroupContextPackService:
     return _group_context_service
 
 
+def _get_group_candidate_service() -> CandidateIngressService:
+    global _group_candidate_service
+    if _group_candidate_service is None:
+        relay_url = os.environ.get("GROUP_RELAY_BASE_URL", "").strip()
+        relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
+        if not relay_url or not relay_key:
+            raise RelayGroupError(503, "dependency_unavailable")
+        _group_candidate_service = CandidateIngressService(
+            RelayGroupClient(relay_url, relay_key)
+        )
+    return _group_candidate_service
+
+
+def _derive_candidate_actor(request: Request) -> str | None:
+    provided = _group_bearer(request)
+    matches = []
+    for actor_id, env_name in (
+        ("jiao", "GROUP_JIAO_MEMORY_CANDIDATE_KEY"),
+        ("laoke", "GROUP_LAOKE_MEMORY_CANDIDATE_KEY"),
+    ):
+        expected = os.environ.get(env_name, "")
+        if expected and secrets.compare_digest(provided, expected):
+            matches.append(actor_id)
+    return matches[0] if len(matches) == 1 else None
+
+
 async def _build_group_context_pack(request: Request, pack_kind: str):
     if not group_memory_features_from_env()["group_memory"]:
         return _group_error(404, "group_feature_disabled", "Group memory is disabled")
@@ -478,6 +516,33 @@ async def group_context_pack_probe(request: Request):
 @app.post("/internal/group/context-packs/full")
 async def group_context_pack_full(request: Request):
     return await _build_group_context_pack(request, "full")
+
+
+@app.post("/internal/group/memory-candidates")
+async def group_memory_candidate(request: Request):
+    features = group_memory_features_from_env()
+    if not features["group_memory"] or not features["agent_candidates"]:
+        return _group_error(404, "group_feature_disabled", "Group candidates are disabled")
+    if request.headers.get("X-Group-Contract-Version") != CONTRACT_VERSION:
+        return _group_error(
+            409, "contract_version_mismatch", "Unsupported Group contract version"
+        )
+    actor_id = _derive_candidate_actor(request)
+    if actor_id is None:
+        return _group_error(403, "principal_not_allowed", "Principal is not allowed")
+    try:
+        candidate_request = MemoryCandidateRequest.from_dict(await request.json())
+        receipt = await _get_group_candidate_service().accept(actor_id, candidate_request)
+    except (ValueError, json.JSONDecodeError, ContractError, TypeError):
+        return _group_error(422, "invalid_group_payload", "Invalid Group payload")
+    except (StaleCandidateError,):
+        return _group_error(409, "stale_fence", "Candidate final is stale")
+    except SensitiveCandidateError:
+        return _group_error(403, "principal_not_allowed", "Candidate is not permitted")
+    except RelayGroupError as exc:
+        code = "stale_fence" if exc.code in {"stale_fence", "fact_not_visible"} else exc.code
+        return _group_error(exc.status_code, code, "Group dependency rejected request")
+    return JSONResponse(status_code=200, content=receipt.to_dict())
 
 
 # ============================================================
