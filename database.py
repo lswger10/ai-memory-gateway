@@ -49,6 +49,12 @@ MEMORY_HW_SEMANTIC = float(os.getenv("MEMORY_HW_SEMANTIC", "0.35"))
 MEMORY_HW_IMPORTANCE = float(os.getenv("MEMORY_HW_IMPORTANCE", "0.15"))
 MEMORY_HW_RECENCY = float(os.getenv("MEMORY_HW_RECENCY", "0.15"))
 MEMORY_SEMANTIC_THRESHOLD = float(os.getenv("MEMORY_SEMANTIC_THRESHOLD", "0.5"))
+MEMORY_INFERENCE_HALF_LIFE_SECONDS = float(
+    os.getenv("MEMORY_INFERENCE_HALF_LIFE_SECONDS", str(30 * 86400))
+)
+MEMORY_INFERENCE_EXPIRY_THRESHOLD = float(
+    os.getenv("MEMORY_INFERENCE_EXPIRY_THRESHOLD", "0.1")
+)
 
 
 # ============================================================
@@ -966,17 +972,36 @@ async def search_legacy_memories_hybrid(query: str, limit: int = 10):
         return [dict(r) for r in results]
 
 
-def _authorized_predicate(policy: RetrievalPolicy, start_index: int) -> tuple[str, list]:
+def _authorized_predicate(
+    policy: RetrievalPolicy,
+    start_index: int,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, list]:
     if not isinstance(policy, RetrievalPolicy):
         raise TypeError("search_authorized_memories requires RetrievalPolicy")
     scope_index = start_index
     confidential_index = start_index + 1
+    now_index = start_index + 2
+    half_life_index = start_index + 3
+    threshold_index = start_index + 4
+    effective_now = now or datetime.now(dt_timezone.utc)
     predicate = (
         f"scope = ANY(${scope_index}::text[]) "
         "AND status = 'active' AND is_active = TRUE "
         f"AND (confidential = FALSE OR scope = ANY(${confidential_index}::text[]))"
+        " AND (memory_type <> 'inference' OR (confidence IS NOT NULL "
+        "AND last_supported_at IS NOT NULL AND confidence * POWER(0.5, "
+        f"GREATEST(0, EXTRACT(EPOCH FROM (${now_index}::timestamptz - last_supported_at))) "
+        f"/ ${half_life_index}) >= ${threshold_index}))"
     )
-    return predicate, [list(policy.allowed_scopes), list(policy.confidential_scopes)]
+    return predicate, [
+        list(policy.allowed_scopes),
+        list(policy.confidential_scopes),
+        effective_now,
+        MEMORY_INFERENCE_HALF_LIFE_SECONDS,
+        MEMORY_INFERENCE_EXPIRY_THRESHOLD,
+    ]
 
 
 async def search_authorized_archive_candidates(
@@ -1001,6 +1026,8 @@ async def search_authorized_memories(
     query: str,
     policy: RetrievalPolicy,
     limit: int = 10,
+    *,
+    now: datetime | None = None,
 ) -> AuthorizedMemorySearchResult:
     """Create candidates only from rows already filtered by actor/room policy."""
     if not isinstance(policy, RetrievalPolicy):
@@ -1026,12 +1053,15 @@ async def search_authorized_memories(
             for index, keyword in enumerate(keywords, start=1):
                 keyword_parts.append(f"content ILIKE '%' || ${index} || '%'")
                 params.append(keyword)
-            predicate, policy_params = _authorized_predicate(policy, len(params) + 1)
+            predicate, policy_params = _authorized_predicate(
+                policy, len(params) + 1, now=now
+            )
             params.extend(policy_params)
             limit_index = len(params) + 1
             params.append(limit * 3)
             rows = await conn.fetch(
-                "SELECT id, content, importance, created_at, scope, confidential, status "
+                "SELECT id, content, importance, created_at, scope, confidential, status, "
+                "memory_type, confidence, last_supported_at "
                 "FROM memories WHERE "
                 f"{predicate} AND ({' OR '.join(keyword_parts)}) "
                 f"ORDER BY importance DESC, created_at DESC LIMIT ${limit_index}",
@@ -1044,22 +1074,25 @@ async def search_authorized_memories(
 
         if query_embedding:
             if HAS_PGVECTOR:
-                predicate, policy_params = _authorized_predicate(policy, 2)
+                predicate, policy_params = _authorized_predicate(policy, 2, now=now)
                 vector = "[" + ",".join(str(value) for value in query_embedding) + "]"
+                limit_index = 2 + len(policy_params)
                 rows = await conn.fetch(
                     "SELECT id, content, importance, created_at, scope, confidential, status, "
+                    "memory_type, confidence, last_supported_at, "
                     "1 - (embedding <=> $1::vector) AS similarity "
                     f"FROM memories WHERE {predicate} AND embedding IS NOT NULL "
-                    "ORDER BY embedding <=> $1::vector LIMIT $4",
+                    f"ORDER BY embedding <=> $1::vector LIMIT ${limit_index}",
                     vector,
                     *policy_params,
                     limit * 3,
                 )
                 vector_ids.extend(int(row["id"]) for row in rows)
             else:
-                predicate, policy_params = _authorized_predicate(policy, 1)
+                predicate, policy_params = _authorized_predicate(policy, 1, now=now)
                 rows = await conn.fetch(
-                    "SELECT id, content, importance, created_at, scope, confidential, status, embedding_json "
+                    "SELECT id, content, importance, created_at, scope, confidential, status, "
+                    "memory_type, confidence, last_supported_at, embedding_json "
                     f"FROM memories WHERE {predicate} AND embedding_json IS NOT NULL",
                     *policy_params,
                 )
@@ -1068,7 +1101,21 @@ async def search_authorized_memories(
                 item = dict(row)
                 candidates.setdefault(item["id"], item)
 
-        selected = list(candidates.values())[:limit]
+        effective_now = now or datetime.now(dt_timezone.utc)
+        def rank_value(item: dict) -> tuple[float, int]:
+            if item.get("memory_type") != "inference":
+                return (1.0, int(item.get("importance") or 0))
+            confidence = item.get("confidence")
+            supported = item.get("last_supported_at")
+            if confidence is None or supported is None:
+                return (0.0, int(item.get("importance") or 0))
+            elapsed = max(0.0, (effective_now - supported).total_seconds())
+            effective = float(confidence) * 0.5 ** (
+                elapsed / MEMORY_INFERENCE_HALF_LIFE_SECONDS
+            )
+            return (effective, int(item.get("importance") or 0))
+
+        selected = sorted(candidates.values(), key=rank_value, reverse=True)[:limit]
         if selected:
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
