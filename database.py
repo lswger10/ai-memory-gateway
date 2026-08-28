@@ -165,11 +165,15 @@ CREATE TABLE IF NOT EXISTS group_burst_extraction_progress (
     room_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
     trigger_event_id BIGINT NOT NULL,
+    estimated_tokens INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processed')),
     enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processed_at TIMESTAMPTZ,
     PRIMARY KEY (burst_id, fence_epoch)
 );
+
+ALTER TABLE group_burst_extraction_progress
+    ADD COLUMN IF NOT EXISTS estimated_tokens INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS cold_archive_raw (
     id BIGSERIAL PRIMARY KEY,
@@ -819,6 +823,18 @@ async def persist_group_memory_candidate(
 ) -> str:
     """Atomically persist one typed memory and its restart-safe receipt."""
     actor_id, generation_request_id, candidate_index = identity
+    expected_scope = {
+        "jiao": "weiwei-jiao",
+        "laoke": "weiwei-laoke",
+    }.get(actor_id)
+    if (
+        expected_scope is None
+        or write.scope.value != expected_scope
+        or write.perspective.value != actor_id
+        or write.source_kind.value != "agent_candidate"
+        or write.confidential
+    ):
+        raise PermissionError("invalid actor candidate memory class")
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -843,28 +859,40 @@ async def persist_group_memory_candidate(
             source_event_id = int(provenance["source_event_id"])
             memory_id = await conn.fetchval(
                 """
-                INSERT INTO memories (
-                    content, importance, source_session, provenance,
-                    scope, memory_type, perspective, confidential, status,
-                    confidence, evidence_count, last_supported_at, source_kind, evidence
-                )
-                VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
-                RETURNING id
+                SELECT id FROM memories
+                WHERE scope=$1 AND perspective=$2 AND status='active'
+                  AND LOWER(BTRIM(content))=LOWER(BTRIM($3))
+                ORDER BY id LIMIT 1
                 """,
-                write.content,
-                provenance.get("conversation_id", ""),
-                json.dumps(provenance, ensure_ascii=False),
                 write.scope.value,
-                write.memory_type.value,
                 write.perspective.value,
-                bool(write.confidential),
-                write.status.value,
-                write.confidence,
-                int(write.evidence_count),
-                provenance.get("last_supported_at"),
-                write.source_kind.value,
-                json.dumps(provenance.get("evidence_event_ids", [])),
+                write.content,
             )
+            if memory_id is None:
+                memory_id = await conn.fetchval(
+                    """
+                    INSERT INTO memories (
+                        content, importance, source_session, provenance,
+                        scope, memory_type, perspective, confidential, status,
+                        confidence, evidence_count, last_supported_at, source_kind, evidence
+                    )
+                    VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+                    RETURNING id
+                    """,
+                    write.content,
+                    provenance.get("conversation_id", ""),
+                    json.dumps(provenance, ensure_ascii=False),
+                    write.scope.value,
+                    write.memory_type.value,
+                    write.perspective.value,
+                    bool(write.confidential),
+                    write.status.value,
+                    write.confidence,
+                    int(write.evidence_count),
+                    provenance.get("last_supported_at"),
+                    write.source_kind.value,
+                    json.dumps(provenance.get("evidence_event_ids", [])),
+                )
             await conn.execute(
                 """
                 INSERT INTO group_memory_candidate_receipts (
@@ -882,7 +910,92 @@ async def persist_group_memory_candidate(
             return f"memory-{int(memory_id)}"
 
 
-async def enqueue_group_closed_burst(closed_ref: dict) -> dict:
+async def persist_group_extracted_memory(write, auth_context) -> int:
+    """Persist one Gateway-classified Group extraction with exact dedupe.
+
+    The caller has already performed evidence-aware classification. These
+    checks are deliberately repeated at the database boundary so a future
+    caller cannot bypass the Group writer policy accidentally.
+    """
+    if auth_context.actor_id != "weiwei" or auth_context.room_id != "room_group_home":
+        raise PermissionError("batch extraction requires Gateway Group authority")
+    if write.source_kind.value != "chat_extraction" or write.confidential:
+        raise PermissionError("invalid batch extraction class")
+    if write.scope.value not in {
+        "weiwei-jiao", "weiwei-laoke", "jiao-laoke", "group"
+    }:
+        raise PermissionError("invalid batch extraction scope")
+    provenance = dict(write.provenance or {})
+    evidence_ids = sorted({int(value) for value in provenance["evidence_event_ids"]})
+    lock_material = "|".join(
+        (write.scope.value, write.perspective.value, " ".join(write.content.split()).casefold())
+    )
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"group-memory:{lock_material}",
+            )
+            existing = await conn.fetchrow(
+                """
+                SELECT id, evidence
+                FROM memories
+                WHERE scope=$1 AND perspective=$2 AND status='active'
+                  AND LOWER(BTRIM(content))=LOWER(BTRIM($3))
+                ORDER BY id LIMIT 1
+                """,
+                write.scope.value,
+                write.perspective.value,
+                write.content,
+            )
+            if existing is not None:
+                current = existing["evidence"] or []
+                if isinstance(current, str):
+                    current = json.loads(current)
+                merged = sorted({int(value) for value in current} | set(evidence_ids))
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET evidence=$1::jsonb, evidence_count=$2, updated_at=NOW(),
+                        last_supported_at=COALESCE($3::timestamptz,last_supported_at)
+                    WHERE id=$4
+                    """,
+                    json.dumps(merged),
+                    len(merged),
+                    provenance.get("last_supported_at"),
+                    int(existing["id"]),
+                )
+                return int(existing["id"])
+            memory_id = await conn.fetchval(
+                """
+                INSERT INTO memories (
+                    content, importance, source_session, provenance,
+                    scope, memory_type, perspective, confidential, status,
+                    confidence, evidence_count, last_supported_at, source_kind, evidence
+                )
+                VALUES ($1,5,$2,$3::jsonb,$4,$5,$6,FALSE,$7,$8,$9,$10,$11,$12::jsonb)
+                RETURNING id
+                """,
+                write.content,
+                provenance.get("conversation_id", ""),
+                json.dumps(provenance, ensure_ascii=False),
+                write.scope.value,
+                write.memory_type.value,
+                write.perspective.value,
+                write.status.value,
+                write.confidence,
+                len(evidence_ids),
+                provenance.get("last_supported_at"),
+                write.source_kind.value,
+                json.dumps(evidence_ids),
+            )
+            return int(memory_id)
+
+
+async def enqueue_group_closed_burst(
+    closed_ref: dict, *, estimated_tokens: int = 0
+) -> dict:
     """Persist only the closed fence cursor; Relay retains all source content."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -894,7 +1007,7 @@ async def enqueue_group_closed_burst(closed_ref: dict) -> dict:
             existing = await conn.fetchrow(
                 """
                 SELECT room_id, conversation_id, trigger_event_id, burst_id,
-                       fence_epoch, status
+                       fence_epoch, estimated_tokens, enqueued_at, status
                 FROM group_burst_extraction_progress
                 WHERE burst_id=$1 AND fence_epoch=$2
                 """,
@@ -908,20 +1021,32 @@ async def enqueue_group_closed_burst(closed_ref: dict) -> dict:
                 ):
                     if row[field] != closed_ref[field]:
                         raise CandidateIdentityConflict("closed fence identity conflict")
-                return {"closed_fence": {k: row[k] for k in closed_ref}, "status": row["status"]}
+                return {
+                    "closed_fence": {k: row[k] for k in closed_ref},
+                    "estimated_tokens": int(row["estimated_tokens"]),
+                    "enqueued_at": row["enqueued_at"],
+                    "status": row["status"],
+                }
             await conn.execute(
                 """
                 INSERT INTO group_burst_extraction_progress (
-                    burst_id, fence_epoch, room_id, conversation_id, trigger_event_id
-                ) VALUES ($1,$2,$3,$4,$5)
+                    burst_id, fence_epoch, room_id, conversation_id,
+                    trigger_event_id, estimated_tokens
+                ) VALUES ($1,$2,$3,$4,$5,$6)
                 """,
                 closed_ref["burst_id"],
                 closed_ref["fence_epoch"],
                 closed_ref["room_id"],
                 closed_ref["conversation_id"],
                 closed_ref["trigger_event_id"],
+                max(0, int(estimated_tokens)),
             )
-            return {"closed_fence": dict(closed_ref), "status": "queued"}
+            return {
+                "closed_fence": dict(closed_ref),
+                "estimated_tokens": max(0, int(estimated_tokens)),
+                "enqueued_at": datetime.now(dt_timezone.utc),
+                "status": "queued",
+            }
 
 
 async def get_pending_group_closed_bursts(limit: int = 10) -> list[dict]:
@@ -929,14 +1054,26 @@ async def get_pending_group_closed_bursts(limit: int = 10) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT room_id, conversation_id, trigger_event_id, burst_id, fence_epoch
+            SELECT room_id, conversation_id, trigger_event_id, burst_id, fence_epoch,
+                   estimated_tokens, enqueued_at
             FROM group_burst_extraction_progress
             WHERE status='queued' ORDER BY enqueued_at, burst_id LIMIT $1
             """,
             limit,
         )
     return [
-        {"closed_fence": dict(row), "status": "queued"}
+        {
+            "closed_fence": {
+                key: row[key]
+                for key in (
+                    "room_id", "conversation_id", "trigger_event_id",
+                    "burst_id", "fence_epoch"
+                )
+            },
+            "estimated_tokens": int(row["estimated_tokens"]),
+            "enqueued_at": row["enqueued_at"],
+            "status": "queued",
+        }
         for row in rows
     ]
 

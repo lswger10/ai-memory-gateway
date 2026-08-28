@@ -13,6 +13,10 @@ import re
 import httpx
 from typing import List, Dict
 
+
+class GroupExtractionUnavailable(RuntimeError):
+    pass
+
 API_KEY = os.getenv("API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
 
@@ -252,6 +256,77 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     except Exception as e:
         print(f"⚠️  记忆提取出错: {e}")
         return []
+
+
+GROUP_EXTRACTION_PROMPT = """You extract typed long-term memory only from the supplied
+public Group Room events. Return a JSON array. Every item must contain content,
+scope (weiwei-jiao|weiwei-laoke|jiao-laoke|group), memory_type (fact|inference),
+perspective (weiwei|jiao|laoke), confidence (0..1), and evidence_event_ids.
+Never output confidential memory or perspective=shared. Do not infer facts from
+reactions alone. If nothing is worth retaining, return []."""
+
+
+async def extract_group_memories(facts: Dict) -> List[Dict]:
+    """Extract typed proposals from Relay-owned closed public facts.
+
+    This function performs the provider call only. Gateway policy validation,
+    scope authorization, dedupe, and persistence remain in group_memory.py.
+    """
+    key = get_memory_api_key()
+    if not key:
+        raise GroupExtractionUnavailable("memory extraction key is not configured")
+    events = [facts["trigger_event"]] + list(
+        facts.get("accepted_burst_public_events") or []
+    )
+    public_events = [
+        {
+            "event_id": event["event_id"],
+            "actor_id": event["actor_id"],
+            "content": event["content"],
+            "created_at": event.get("created_at"),
+            "reactions": (facts.get("reactions_by_event") or {}).get(
+                str(event["event_id"]), {}
+            ),
+        }
+        for event in events
+        if event.get("visibility") == "room"
+    ]
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            API_BASE_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": MEMORY_MODEL,
+                "temperature": 0,
+                "max_tokens": 1200,
+                "messages": [
+                    {"role": "system", "content": GROUP_EXTRACTION_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps(public_events, ensure_ascii=False),
+                    },
+                ],
+            },
+        )
+    if response.status_code != 200:
+        raise GroupExtractionUnavailable(
+            f"group memory provider returned HTTP {response.status_code}"
+        )
+    text = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+    text = str(text).strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    try:
+        parsed = json.loads(text.strip())
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise GroupExtractionUnavailable("group memory provider returned invalid JSON") from exc
+    if not isinstance(parsed, list):
+        raise GroupExtractionUnavailable("group memory provider did not return a list")
+    return parsed
 
 
 SCORING_PROMPT = """你是记忆重要性评分专家。请对以下记忆条目逐条评分。

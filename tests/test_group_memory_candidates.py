@@ -171,6 +171,17 @@ def test_candidate_cannot_cite_an_event_outside_relay_visible_facts():
         asyncio.run(service.accept("jiao", MemoryCandidateRequest.from_dict(body)))
 
 
+def test_database_boundary_reasserts_private_candidate_class_and_cross_source_dedupe():
+    import inspect
+    import database
+
+    source = inspect.getsource(database.persist_group_memory_candidate)
+    assert '"jiao": "weiwei-jiao"' in source
+    assert '"laoke": "weiwei-laoke"' in source
+    assert 'write.source_kind.value != "agent_candidate"' in source
+    assert "LOWER(BTRIM(content))=LOWER(BTRIM($3))" in source
+
+
 def candidate_headers(key):
     return {
         "Authorization": f"Bearer {key}",

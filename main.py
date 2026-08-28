@@ -38,13 +38,19 @@ from group_contracts import (
 from group_memory import (
     CandidateIngressService,
     ClosedBurstExtractionService,
+    GroupBatchExtractionPipeline,
     GroupContextPackService,
     SensitiveCandidateError,
     StaleCandidateError,
     UnstableBurstError,
     build_synthetic_scoped_search,
 )
-from memory_extractor import extract_memories, score_memories, is_explicit_memory_request
+from memory_extractor import (
+    extract_group_memories,
+    extract_memories,
+    score_memories,
+    is_explicit_memory_request,
+)
 from memory_policy import group_memory_features_from_env
 from relay_group_client import RelayGroupClient, RelayGroupError
 
@@ -274,10 +280,23 @@ def invalidate_system_prompt_cache():
 # 应用生命周期管理
 # ============================================================
 
+async def _group_extraction_worker() -> None:
+    """Resume durable closed-burst work; failed units remain queued."""
+    interval = max(1.0, float(os.environ.get("GROUP_EXTRACTION_POLL_SECONDS", "30")))
+    while True:
+        try:
+            await _get_group_extraction_service().process_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[warning] Group memory extraction deferred: {type(exc).__name__}")
+        await asyncio.sleep(interval)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动时初始化数据库，关闭时断开连接"""
     global PARTITION_SESSION_ID
+    group_worker_task = None
     if MEMORY_ENABLED:
         try:
             await init_tables()
@@ -356,7 +375,18 @@ async def lifespan(app: FastAPI):
     else:
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
     
+    features = group_memory_features_from_env()
+    if MEMORY_ENABLED and features["group_memory"] and features["burst_extraction"]:
+        group_worker_task = asyncio.create_task(_group_extraction_worker())
+
     yield
+
+    if group_worker_task is not None:
+        group_worker_task.cancel()
+        try:
+            await group_worker_task
+        except asyncio.CancelledError:
+            pass
     
     if MEMORY_ENABLED:
         await close_pool()
@@ -485,7 +515,17 @@ def _get_group_extraction_service() -> ClosedBurstExtractionService:
         if not relay_url or not relay_key:
             raise RelayGroupError(503, "dependency_unavailable")
         _group_extraction_service = ClosedBurstExtractionService(
-            RelayGroupClient(relay_url, relay_key)
+            RelayGroupClient(relay_url, relay_key),
+            extractor=GroupBatchExtractionPipeline(extract_group_memories),
+            burst_threshold=max(
+                1, int(os.environ.get("GROUP_EXTRACTION_BURST_THRESHOLD", "3"))
+            ),
+            token_threshold=max(
+                0, int(os.environ.get("GROUP_EXTRACTION_TOKEN_THRESHOLD", "4000"))
+            ),
+            max_wait_seconds=max(
+                0.0, float(os.environ.get("GROUP_EXTRACTION_MAX_WAIT_SECONDS", "300"))
+            ),
         )
     return _group_extraction_service
 

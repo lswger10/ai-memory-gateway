@@ -32,9 +32,16 @@ class MemoryQueue:
     def __init__(self):
         self.rows = {}
 
-    async def enqueue(self, closed_ref):
+    async def enqueue(self, closed_ref, *, estimated_tokens=0):
         key = (closed_ref["burst_id"], closed_ref["fence_epoch"])
-        self.rows.setdefault(key, {"closed_fence": dict(closed_ref), "status": "queued"})
+        self.rows.setdefault(
+            key,
+            {
+                "closed_fence": dict(closed_ref),
+                "estimated_tokens": estimated_tokens,
+                "status": "queued",
+            },
+        )
         return dict(self.rows[key])
 
     async def pending(self):
@@ -135,6 +142,134 @@ def test_duplicate_enqueue_keeps_one_cursor_without_copied_text():
     serialized = json.dumps(list(queue.rows.values()))
     assert "椒椒" not in serialized
     assert "content" not in serialized
+
+
+def test_unconfigured_extractor_never_marks_durable_cursor_processed():
+    from group_contracts import ClosedBurstExtractionRequest
+    from group_memory import ClosedBurstExtractionService, GroupExtractorUnavailable
+
+    queue = MemoryQueue()
+    service = ClosedBurstExtractionService(FakeRelay(), queue)
+    request = ClosedBurstExtractionRequest.from_dict(REQUEST)
+    asyncio.run(service.enqueue(request))
+
+    with pytest.raises(GroupExtractorUnavailable):
+        asyncio.run(service.process_once())
+
+    assert next(iter(queue.rows.values()))["status"] == "queued"
+    assert service.extraction_unit_count == 0
+
+
+def test_group_batch_pipeline_validates_scope_and_perspective_before_persisting():
+    from group_memory import GroupBatchExtractionPipeline
+
+    writes = []
+
+    async def model_extract(_facts):
+        return [
+            {
+                "content": "椒椒对薇薇承诺会记住兰花。",
+                "scope": "weiwei-jiao",
+                "memory_type": "fact",
+                "perspective": "jiao",
+                "confidence": 0.9,
+                "evidence_event_ids": [101, 201],
+            }
+        ]
+
+    async def persist(write, auth_context):
+        writes.append((write, auth_context))
+        return 1
+
+    pipeline = GroupBatchExtractionPipeline(model_extract, persist=persist)
+    asyncio.run(pipeline(CLOSED_FACTS))
+
+    write, auth = writes[0]
+    assert write.scope.value == "weiwei-jiao"
+    assert write.perspective.value == "jiao"
+    assert write.source_kind.value == "chat_extraction"
+    assert auth.actor_id == "weiwei"
+    assert auth.room_id == "room_group_home"
+
+
+def test_group_batch_pipeline_rejects_pairwise_scope_with_third_party_evidence():
+    from group_memory import GroupBatchExtractionPipeline, ForbiddenMemoryWrite
+
+    facts = json.loads(json.dumps(CLOSED_FACTS))
+    other = json.loads(json.dumps(facts["accepted_burst_public_events"][0]))
+    other.update({"event_id": 202, "actor_id": "laoke"})
+    facts["accepted_burst_public_events"].append(other)
+
+    async def model_extract(_facts):
+        return [
+            {
+                "content": "不应进入椒椒私域的三方内容",
+                "scope": "weiwei-jiao",
+                "memory_type": "inference",
+                "perspective": "jiao",
+                "confidence": 0.7,
+                "evidence_event_ids": [101, 201, 202],
+            }
+        ]
+
+    pipeline = GroupBatchExtractionPipeline(model_extract, persist=lambda *_: None)
+    with pytest.raises(ForbiddenMemoryWrite):
+        asyncio.run(pipeline(facts))
+
+
+def test_group_extractor_without_key_keeps_queue_retryable():
+    import memory_extractor
+
+    with patch.object(memory_extractor, "API_KEY", ""), patch.object(
+        memory_extractor, "MEMORY_API_KEY", ""
+    ):
+        with pytest.raises(memory_extractor.GroupExtractionUnavailable):
+            asyncio.run(memory_extractor.extract_group_memories(CLOSED_FACTS))
+
+
+def test_gateway_lifespan_owns_group_extraction_worker():
+    from pathlib import Path
+
+    source = Path("main.py").read_text(encoding="utf-8")
+    assert "_group_extraction_worker" in source
+    assert "asyncio.create_task(_group_extraction_worker" in source
+
+
+def test_persisted_threshold_defers_incomplete_batch_without_losing_cursor():
+    from group_contracts import ClosedBurstExtractionRequest
+    from group_memory import ClosedBurstExtractionService
+
+    seen = []
+
+    async def extractor(facts):
+        seen.append(facts)
+
+    queue = MemoryQueue()
+    service = ClosedBurstExtractionService(
+        FakeRelay(),
+        queue,
+        extractor=extractor,
+        burst_threshold=2,
+        token_threshold=0,
+        max_wait_seconds=0,
+    )
+    asyncio.run(service.enqueue(ClosedBurstExtractionRequest.from_dict(REQUEST)))
+
+    assert asyncio.run(service.process_once()) == 0
+    assert next(iter(queue.rows.values()))["status"] == "queued"
+    assert next(iter(queue.rows.values()))["estimated_tokens"] > 0
+    assert seen == []
+
+
+def test_extraction_progress_schema_persists_counter_without_message_text():
+    import database
+
+    sql = database.SCOPED_MEMORY_MIGRATION_SQL
+    progress = sql[sql.index("CREATE TABLE IF NOT EXISTS group_burst_extraction_progress") :]
+    progress = progress[: progress.index("CREATE TABLE IF NOT EXISTS cold_archive_raw")]
+    assert "estimated_tokens" in progress
+    assert "content" not in progress
+    assert "message" not in progress
 
 
 def extraction_headers(key="relay-key"):

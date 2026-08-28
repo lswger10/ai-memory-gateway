@@ -16,6 +16,7 @@ from database import (
     enqueue_group_closed_burst,
     get_pending_group_closed_bursts,
     persist_group_memory_candidate,
+    persist_group_extracted_memory,
     search_authorized_memories,
     search_authorized_summary_candidates,
 )
@@ -68,6 +69,10 @@ class UnstableBurstError(RuntimeError):
     def __init__(self, message: str, code: str = "stale_fence"):
         super().__init__(message)
         self.code = code
+
+
+class GroupExtractorUnavailable(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -483,8 +488,10 @@ class CandidateIngressService:
 
 
 class DatabaseClosedBurstQueue:
-    async def enqueue(self, closed_ref: dict) -> dict:
-        return await enqueue_group_closed_burst(closed_ref)
+    async def enqueue(self, closed_ref: dict, *, estimated_tokens: int = 0) -> dict:
+        return await enqueue_group_closed_burst(
+            closed_ref, estimated_tokens=estimated_tokens
+        )
 
     async def pending(self) -> list[dict]:
         return await get_pending_group_closed_bursts()
@@ -494,7 +501,87 @@ class DatabaseClosedBurstQueue:
 
 
 async def _no_group_extractor(_facts: dict) -> None:
-    """Queue-only default; a configured worker supplies the real extractor."""
+    """Never acknowledge durable work when no extractor was configured."""
+    raise GroupExtractorUnavailable("Group extractor is not configured")
+
+
+_BATCH_SCOPE_ACTORS = {
+    MemoryScope.WEIWEI_JIAO: frozenset({"weiwei", "jiao"}),
+    MemoryScope.WEIWEI_LAOKE: frozenset({"weiwei", "laoke"}),
+    MemoryScope.JIAO_LAOKE: frozenset({"jiao", "laoke"}),
+}
+
+
+class GroupBatchExtractionPipeline:
+    """Validate model output against Relay public facts before typed persistence."""
+
+    def __init__(self, model_extract, *, persist=persist_group_extracted_memory):
+        self.model_extract = model_extract
+        self.persist = persist
+
+    async def __call__(self, facts: dict) -> tuple[int, ...]:
+        events = [facts["trigger_event"]] + list(
+            facts.get("accepted_burst_public_events") or []
+        )
+        visible = {
+            int(event["event_id"]): event
+            for event in events
+            if event.get("visibility") == "room"
+        }
+        proposals = await self.model_extract(facts)
+        persisted: list[int] = []
+        for proposal in proposals:
+            evidence_ids = tuple(int(value) for value in proposal["evidence_event_ids"])
+            if not evidence_ids or any(value not in visible for value in evidence_ids):
+                raise ForbiddenMemoryWrite("batch extraction cites non-public evidence")
+            evidence_actors = frozenset(
+                visible[value]["actor_id"] for value in evidence_ids
+            )
+            scope = MemoryScope(proposal["scope"])
+            scoped_actors = _BATCH_SCOPE_ACTORS.get(scope)
+            if scoped_actors is not None and not evidence_actors <= scoped_actors:
+                raise ForbiddenMemoryWrite("pairwise extraction includes a third party")
+            perspective = Perspective(proposal["perspective"])
+            if perspective is Perspective.SHARED:
+                raise InvalidSharedEvidence(
+                    "automatic extraction cannot promote an observation to shared"
+                )
+            if perspective.value not in evidence_actors:
+                raise ForbiddenMemoryWrite("perspective actor lacks cited evidence")
+            supported = max(
+                (
+                    str(visible[value].get("created_at") or "")
+                    for value in evidence_ids
+                ),
+                default="",
+            ) or None
+            provenance = {
+                "room_id": facts["room_id"],
+                "conversation_id": facts["conversation_id"],
+                "burst_id": facts["burst_id"],
+                "trigger_event_id": facts["trigger_event"]["event_id"],
+                "fence_epoch": facts["fence_epoch"],
+                "evidence_event_ids": list(evidence_ids),
+                "last_supported_at": supported,
+            }
+            write = MemoryWrite(
+                content=proposal["content"],
+                scope=scope,
+                memory_type=MemoryType(proposal["memory_type"]),
+                perspective=perspective,
+                confidential=False,
+                source_kind=SourceKind.CHAT_EXTRACTION,
+                confidence=proposal.get("confidence"),
+                evidence_count=len(evidence_ids),
+                provenance=provenance,
+            )
+            persisted.append(
+                await self.persist(
+                    write,
+                    MemoryAuthContext(actor_id="weiwei", room_id=facts["room_id"]),
+                )
+            )
+        return tuple(persisted)
 
 
 class ClosedBurstExtractionService:
@@ -505,10 +592,24 @@ class ClosedBurstExtractionService:
         "no_available_candidate", "user_preempted", "crash_terminated",
     }
 
-    def __init__(self, relay_client, queue=None, *, extractor=None) -> None:
+    def __init__(
+        self,
+        relay_client,
+        queue=None,
+        *,
+        extractor=None,
+        burst_threshold: int = 1,
+        token_threshold: int = 0,
+        max_wait_seconds: float = 0,
+    ) -> None:
         self.relay_client = relay_client
         self.queue = queue or DatabaseClosedBurstQueue()
         self.extractor = extractor or _no_group_extractor
+        if burst_threshold < 1 or token_threshold < 0 or max_wait_seconds < 0:
+            raise ValueError("invalid Group extraction thresholds")
+        self.burst_threshold = int(burst_threshold)
+        self.token_threshold = int(token_threshold)
+        self.max_wait_seconds = float(max_wait_seconds)
         self._seen: set[tuple[str, int]] = set()
         self.threshold_burst_count = 0
         self.extraction_unit_count = 0
@@ -550,7 +651,13 @@ class ClosedBurstExtractionService:
                 raise UnstableBurstError("Relay rejected closed burst") from exc
             raise
         self._validate_facts(ref, facts)
-        row = await self.queue.enqueue(ref)
+        event_text = "".join(
+            str(event.get("content") or "")
+            for event in [facts["trigger_event"]]
+            + list(facts.get("accepted_burst_public_events") or [])
+        )
+        estimated_tokens = max(1, (len(event_text) + 3) // 4)
+        row = await self.queue.enqueue(ref, estimated_tokens=estimated_tokens)
         key = (ref["burst_id"], ref["fence_epoch"])
         if key not in self._seen:
             self._seen.add(key)
@@ -558,8 +665,26 @@ class ClosedBurstExtractionService:
         return row
 
     async def process_once(self) -> int:
+        pending = await self.queue.pending()
+        if not pending:
+            return 0
+        token_total = sum(int(row.get("estimated_tokens") or 0) for row in pending)
+        oldest = pending[0].get("enqueued_at")
+        if isinstance(oldest, str):
+            oldest = _parse_timestamp(oldest)
+        elapsed_ready = False
+        if self.max_wait_seconds and isinstance(oldest, datetime):
+            elapsed_ready = (
+                datetime.now(timezone.utc) - oldest.astimezone(timezone.utc)
+            ).total_seconds() >= self.max_wait_seconds
+        if not (
+            len(pending) >= self.burst_threshold
+            or (self.token_threshold > 0 and token_total >= self.token_threshold)
+            or elapsed_ready
+        ):
+            return 0
         processed = 0
-        for row in await self.queue.pending():
+        for row in pending:
             request = ClosedBurstExtractionRequest.from_dict(
                 {"contract_version": CONTRACT_VERSION, "closed_fence": row["closed_fence"]}
             )
