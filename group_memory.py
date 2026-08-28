@@ -11,7 +11,7 @@ import math
 from typing import Awaitable, Callable
 
 from actor_prompt_profiles import ActorPromptProfile, load_actor_prompt_profiles
-from database import search_authorized_memories
+from database import search_authorized_memories, search_authorized_summary_candidates
 from group_contracts import (
     CONTRACT_VERSION,
     ContextPackRequest,
@@ -120,9 +120,31 @@ class ScopeAwareMemoryService:
             actor: dict(profile)
             for actor, profile in (identity_profiles or {}).items()
         }
+        self._relationship_summaries: dict[str, dict] = {}
 
     async def identity_profile(self, actor_id: str) -> dict:
         return dict(self._identity_profiles.get(actor_id, {}))
+
+    async def refresh_relationship_summary(
+        self,
+        scope: str,
+        content: str,
+        *,
+        evidence_event_ids: tuple[int, ...],
+        confidential: bool,
+    ) -> dict:
+        if scope not in {"weiwei-jiao", "weiwei-laoke", "jiao-laoke", "group"}:
+            raise ValueError("invalid summary scope")
+        if not content.strip() or not evidence_event_ids:
+            raise ValueError("summary content and evidence are required")
+        summary = {
+            "scope": scope,
+            "content": content,
+            "evidence_event_ids": tuple(evidence_event_ids),
+            "confidential": bool(confidential),
+        }
+        self._relationship_summaries[scope] = summary
+        return dict(summary)
 
     async def get(self, memory_id: int) -> ScopedMemoryRecord:
         return self._records[memory_id]
@@ -288,6 +310,36 @@ class ScopeAwareMemoryService:
 SearchFunction = Callable[
     [str, RetrievalPolicy, int], Awaitable[AuthorizedMemorySearchResult]
 ]
+SummarySearchFunction = Callable[
+    [str, RetrievalPolicy, int], Awaitable[tuple[dict, ...]]
+]
+
+
+async def _empty_summary_search(
+    _query: str, _policy: RetrievalPolicy, _limit: int
+) -> tuple[dict, ...]:
+    return ()
+
+
+def build_scoped_summary_search(rows) -> SummarySearchFunction:
+    normalized = tuple(dict(row) for row in rows)
+
+    async def search(
+        _query: str, policy: RetrievalPolicy, limit: int
+    ) -> tuple[dict, ...]:
+        if not isinstance(policy, RetrievalPolicy):
+            raise TypeError("summary search requires RetrievalPolicy")
+        return tuple(
+            row
+            for row in normalized
+            if row.get("scope") in policy.allowed_scopes
+            and (
+                not row.get("confidential", False)
+                or row.get("scope") in policy.confidential_scopes
+            )
+        )[:limit]
+
+    return search
 
 
 def build_synthetic_scoped_search(rows) -> SearchFunction:
@@ -399,6 +451,7 @@ def _compose_system_content(
     profile: ActorPromptProfile,
     policy: RetrievalPolicy,
     memories,
+    summaries,
     actor_private_stance: str | None,
 ) -> str:
     lines = [
@@ -414,6 +467,9 @@ def _compose_system_content(
     if memories:
         lines.append("Authorized relationship and memory context:")
         lines.extend(f"- {row['content']}" for row in memories)
+    if summaries:
+        lines.append("Authorized relationship summaries:")
+        lines.extend(f"- [{row['scope']}] {row['content']}" for row in summaries)
     if actor_private_stance:
         lines.append("Your private burst stance: " + actor_private_stance)
     return "\n".join(lines)
@@ -425,12 +481,19 @@ class GroupContextPackService:
         relay_client,
         *,
         search: SearchFunction = search_authorized_memories,
+        summary_search: SummarySearchFunction | None = None,
         prompt_profiles=None,
     ) -> None:
         self.relay_client = relay_client
         self.search = search
+        self.summary_search = (
+            search_authorized_summary_candidates
+            if summary_search is None and search is search_authorized_memories
+            else summary_search or _empty_summary_search
+        )
         self.prompt_profiles = prompt_profiles or load_actor_prompt_profiles()
         self.last_search: AuthorizedMemorySearchResult | None = None
+        self.last_summary_candidate_ids: tuple[int, ...] = ()
 
     async def build(
         self, request: ContextPackRequest, *, pack_kind: str
@@ -452,11 +515,18 @@ class GroupContextPackService:
             3 if pack_kind == "probe" else 10,
         )
         self.last_search = result
+        summaries: tuple[dict, ...] = ()
+        if pack_kind == "full":
+            summaries = await self.summary_search(
+                _query_text(facts, requested["current_event_id"]), policy, 6
+            )
+        self.last_summary_candidate_ids = tuple(int(row["id"]) for row in summaries)
         profile = self.prompt_profiles[requested["actor_id"]]
         system_content = _compose_system_content(
             profile,
             policy,
             result.memories,
+            summaries,
             requested["actor_private_stance"],
         )
 

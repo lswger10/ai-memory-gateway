@@ -130,6 +130,24 @@ CREATE TABLE IF NOT EXISTS actor_identity_profiles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS relationship_summaries (
+    id BIGSERIAL PRIMARY KEY,
+    scope TEXT NOT NULL CHECK (
+        scope IN ('weiwei-jiao','weiwei-laoke','jiao-laoke','group')
+    ),
+    content TEXT NOT NULL,
+    confidential BOOLEAN NOT NULL DEFAULT FALSE,
+    evidence_event_ids BIGINT[] NOT NULL,
+    evidence_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','stale','superseded')),
+    superseded_by BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_relationship_summaries_scope
+    ON relationship_summaries(scope, confidential, status, id);
+
 CREATE TABLE IF NOT EXISTS cold_archive_raw (
     id BIGSERIAL PRIMARY KEY,
     source_system TEXT NOT NULL,
@@ -1068,12 +1086,24 @@ async def search_authorized_archive_candidates(
 
 
 async def search_authorized_summary_candidates(
-    query: str, policy: RetrievalPolicy
+    query: str, policy: RetrievalPolicy, limit: int = 6
 ) -> tuple[dict, ...]:
-    """Stage A hook; Stage B summary selection must apply this policy itself."""
+    """Select summaries only after relationship/confidential policy filtering."""
     if not isinstance(policy, RetrievalPolicy):
         raise TypeError("summary search requires RetrievalPolicy")
-    return ()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, scope, content, confidential, evidence_event_ids "
+            "FROM relationship_summaries WHERE scope = ANY($1::text[]) "
+            "AND status='active' "
+            "AND (confidential=FALSE OR scope = ANY($2::text[])) "
+            "ORDER BY updated_at DESC, id DESC LIMIT $3",
+            list(policy.allowed_scopes),
+            list(policy.confidential_scopes),
+            int(limit),
+        )
+    return tuple(dict(row) for row in rows)
 
 
 async def search_authorized_memories(
