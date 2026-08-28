@@ -129,6 +129,49 @@ CREATE TABLE IF NOT EXISTS actor_identity_profiles (
     provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS cold_archive_raw (
+    id BIGSERIAL PRIMARY KEY,
+    source_system TEXT NOT NULL,
+    source_conversation_id TEXT NOT NULL,
+    source_message_id TEXT NOT NULL,
+    raw_actor_label TEXT NOT NULL,
+    raw_payload JSONB NOT NULL,
+    raw_content TEXT NOT NULL,
+    raw_timestamp TIMESTAMPTZ,
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    content_hash TEXT NOT NULL,
+    mapped_actor TEXT,
+    mapped_scope TEXT,
+    confidential BOOLEAN NOT NULL DEFAULT FALSE,
+    manifest_hash TEXT,
+    UNIQUE(source_system, source_conversation_id, source_message_id)
+);
+
+CREATE TABLE IF NOT EXISTS cold_archive_annotations (
+    id BIGSERIAL PRIMARY KEY,
+    archive_id BIGINT NOT NULL REFERENCES cold_archive_raw(id),
+    annotation_type TEXT NOT NULL CHECK (
+        annotation_type IN ('correction','identity_mapping','timestamp_fix','redaction','note')
+    ),
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cold_archive_scope
+    ON cold_archive_raw(mapped_scope, confidential, id);
+
+CREATE OR REPLACE FUNCTION reject_cold_archive_raw_mutation()
+RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'Cold Archive raw rows are immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS cold_archive_raw_immutable ON cold_archive_raw;
+CREATE TRIGGER cold_archive_raw_immutable
+    BEFORE UPDATE OR DELETE ON cold_archive_raw
+    FOR EACH ROW EXECUTE FUNCTION reject_cold_archive_raw_mutation();
 """
 
 
@@ -1007,10 +1050,21 @@ def _authorized_predicate(
 async def search_authorized_archive_candidates(
     query: str, policy: RetrievalPolicy
 ) -> tuple[dict, ...]:
-    """Stage A hook; Stage B archive implementation must apply this policy itself."""
+    """Search immutable archive only after scope/confidential SQL filtering."""
     if not isinstance(policy, RetrievalPolicy):
         raise TypeError("archive search requires RetrievalPolicy")
-    return ()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, raw_content AS content, mapped_scope AS scope, confidential "
+            "FROM cold_archive_raw WHERE mapped_scope = ANY($1::text[]) "
+            "AND (confidential = FALSE OR mapped_scope = ANY($2::text[])) "
+            "AND raw_content ILIKE '%' || $3 || '%' ORDER BY id DESC LIMIT 30",
+            list(policy.allowed_scopes),
+            list(policy.confidential_scopes),
+            query,
+        )
+    return tuple(dict(row) for row in rows)
 
 
 async def search_authorized_summary_candidates(
