@@ -1494,7 +1494,13 @@ async def get_all_memories():
         return [dict(r) for r in rows]
 
 
-async def get_all_memories_detail(limit: int = None, layer: int = None, active_only: bool = None):
+async def get_all_memories_detail(
+    limit: int = None,
+    layer: int = None,
+    active_only: bool = None,
+    scope: str = None,
+    confidential: bool = None,
+):
     """获取所有记忆（含 id，用于管理页面）
     
     Args:
@@ -1517,6 +1523,16 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
             conditions.append(f"is_active = ${param_idx}")
             params.append(active_only)
             param_idx += 1
+
+        if scope is not None:
+            conditions.append(f"scope = ${param_idx}")
+            params.append(scope)
+            param_idx += 1
+
+        if confidential is not None:
+            conditions.append(f"confidential = ${param_idx}")
+            params.append(confidential)
+            param_idx += 1
         
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         
@@ -1528,13 +1544,75 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
         
         rows = await conn.fetch(f"""
             SELECT id, content, importance, source_session, created_at,
-                   layer, title, is_active, merged_from, event_date
+                   layer, title, is_active, merged_from, event_date,
+                   scope, memory_type, perspective, confidential, status,
+                   confidence, evidence_count, last_supported_at,
+                   superseded_by, derived_from, source_kind, provenance, evidence
             FROM memories
             {where_clause}
             ORDER BY id
             {limit_clause}
         """, *params)
         return [dict(r) for r in rows]
+
+
+async def list_cold_archive_for_management(limit: int = 200) -> list[dict]:
+    """Full management projection; never used by conversational retrieval."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, source_system, source_conversation_id, source_message_id,
+                   raw_actor_label, raw_payload, raw_content, raw_timestamp,
+                   imported_at, content_hash, mapped_actor, mapped_scope,
+                   confidential, manifest_hash
+            FROM cold_archive_raw ORDER BY id LIMIT $1
+            """,
+            limit,
+        )
+        if not rows:
+            return []
+        ids = [int(row["id"]) for row in rows]
+        annotations = await conn.fetch(
+            """
+            SELECT id, archive_id, annotation_type, payload, created_at
+            FROM cold_archive_annotations
+            WHERE archive_id = ANY($1::bigint[]) ORDER BY id
+            """,
+            ids,
+        )
+    by_archive: dict[int, list[dict]] = {archive_id: [] for archive_id in ids}
+    for annotation in annotations:
+        by_archive[int(annotation["archive_id"])].append(dict(annotation))
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["annotations"] = by_archive[int(row["id"])]
+        result.append(item)
+    return result
+
+
+async def append_cold_archive_annotation(
+    archive_id: int, annotation_type: str, payload: dict
+) -> dict:
+    allowed = {"correction", "identity_mapping", "timestamp_fix", "redaction", "note"}
+    if annotation_type not in allowed or not isinstance(payload, dict):
+        raise ValueError("invalid archive annotation")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO cold_archive_annotations (archive_id, annotation_type, payload)
+            VALUES ($1,$2,$3::jsonb)
+            RETURNING id, archive_id, annotation_type, payload, created_at
+            """,
+            archive_id,
+            annotation_type,
+            json.dumps(payload, ensure_ascii=False),
+        )
+    if row is None:
+        raise KeyError(archive_id)
+    return dict(row)
 
 
 async def update_memory(memory_id: int, content: str = None, importance: int = None):

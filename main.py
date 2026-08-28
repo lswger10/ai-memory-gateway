@@ -26,7 +26,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor
+from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from group_contracts import (
     CONTRACT_VERSION,
@@ -1890,7 +1890,12 @@ async def dashboard_page(request: Request):
 # ============================================================
 
 @app.get("/api/memories")
-async def api_get_memories(layer: int = None, active_only: bool = None):
+async def api_get_memories(
+    layer: int = None,
+    active_only: bool = None,
+    scope: str = None,
+    confidential: bool = None,
+):
     """获取所有记忆（管理页面用）
     
     Query params:
@@ -1899,7 +1904,17 @@ async def api_get_memories(layer: int = None, active_only: bool = None):
     """
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
-    memories = await get_all_memories_detail(layer=layer, active_only=active_only)
+    allowed_scopes = {
+        "legacy_unscoped", "weiwei-jiao", "weiwei-laoke", "jiao-laoke", "group"
+    }
+    if scope is not None and scope not in allowed_scopes:
+        raise HTTPException(status_code=422, detail="invalid memory scope")
+    memories = await get_all_memories_detail(
+        layer=layer,
+        active_only=active_only,
+        scope=scope,
+        confidential=confidential,
+    )
     tz_offset = timezone(timedelta(hours=TIMEZONE_HOURS))
     for m in memories:
         if m.get("created_at"):
@@ -1917,6 +1932,45 @@ async def api_get_memories(layer: int = None, active_only: bool = None):
     if layer_stats:
         result["layer_stats"] = layer_stats
     return result
+
+
+@app.get("/api/archive")
+async def api_get_cold_archive(limit: int = 200):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=422, detail="invalid archive limit")
+    rows = await list_cold_archive_for_management(limit=limit)
+    for row in rows:
+        for key in ("raw_timestamp", "imported_at"):
+            if row.get(key) is not None:
+                row[key] = str(row[key])
+        for annotation in row.get("annotations", []):
+            if annotation.get("created_at") is not None:
+                annotation["created_at"] = str(annotation["created_at"])
+    return {"archive": rows}
+
+
+@app.post("/api/archive/{archive_id}/annotations")
+async def api_append_cold_archive_annotation(archive_id: int, request: Request):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    body = await request.json()
+    if not isinstance(body, dict) or set(body) != {"annotation_type", "payload"}:
+        raise HTTPException(status_code=422, detail="invalid archive annotation")
+    if body["annotation_type"] not in {
+        "correction", "identity_mapping", "timestamp_fix", "redaction", "note"
+    } or not isinstance(body["payload"], dict):
+        raise HTTPException(status_code=422, detail="invalid archive annotation")
+    try:
+        annotation = await append_cold_archive_annotation(
+            archive_id, body["annotation_type"], body["payload"]
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail="invalid archive annotation") from exc
+    if annotation.get("created_at") is not None:
+        annotation["created_at"] = str(annotation["created_at"])
+    return {"annotation": annotation}
 
 
 @app.get("/api/memories/search")

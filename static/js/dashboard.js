@@ -170,7 +170,12 @@ function updateLayerCounts(stats) {
 // ============================================
 async function loadMemories() {
     try {
-        const resp = await fetch('/api/memories');
+        const params = new URLSearchParams();
+        const scope = document.getElementById('scopeFilter')?.value || '';
+        const confidential = document.getElementById('confidentialFilter')?.value || '';
+        if (scope) params.set('scope', scope);
+        if (confidential) params.set('confidential', confidential);
+        const resp = await fetch('/api/memories' + (params.size ? '?' + params.toString() : ''));
         const data = await resp.json();
         allMemories = data.memories || [];
         if (data.layer_stats) updateLayerCounts(data.layer_stats);
@@ -224,7 +229,7 @@ function renderTable(mems, startIndex) {
             '<td class="col-id">' + (startIndex + i + 1) + mergeInfo + '</td>' +
             '<td class="col-layer">' + layerSelect + '</td>' +
             '<td class="col-title"><input type="text" class="title-input" id="t_' + m.id + '" value="' + escHtml(titleDisplay) + '" placeholder="无标题"></td>' +
-            '<td class="col-content"><textarea class="content-textarea" id="c_' + m.id + '">' + escHtml(m.content) + '</textarea></td>' +
+            '<td class="col-content"><div class="memory-scope-label">' + escHtml(m.scope || 'legacy_unscoped') + (m.confidential ? ' · confidential' : '') + '</div><textarea class="content-textarea" id="c_' + m.id + '">' + escHtml(m.content) + '</textarea></td>' +
             '<td class="col-importance"><input type="number" class="importance-input" id="i_' + m.id + '" value="' + m.importance + '" min="1" max="10"></td>' +
             '<td class="col-time">' + fmtTime(m.created_at) + '</td>' +
             '<td class="col-actions"><div class="row-actions">' +

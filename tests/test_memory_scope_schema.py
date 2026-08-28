@@ -67,7 +67,11 @@ class ScopedMemorySchemaTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(
-                {"group_memory": False, "agent_candidates": False},
+                {
+                    "group_memory": False,
+                    "agent_candidates": False,
+                    "burst_extraction": False,
+                },
                 group_memory_features_from_env(),
             )
 

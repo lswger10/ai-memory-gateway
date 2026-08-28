@@ -74,6 +74,19 @@
                 <div class="card toolbar-card">
                     <div class="toolbar">
                         <input type="text" id="searchBox" class="search-input" placeholder="搜索记忆..." oninput="memCurrentPage=1;filterAndSort()">
+                        <select id="scopeFilter" class="select-input" onchange="loadMemories()" title="按关系作用域筛选">
+                            <option value="">全部作用域</option>
+                            <option value="legacy_unscoped">旧版隔离区</option>
+                            <option value="weiwei-jiao">薇薇—椒椒</option>
+                            <option value="weiwei-laoke">薇薇—老克</option>
+                            <option value="jiao-laoke">椒椒—老克</option>
+                            <option value="group">Group</option>
+                        </select>
+                        <select id="confidentialFilter" class="select-input" onchange="loadMemories()" title="按机密状态筛选">
+                            <option value="">全部可见性</option>
+                            <option value="false">普通</option>
+                            <option value="true">Confidential</option>
+                        </select>
                         <button class="btn btn-sm" onclick="semanticSearch()" title="使用后端混合搜索（关键词+向量）" style="white-space: nowrap;">语义搜索</button>
                         <div class="toolbar-group">
                             <input type="date" id="dateFilter" class="date-input" onchange="memCurrentPage=1;filterAndSort()" title="按日期筛选">
