@@ -168,6 +168,45 @@ class MemoryScopeAclTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("--actor-id", completed.stdout)
+        self.assertIn("--expected-schema", completed.stdout)
+
+    def test_candidate_audit_requires_explicit_temporary_schema_target(self):
+        from scripts.group_acl_candidate_audit import validate_test_schema_target
+
+        with self.assertRaisesRegex(ValueError, "explicit opt-in"):
+            validate_test_schema_target(
+                "postgresql://test@db.invalid/gateway?options=-csearch_path%3Dgroup_e2e_12345678",
+                "group_e2e_12345678",
+                opt_in=False,
+            )
+        with self.assertRaisesRegex(ValueError, "isolated Group test schema"):
+            validate_test_schema_target(
+                "postgresql://test@db.invalid/gateway?options=-csearch_path%3Dpublic",
+                "public",
+                opt_in=True,
+            )
+
+    def test_candidate_audit_dsn_must_match_exact_expected_schema(self):
+        from scripts.group_acl_candidate_audit import validate_test_schema_target
+
+        dsn = (
+            "postgresql://test@db.invalid/gateway?"
+            "options=-csearch_path%3Dgroup_e2e_12345678"
+        )
+        self.assertEqual(
+            validate_test_schema_target(
+                dsn,
+                "group_e2e_12345678",
+                opt_in=True,
+            ),
+            "group_e2e_12345678",
+        )
+        with self.assertRaisesRegex(ValueError, "does not target expected schema"):
+            validate_test_schema_target(
+                dsn,
+                "group_e2e_87654321",
+                opt_in=True,
+            )
 
 
 if __name__ == "__main__":
