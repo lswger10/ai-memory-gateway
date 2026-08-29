@@ -110,6 +110,17 @@ class GroupActorPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("system", messages[0]["role"])
         self.assertIn(profiles["jiao"].prompt_text, messages[0]["content"])
         self.assertNotIn(profiles["laoke"].prompt_text, messages[0]["content"])
+        self.assertIn("Return exactly one JSON object", messages[0]["content"])
+        for field in (
+            "action",
+            "urge",
+            "reason_code",
+            "reaction",
+            "reaction_target_event_id",
+            "reply_to_event_id",
+            "burst_stance",
+        ):
+            self.assertIn(field, messages[0]["content"])
 
 
 if __name__ == "__main__":

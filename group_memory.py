@@ -921,6 +921,15 @@ class GroupContextPackService:
         )
 
         if pack_kind == "probe":
+            system_content += (
+                "\nProbe response contract: Return exactly one JSON object with all "
+                "of these fields and no markdown: action, urge, reason_code, "
+                "reaction, reaction_target_event_id, reply_to_event_id, "
+                "burst_stance. action must be pass, react, reply, or react+reply; "
+                "urge must be strong, normal, weak, or pass. Use null when no "
+                "reaction or target applies, and keep burst_stance to at most "
+                "two short lines."
+            )
             content = _render_public_context(facts, maximum_events=4)
             messages = [
                 {"role": "system", "content": system_content},
