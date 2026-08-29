@@ -53,6 +53,14 @@ from memory_extractor import (
 )
 from memory_policy import group_memory_features_from_env
 from relay_group_client import RelayGroupClient, RelayGroupError
+from bedroom_memory import (
+    BEDROOM_CONTRACT_VERSION,
+    BedroomContractError,
+    BedroomContextPackService,
+    BedroomPackRequest,
+    BedroomPostgresRepository,
+    BedroomRetentionService,
+)
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -396,6 +404,8 @@ app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
 _group_context_service = None
 _group_candidate_service = None
 _group_extraction_service = None
+_bedroom_context_service = None
+_bedroom_retention_service = None
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -417,6 +427,7 @@ async def gateway_auth_middleware(request: Request, call_next):
         path.startswith("/internal/group/context-packs/")
         or path == "/internal/group/memory-candidates"
         or path == "/internal/group/extraction/closed-bursts"
+        or path.startswith("/internal/bedroom/")
     ):
         return await call_next(request)
 
@@ -492,6 +503,26 @@ def _get_group_context_service() -> GroupContextPackService:
             **({"search": search} if search is not None else {}),
         )
     return _group_context_service
+
+
+def _get_bedroom_context_service() -> BedroomContextPackService:
+    global _bedroom_context_service
+    if _bedroom_context_service is None:
+        relay_url = os.environ.get("GROUP_RELAY_BASE_URL", "").strip()
+        relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
+        if not relay_url or not relay_key:
+            raise RelayGroupError(503, "dependency_unavailable")
+        _bedroom_context_service = BedroomContextPackService(
+            RelayGroupClient(relay_url, relay_key)
+        )
+    return _bedroom_context_service
+
+
+def _get_bedroom_retention_service() -> BedroomRetentionService:
+    global _bedroom_retention_service
+    if _bedroom_retention_service is None:
+        _bedroom_retention_service = BedroomRetentionService(BedroomPostgresRepository())
+    return _bedroom_retention_service
 
 
 def _get_group_candidate_service() -> CandidateIngressService:
@@ -577,6 +608,47 @@ async def group_context_pack_probe(request: Request):
 @app.post("/internal/group/context-packs/full")
 async def group_context_pack_full(request: Request):
     return await _build_group_context_pack(request, "full")
+
+
+def _bedroom_enabled() -> bool:
+    return os.environ.get("GATEWAY_BEDROOM_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+@app.post("/internal/bedroom/context-packs/full")
+async def bedroom_context_pack_full(request: Request):
+    if not _bedroom_enabled():
+        return _group_error(404, "group_feature_disabled", "Bedroom memory is disabled")
+    if request.headers.get("X-Bedroom-Contract-Version") != BEDROOM_CONTRACT_VERSION:
+        return _group_error(409, "contract_version_mismatch", "Bedroom contract mismatch")
+    expected = os.environ.get("GROUP_ORCHESTRATOR_SERVICE_KEY", "")
+    if not expected or not secrets.compare_digest(_group_bearer(request), expected):
+        return _group_error(401, "invalid_service_key", "Invalid service key")
+    try:
+        pack_request = BedroomPackRequest.from_dict(await request.json())
+        pack = await _get_bedroom_context_service().build(pack_request)
+    except BedroomContractError:
+        return _group_error(409, "stale_fence", "Bedroom generation is stale")
+    except RelayGroupError as exc:
+        return _group_error(exc.status_code, exc.code, "Bedroom facts unavailable")
+    return JSONResponse(status_code=200, content=pack.to_dict())
+
+
+@app.post("/internal/bedroom/retention")
+async def bedroom_retention(request: Request):
+    if not _bedroom_enabled():
+        return _group_error(404, "group_feature_disabled", "Bedroom retention is disabled")
+    if request.headers.get("X-Bedroom-Contract-Version") != BEDROOM_CONTRACT_VERSION:
+        return _group_error(409, "contract_version_mismatch", "Bedroom contract mismatch")
+    expected = os.environ.get("BEDROOM_GATEWAY_SERVICE_KEY", "")
+    if not expected or not secrets.compare_digest(_group_bearer(request), expected):
+        return _group_error(401, "invalid_service_key", "Invalid service key")
+    try:
+        receipt = await _get_bedroom_retention_service().persist(await request.json())
+    except BedroomContractError:
+        return _group_error(422, "invalid_group_payload", "Invalid Bedroom retention payload")
+    return JSONResponse(status_code=200, content=receipt)
 
 
 @app.post("/internal/group/memory-candidates")

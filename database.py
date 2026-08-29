@@ -214,6 +214,29 @@ CREATE TABLE IF NOT EXISTS cold_archive_annotations (
 CREATE INDEX IF NOT EXISTS idx_cold_archive_scope
     ON cold_archive_raw(mapped_scope, confidential, id);
 
+CREATE TABLE IF NOT EXISTS bedroom_archive_raw (
+    id BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL UNIQUE,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    room_id TEXT NOT NULL CHECK (room_id IN ('room_weiwei_jiao','room_weiwei_laoke')),
+    scope TEXT NOT NULL CHECK (scope IN ('weiwei-jiao','weiwei-laoke')),
+    facts_json JSONB NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS bedroom_retention_receipts (
+    session_id TEXT PRIMARY KEY,
+    retention_policy TEXT NOT NULL CHECK (retention_policy IN ('summary-only','full-bedroom-archive')),
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    scope TEXT NOT NULL CHECK (scope IN ('weiwei-jiao','weiwei-laoke')),
+    content_hash TEXT NOT NULL,
+    relationship_summary_id BIGINT REFERENCES relationship_summaries(id),
+    archive_id BIGINT REFERENCES bedroom_archive_raw(id),
+    receipt_id TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE OR REPLACE FUNCTION reject_cold_archive_raw_mutation()
 RETURNS trigger AS $$
 BEGIN
@@ -224,6 +247,11 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS cold_archive_raw_immutable ON cold_archive_raw;
 CREATE TRIGGER cold_archive_raw_immutable
     BEFORE UPDATE OR DELETE ON cold_archive_raw
+    FOR EACH ROW EXECUTE FUNCTION reject_cold_archive_raw_mutation();
+
+DROP TRIGGER IF EXISTS bedroom_archive_raw_immutable ON bedroom_archive_raw;
+CREATE TRIGGER bedroom_archive_raw_immutable
+    BEFORE UPDATE OR DELETE ON bedroom_archive_raw
     FOR EACH ROW EXECUTE FUNCTION reject_cold_archive_raw_mutation();
 """
 

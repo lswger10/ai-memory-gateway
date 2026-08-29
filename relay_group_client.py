@@ -42,6 +42,25 @@ class RelayGroupClient:
         self.http_client = http_client
         self.timeout_seconds = timeout_seconds
 
+    async def fetch_bedroom_facts(self, bedroom_session_id: str) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "X-Bedroom-Contract-Version": "bedroom-room.v1.0",
+        }
+        url = f"{self.base_url}/internal/bedroom/sessions/{bedroom_session_id}/facts"
+        try:
+            if self.http_client is not None:
+                response = await self.http_client.post(url, headers=headers, json={})
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(url, headers=headers, json={})
+        except httpx.HTTPError as exc:
+            raise RelayGroupError(503, "dependency_unavailable") from exc
+        payload = response.json()
+        if response.status_code != 200:
+            raise RelayGroupError(response.status_code, "bedroom_facts_rejected")
+        return payload
+
     async def fetch_context_facts(
         self, request: ContextPackRequest
     ) -> PublicContextFacts:
