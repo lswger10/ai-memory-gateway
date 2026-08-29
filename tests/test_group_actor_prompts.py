@@ -121,6 +121,16 @@ class GroupActorPromptTests(unittest.IsolatedAsyncioTestCase):
             "burst_stance",
         ):
             self.assertIn(field, messages[0]["content"])
+        self.assertIn("Your entire response must be raw JSON", messages[0]["content"])
+        for reason_code in (
+            "direct_address",
+            "disagreement",
+            "add_context",
+            "social_reaction",
+            "silence_is_weird",
+            "other_bounded",
+        ):
+            self.assertIn(reason_code, messages[0]["content"])
 
 
 if __name__ == "__main__":
