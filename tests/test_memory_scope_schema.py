@@ -1,4 +1,5 @@
 import unittest
+import inspect
 from unittest.mock import patch
 
 
@@ -48,6 +49,22 @@ class ScopedMemorySchemaTests(unittest.IsolatedAsyncioTestCase):
         await apply_scoped_memory_schema(connection)
         sql = "\n".join(connection.statements)
         self.assertNotIn("WHERE is_active", sql)
+
+    def test_fresh_search_path_uses_schema_local_catalog_checks(self):
+        import database
+
+        init_source = inspect.getsource(database.init_tables)
+        self.assertGreater(init_source.count("information_schema.columns"), 0)
+        self.assertEqual(
+            init_source.count("information_schema.columns"),
+            init_source.count("table_schema = current_schema()"),
+        )
+        self.assertEqual(
+            database.SCOPED_MEMORY_MIGRATION_SQL.count("FROM pg_constraint"),
+            database.SCOPED_MEMORY_MIGRATION_SQL.count(
+                "connamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())"
+            ),
+        )
 
     def test_typed_scoped_writes_require_orthogonal_dimensions(self):
         from memory_policy import MemoryScope, MemoryType, MemoryWrite, Perspective, SourceKind
