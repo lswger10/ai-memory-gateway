@@ -73,6 +73,19 @@ class PooledHttpTransport:
         client = await self._client(pool_key, base_url, headers)
         return await client.request(method, path, json=json_body)
 
+    async def open_stream(
+        self,
+        *,
+        pool_key: str,
+        base_url: str,
+        headers: dict[str, str],
+        method: str,
+        path: str,
+        json_body: dict[str, Any],
+    ):
+        client = await self._client(pool_key, base_url, headers)
+        return client.stream(method, path, json=json_body)
+
     async def close(self) -> None:
         async with self._lock:
             if self._closed:

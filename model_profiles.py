@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 
@@ -102,6 +102,7 @@ class ProfileCapabilities:
         cache_strategies = _string_tuple(
             payload.get("cache_strategies"), "capabilities.cache_strategies"
         )
+
         if any(value not in _CACHE_STRATEGIES for value in cache_strategies):
             raise ProfileContractError("unsupported cache strategy capability")
         cache_ttls = _string_tuple(
@@ -117,6 +118,12 @@ class ProfileCapabilities:
                 payload.get("usage_fields"), "capabilities.usage_fields"
             ),
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        for field in ("cache_strategies", "cache_ttls", "usage_fields"):
+            value[field] = list(value[field])
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +214,26 @@ class ModelProfile:
     @property
     def selectable(self) -> bool:
         return self.enabled and self.test_status == "passed"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "profile_id": self.profile_id,
+            "display_name": self.display_name,
+            "enabled": self.enabled,
+            "test_status": self.test_status,
+            "provider": self.provider,
+            "protocol": self.protocol,
+            "base_url": self.base_url,
+            "route_id": self.route_id,
+            "model": self.model,
+            "adapter_version": self.adapter_version,
+            "credential_ref": self.credential_ref,
+            "headers": dict(self.headers),
+            "capabilities": self.capabilities.to_dict(),
+            "cache_strategy": self.cache_strategy,
+            "requested_cache_ttl": self.requested_cache_ttl,
+            "revision": self.revision,
+        }
 
 
 @dataclass(frozen=True, slots=True)

@@ -104,6 +104,64 @@ class RelayGroupClient:
                 raise RelayFactsMismatch()
         return facts
 
+    async def fetch_model_history_facts(
+        self,
+        *,
+        actor_id: str,
+        room_id: str,
+        conversation_id: str,
+        current_event_id: int,
+        after_event_id: int,
+        through_event_id: int,
+    ) -> tuple[dict[str, Any], ...]:
+        """Read immutable accepted facts in ascending anchored pages."""
+        events: list[dict[str, Any]] = []
+        cursor = after_event_id
+        while True:
+            payload = {
+                "contract_version": "gateway-model-execution.v1.0",
+                "actor_id": actor_id,
+                "room_id": room_id,
+                "conversation_id": conversation_id,
+                "current_event_id": current_event_id,
+                "after_event_id": cursor,
+                "through_event_id": through_event_id,
+                "page_size": 500,
+            }
+            headers = {
+                "Authorization": f"Bearer {self.service_key}",
+                "X-Gateway-Execution-Version": "gateway-model-execution.v1.0",
+            }
+            url = f"{self.base_url}/internal/model-history/facts"
+            try:
+                if self.http_client is not None:
+                    response = await self.http_client.post(url, headers=headers, json=payload)
+                else:
+                    async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                        response = await client.post(url, headers=headers, json=payload)
+            except httpx.HTTPError as exc:
+                raise RelayGroupError(503, "dependency_unavailable") from exc
+            body = response.json()
+            if response.status_code != 200 or not isinstance(body, dict):
+                raise RelayGroupError(response.status_code, "model_history_rejected")
+            page = body.get("events")
+            next_cursor = body.get("next_after_event_id")
+            has_more = body.get("has_more")
+            if (
+                not isinstance(page, list)
+                or not isinstance(next_cursor, int)
+                or not isinstance(has_more, bool)
+            ):
+                raise RelayGroupError(502, "invalid_model_history_response")
+            if any(not isinstance(event, dict) for event in page):
+                raise RelayGroupError(502, "invalid_model_history_response")
+            events.extend(page)
+            if not has_more:
+                return tuple(events)
+            if next_cursor <= cursor:
+                raise RelayGroupError(502, "model_history_cursor_stalled")
+            cursor = next_cursor
+
     async def _post_context_facts(
         self, facts_request: ContextFactsRequest
     ) -> PublicContextFacts:

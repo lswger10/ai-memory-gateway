@@ -62,12 +62,17 @@ from bedroom_memory import (
     BedroomRetentionService,
 )
 from model_execution import GatewayModelExecutionService
+from execution_context_builder import GatewayExecutionContextBuilder
+from gateway_provider_runner import GatewayProviderRunner
+from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from model_execution_contracts import (
     CONTRACT_VERSION as MODEL_EXECUTION_CONTRACT_VERSION,
     ExecutionContractError,
     GatewayExecutionRequest,
 )
-from model_profiles import resolve_feature_flags
+from model_profiles import ModelProfile, ProfileContractError, resolve_feature_flags
+from model_profile_store import ProfileStoreError
+from memory_policy import room_members
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -402,6 +407,9 @@ async def lifespan(app: FastAPI):
             await group_worker_task
         except asyncio.CancelledError:
             pass
+
+    if _model_provider_runner is not None:
+        await _model_provider_runner.transport.close()
     
     if MEMORY_ENABLED:
         await close_pool()
@@ -414,6 +422,10 @@ _group_extraction_service = None
 _bedroom_context_service = None
 _bedroom_retention_service = None
 _model_execution_service: GatewayModelExecutionService | None = None
+_model_profile_store: PostgresModelProfileStore | None = None
+_model_usage_store: PostgresModelUsageStore | None = None
+_model_provider_runner: GatewayProviderRunner | None = None
+_model_runtime_lock = asyncio.Lock()
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -520,14 +532,38 @@ async def _stream_gateway_execution(request: Request, expected_kind: str):
         return _model_execution_error(422, "invalid_execution_payload")
     if execution_request.execution_kind != expected_kind:
         return _model_execution_error(422, "execution_kind_mismatch")
-    if _model_execution_service is None:
+    try:
+        service = await _get_model_execution_service()
+    except Exception:
         return _model_execution_error(503, "model_execution_unavailable")
 
     async def events():
-        async for event in _model_execution_service.stream(execution_request):
+        async for event in service.stream(execution_request):
             yield f"event: {event.event}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
+
+
+async def _get_model_execution_service() -> GatewayModelExecutionService:
+    global _model_execution_service, _model_profile_store, _model_usage_store, _model_provider_runner
+    if _model_execution_service is not None:
+        return _model_execution_service
+    async with _model_runtime_lock:
+        if _model_execution_service is not None:
+            return _model_execution_service
+        _model_profile_store = PostgresModelProfileStore(get_pool)
+        _model_usage_store = PostgresModelUsageStore(get_pool)
+        _model_provider_runner = GatewayProviderRunner()
+        _model_execution_service = GatewayModelExecutionService(
+            profiles=_model_profile_store,
+            context_builder=GatewayExecutionContextBuilder(
+                group_context=_get_group_context_service(),
+                bedroom_context=_get_bedroom_context_service(),
+            ),
+            provider_runner=_model_provider_runner,
+            usage_store=_model_usage_store,
+        )
+        return _model_execution_service
 
 
 @app.post("/internal/model-execution/probe")
@@ -538,6 +574,159 @@ async def model_execution_probe(request: Request):
 @app.post("/internal/model-execution/stream")
 async def model_execution_stream(request: Request):
     return await _stream_gateway_execution(request, "full")
+
+
+def _safe_profile(profile: ModelProfile) -> dict:
+    credential_env = (
+        profile.credential_ref.removeprefix("env:")
+        if profile.credential_ref.startswith("env:")
+        else ""
+    )
+    return {
+        "profile_id": profile.profile_id,
+        "display_name": profile.display_name,
+        "enabled": profile.enabled,
+        "test_status": profile.test_status,
+        "provider": profile.provider,
+        "protocol": profile.protocol,
+        "base_url": profile.base_url,
+        "route_id": profile.route_id,
+        "model": profile.model,
+        "adapter_version": profile.adapter_version,
+        "credential_configured": bool(credential_env and os.environ.get(credential_env)),
+        "header_names": [name for name, _ in profile.headers],
+        "capabilities": profile.capabilities.to_dict(),
+        "cache_strategy": profile.cache_strategy,
+        "requested_cache_ttl": profile.requested_cache_ttl,
+        "revision": profile.revision,
+    }
+
+
+def _require_model_management() -> None:
+    if not resolve_feature_flags()["model_profile_management"]:
+        raise HTTPException(status_code=404, detail="model_profile_management_disabled")
+
+
+@app.get("/api/model-profiles")
+async def list_model_profiles():
+    _require_model_management()
+    await _get_model_execution_service()
+    assert _model_profile_store is not None
+    profiles = await _model_profile_store.list_profiles()
+    return {"profiles": [_safe_profile(profile) for profile in profiles]}
+
+
+@app.put("/api/model-profiles")
+async def put_model_profile(request: Request):
+    _require_model_management()
+    try:
+        profile = ModelProfile.from_dict(await request.json())
+        await _get_model_execution_service()
+        assert _model_profile_store is not None
+        stored = await _model_profile_store.put_profile(profile)
+    except (ProfileContractError, ProfileStoreError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_model_profile") from exc
+    return _safe_profile(stored)
+
+
+@app.get("/api/model-bindings")
+async def list_model_bindings():
+    _require_model_management()
+    await _get_model_execution_service()
+    assert _model_profile_store is not None
+    result = {}
+    for actor_id in ("jiao", "laoke"):
+        actor_rooms = [
+            room_id for room_id in (
+                "room_weiwei_jiao", "room_weiwei_laoke", "room_group_home"
+            ) if actor_id in room_members(room_id)
+        ]
+        resolved = {}
+        for room_id in actor_rooms:
+            try:
+                item = await _model_profile_store.resolve(actor_id, room_id)
+            except ProfileStoreError:
+                continue
+            resolved[room_id] = {
+                "profile_id": item.primary.profile_id,
+                "source": item.source,
+                "binding_revision": item.binding_revision,
+                "approved_fallback_profile_ids": [p.profile_id for p in item.fallbacks],
+            }
+        result[actor_id] = resolved
+    return {"bindings": result}
+
+
+@app.put("/api/model-bindings")
+async def update_model_binding(request: Request):
+    _require_model_management()
+    await _get_model_execution_service()
+    assert _model_profile_store is not None
+    try:
+        body = await request.json()
+        action = body.get("action")
+        actor_id = str(body.get("actor_id") or "")
+        if actor_id not in {"jiao", "laoke"}:
+            raise ValueError
+        expected = body.get("expected_revision")
+        if action == "set_actor_default":
+            result = await _model_profile_store.set_actor_default(
+                actor_id, str(body["profile_id"]), expected_revision=expected
+            )
+        elif action == "set_fallbacks":
+            values = body.get("profile_ids")
+            if not isinstance(values, list):
+                raise ValueError
+            result = await _model_profile_store.set_approved_fallbacks(
+                actor_id, tuple(str(item) for item in values), expected_revision=expected
+            )
+        elif action == "set_room_override":
+            room_id = str(body["room_id"])
+            if actor_id not in room_members(room_id):
+                raise ValueError
+            result = await _model_profile_store.set_room_override(
+                room_id, actor_id, str(body["profile_id"]), expected_revision=expected
+            )
+        else:
+            raise ValueError
+    except (KeyError, TypeError, ValueError, ProfileStoreError) as exc:
+        raise HTTPException(status_code=409, detail="model_binding_rejected") from exc
+    return {"accepted": True, "revision": result.revision}
+
+
+@app.get("/api/model-usage/summary")
+async def model_usage_summary():
+    _require_model_management()
+    await _get_model_execution_service()
+    assert _model_usage_store is not None
+    receipts = await _model_usage_store.list_receipts(limit=200)
+    return {
+        "receipts": [
+            {
+                "generation_request_id": row.generation_request_id,
+                "actor_id": row.actor_id,
+                "room_id": row.room_id,
+                "profile_id": row.profile_id,
+                "provider": row.provider,
+                "protocol": row.protocol,
+                "route_id": row.route_id,
+                "model": row.model,
+                "cache_strategy": row.cache_strategy,
+                "requested_cache_ttl": row.requested_cache_ttl,
+                "observed_cache_support": row.observed_cache_support,
+                "fallback_used": row.fallback_used,
+                "fallback_from_profile_id": row.fallback_from_profile_id,
+                "usage": {
+                    "input_tokens": row.usage.input_tokens,
+                    "output_tokens": row.usage.output_tokens,
+                    "cache_creation_input_tokens": row.usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": row.usage.cache_read_input_tokens,
+                    "cached_tokens": row.usage.cached_tokens,
+                },
+            }
+            for row in receipts
+        ]
+    }
 
 
 def _get_group_context_service() -> GroupContextPackService:

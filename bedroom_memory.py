@@ -150,6 +150,68 @@ class BedroomContextPackService:
             }
         )
 
+    async def build_execution_components(self, request: BedroomPackRequest) -> dict:
+        """Bedroom transcript is deliberately dynamic and never joins private cache history."""
+        facts = validate_bedroom_facts(
+            await self.relay_client.fetch_bedroom_facts(request.bedroom_session_id)
+        )
+        session = facts["session"]
+        if session["actor_id"] != request.actor_id or session["turn_epoch"] != request.turn_epoch:
+            raise BedroomContractError("stale Bedroom generation")
+        if not any(
+            turn["turn_id"] == request.turn_id and turn["role"] == "human"
+            for turn in facts["turns"]
+        ):
+            raise BedroomContractError("Bedroom trigger turn is missing")
+        room_id = session["room_id"]
+        policy = build_retrieval_policy(request.actor_id, room_id, room_members(room_id))
+        query = next(
+            turn["text"] for turn in facts["turns"] if turn["turn_id"] == request.turn_id
+        )
+        memories = await self.search(query, policy, 10)
+        summaries = await self.summary_search(query, policy, 6)
+        profile = self.prompt_profiles[request.actor_id]
+        static_system = (
+            _COMMON_RUNTIME_KERNEL,
+            f"Actor prompt [{profile.prompt_version}]: {profile.prompt_text}",
+            (
+                f"Room policy: speak only as {request.actor_id} in {room_id}; "
+                "authorized relationship scopes are "
+                + ", ".join(policy.allowed_scopes)
+                + "."
+            ),
+        )
+        dynamic: list[str] = [
+            "Temporary Bedroom scene layer (not identity or permanent memory): "
+            + str(session.get("scene_context") or "private relationship scene")
+        ]
+        if memories.memories:
+            dynamic.append(
+                "Authorized relationship and memory context:\n"
+                + "\n".join(f"- {row['content']}" for row in memories.memories)
+            )
+        if summaries:
+            dynamic.append(
+                "Authorized relationship summaries:\n"
+                + "\n".join(f"- [{row['scope']}] {row['content']}" for row in summaries)
+            )
+        dynamic.append(
+            "\n".join(
+                f"{'薇薇' if turn['actor_id']=='weiwei' else profile.actor_id}: {turn['text']}"
+                for turn in facts["turns"]
+            )
+        )
+        return {
+            "room_id": room_id,
+            "conversation_id": session["conversation_id"],
+            "static_system": static_system,
+            "dynamic_tail": tuple(dynamic),
+            "actor_prompt_version": profile.prompt_version,
+            "runtime_kernel_version": "group-runtime-kernel.v1",
+            "room_policy_version": f"{room_id}.bedroom.v1",
+            "tool_schema_hash": "tools.none.v1",
+        }
+
 
 def bounded_relationship_summary(facts: dict, maximum_chars: int = 1600) -> str:
     lines = [

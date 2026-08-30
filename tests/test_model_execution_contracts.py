@@ -28,6 +28,23 @@ def _request_payload(**overrides):
         },
         "bedroom_session_id": None,
         "binding_revision": 3,
+        "actor_private_stance": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _bedroom_request_payload(**overrides):
+    payload = {
+        "contract_version": "gateway-model-execution.v1.0",
+        "execution_kind": "full",
+        "execution_mode": "bedroom",
+        "actor_id": "laoke",
+        "bedroom_session_id": "bedroom-1",
+        "current_event_id": 9,
+        "bedroom_turn_epoch": 3,
+        "generation_request_id": "bedroom:1:3:laoke",
+        "binding_revision": None,
     }
     payload.update(overrides)
     return payload
@@ -57,6 +74,13 @@ def test_execution_request_accepts_only_identifier_coordinates():
     assert request.fence.trigger_event_id == 101
 
 
+def test_group_execution_accepts_only_optional_actor_private_stance():
+    request = GatewayExecutionRequest.from_dict(
+        _request_payload(actor_private_stance="opaque actor stance")
+    )
+    assert request.actor_private_stance == "opaque actor stance"
+
+
 def test_usage_fields_are_nullable_and_never_estimated():
     usage = ProviderUsage.from_provider_values(
         input_tokens=120,
@@ -79,21 +103,11 @@ def test_usage_rejects_boolean_and_negative_provider_values():
         ProviderUsage.from_provider_values(output_tokens=-1)
 
 
-def test_bedroom_coordinate_is_required_only_for_bedroom_mode():
-    with pytest.raises(ExecutionContractError, match="bedroom_session_id"):
-        GatewayExecutionRequest.from_dict(
-            _request_payload(execution_mode="bedroom", bedroom_session_id=None)
-        )
-
-    request = GatewayExecutionRequest.from_dict(
-        _request_payload(
-            execution_mode="bedroom",
-            bedroom_session_id="bedroom-session-1",
-            room_id="room_weiwei_jiao",
-            fence={
-                **_request_payload()["fence"],
-                "room_id": "room_weiwei_jiao",
-            },
-        )
-    )
-    assert request.bedroom_session_id == "bedroom-session-1"
+def test_bedroom_execution_uses_session_turn_coordinates_not_group_fence():
+    request = GatewayExecutionRequest.from_dict(_bedroom_request_payload())
+    assert request.execution_mode == "bedroom"
+    assert request.bedroom_session_id == "bedroom-1"
+    assert request.bedroom_turn_epoch == 3
+    assert request.fence is None
+    assert request.room_id is None
+    assert request.conversation_id is None

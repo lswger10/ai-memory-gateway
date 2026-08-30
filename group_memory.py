@@ -865,6 +865,37 @@ def _compose_system_content(
     return "\n".join(lines)
 
 
+def _static_system_segments(profile: ActorPromptProfile, policy: RetrievalPolicy) -> tuple[str, ...]:
+    return (
+        _COMMON_RUNTIME_KERNEL,
+        f"Actor prompt [{profile.prompt_version}]: {profile.prompt_text}",
+        (
+            "Room policy: speak only as "
+            f"{profile.actor_id} in {policy.room_id}; authorized relationship scopes are "
+            + ", ".join(policy.allowed_scopes)
+            + "."
+        ),
+    )
+
+
+def _dynamic_context_segments(memories, summaries, actor_private_stance, facts) -> tuple[str, ...]:
+    segments: list[str] = []
+    if memories:
+        segments.append(
+            "Authorized relationship and memory context:\n"
+            + "\n".join(f"- {row['content']}" for row in memories)
+        )
+    if summaries:
+        segments.append(
+            "Authorized relationship summaries:\n"
+            + "\n".join(f"- [{row['scope']}] {row['content']}" for row in summaries)
+        )
+    if actor_private_stance:
+        segments.append("Your private burst stance: " + actor_private_stance)
+    segments.append(_render_public_context(facts, maximum_events=20))
+    return tuple(segment for segment in segments if segment)
+
+
 class GroupContextPackService:
     def __init__(
         self,
@@ -964,3 +995,31 @@ class GroupContextPackService:
                 "token_budget": token_budget,
             }
         )
+
+    async def build_execution_components(
+        self, request: ContextPackRequest
+    ) -> dict:
+        """Build cache-safe components; all retrieved/fresh facts remain dynamic."""
+        requested = request.to_dict()
+        members = room_members(requested["room_id"])
+        policy = build_retrieval_policy(
+            requested["actor_id"], requested["room_id"], members
+        )
+        facts = (await self.relay_client.fetch_context_facts(request)).to_dict()
+        query = _query_text(facts, requested["current_event_id"])
+        result = await self.search(query, policy, 10)
+        summaries = await self.summary_search(query, policy, 6)
+        profile = self.prompt_profiles[requested["actor_id"]]
+        return {
+            "static_system": _static_system_segments(profile, policy),
+            "dynamic_tail": _dynamic_context_segments(
+                result.memories,
+                summaries,
+                requested.get("actor_private_stance"),
+                facts,
+            ),
+            "actor_prompt_version": profile.prompt_version,
+            "runtime_kernel_version": "group-runtime-kernel.v1",
+            "room_policy_version": f"{requested['room_id']}.v1",
+            "tool_schema_hash": "tools.none.v1",
+        }

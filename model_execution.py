@@ -42,7 +42,18 @@ class ExecutionStreamEvent:
 
 
 class ContextBuilder(Protocol):
-    async def build(self, request: GatewayExecutionRequest) -> ContextBundle: ...
+    async def resolve_coordinates(
+        self, request: GatewayExecutionRequest
+    ) -> tuple[str, str]: ...
+
+    async def build(
+        self,
+        request: GatewayExecutionRequest,
+        profile: Any,
+        *,
+        resolved_room_id: str,
+        resolved_conversation_id: str,
+    ) -> ContextBundle: ...
 
 
 class ProviderRunner(Protocol):
@@ -73,18 +84,33 @@ class GatewayModelExecutionService:
     async def stream(
         self, request: GatewayExecutionRequest
     ) -> AsyncIterator[ExecutionStreamEvent]:
-        resolved = await self._profiles.resolve(request.actor_id, request.room_id)
+        if hasattr(self._context_builder, "resolve_coordinates"):
+            room_id, conversation_id = await self._context_builder.resolve_coordinates(request)
+        else:
+            if request.room_id is None or request.conversation_id is None:
+                raise ValueError("execution coordinates are unresolved")
+            room_id, conversation_id = request.room_id, request.conversation_id
+        resolved = await self._profiles.resolve(request.actor_id, room_id)
         if (
             request.binding_revision is not None
             and request.binding_revision != resolved.binding_revision
         ):
             raise ValueError("binding revision changed before execution")
-        context = await self._context_builder.build(request)
         attempts = (resolved.primary, *resolved.fallbacks)
         origin_profile_id = resolved.primary.profile_id
         last_unavailable: ProviderRunUnavailable | None = None
 
         for index, profile in enumerate(attempts):
+            try:
+                context = await self._context_builder.build(
+                    request,
+                    profile,
+                    resolved_room_id=room_id,
+                    resolved_conversation_id=conversation_id,
+                )
+            except TypeError:
+                # Transitional support for injected deterministic test builders.
+                context = await self._context_builder.build(request)
             fallback_used = index > 0
             fallback_from = origin_profile_id if fallback_used else None
             provenance = build_provider_provenance(
@@ -96,7 +122,7 @@ class GatewayModelExecutionService:
             yield ExecutionStreamEvent("profile", provenance.to_dict())
             namespace = build_cache_namespace(
                 actor_id=request.actor_id,
-                conversation_id=request.conversation_id,
+                conversation_id=conversation_id,
                 profile_id=profile.profile_id,
                 profile_revision=profile.revision,
                 execution_mode=request.execution_mode,
@@ -148,8 +174,8 @@ class GatewayModelExecutionService:
                 ExecutionReceiptDraft(
                     generation_request_id=request.generation_request_id,
                     actor_id=request.actor_id,
-                    room_id=request.room_id,
-                    conversation_id=request.conversation_id,
+                    room_id=room_id,
+                    conversation_id=conversation_id,
                     profile_id=profile.profile_id,
                     profile_revision=profile.revision,
                     provider=profile.provider,

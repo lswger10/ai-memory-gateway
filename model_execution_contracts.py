@@ -78,6 +78,8 @@ _REQUEST_FIELDS = {
     "execution_mode",
     "fence",
     "bedroom_session_id",
+    "bedroom_turn_epoch",
+    "actor_private_stance",
     "binding_revision",
 }
 
@@ -87,13 +89,15 @@ class GatewayExecutionRequest:
     contract_version: str
     execution_kind: str
     actor_id: str
-    room_id: str
-    conversation_id: str
+    room_id: str | None
+    conversation_id: str | None
     current_event_id: int
     generation_request_id: str
     execution_mode: str
-    fence: ExecutionFence
+    fence: ExecutionFence | None
     bedroom_session_id: str | None
+    bedroom_turn_epoch: int | None
+    actor_private_stance: str | None
     binding_revision: int | None
 
     @classmethod
@@ -103,11 +107,13 @@ class GatewayExecutionRequest:
             raise ExecutionContractError(
                 f"forbidden execution request field(s): {', '.join(sorted(unknown))}"
             )
-        missing = _REQUEST_FIELDS - set(payload)
+        common = {
+            "contract_version", "execution_kind", "execution_mode", "actor_id",
+            "current_event_id", "generation_request_id", "binding_revision",
+        }
+        missing = common - set(payload)
         if missing:
-            raise ExecutionContractError(
-                f"missing execution request field(s): {', '.join(sorted(missing))}"
-            )
+            raise ExecutionContractError(f"missing execution request field(s): {', '.join(sorted(missing))}")
         if payload["contract_version"] != CONTRACT_VERSION:
             raise ExecutionContractError("unsupported contract_version")
         kind = payload["execution_kind"]
@@ -116,29 +122,40 @@ class GatewayExecutionRequest:
         mode = payload["execution_mode"]
         if mode not in {"group", "private", "bedroom"}:
             raise ExecutionContractError("invalid execution_mode")
-        fence_value = payload["fence"]
-        if not isinstance(fence_value, Mapping):
-            raise ExecutionContractError("fence must be an object")
-        fence = ExecutionFence.from_dict(fence_value)
-        room_id = _required_string(payload["room_id"], "room_id")
-        conversation_id = _required_string(
-            payload["conversation_id"], "conversation_id"
-        )
-        if fence.room_id != room_id or fence.conversation_id != conversation_id:
-            raise ExecutionContractError("fence room/conversation mismatch")
-        bedroom_session_id = payload["bedroom_session_id"]
-        if bedroom_session_id is not None:
-            bedroom_session_id = _required_string(
-                bedroom_session_id, "bedroom_session_id"
-            )
-        if mode == "bedroom" and bedroom_session_id is None:
-            raise ExecutionContractError(
-                "bedroom_session_id is required for bedroom mode"
-            )
-        if mode != "bedroom" and bedroom_session_id is not None:
-            raise ExecutionContractError(
-                "bedroom_session_id is allowed only for bedroom mode"
-            )
+        if mode == "bedroom":
+            required = {"bedroom_session_id", "bedroom_turn_epoch"}
+            missing = required - set(payload)
+            forbidden = {"room_id", "conversation_id", "fence", "actor_private_stance"} & set(payload)
+            if missing or forbidden:
+                raise ExecutionContractError("invalid bedroom execution coordinates")
+            bedroom_session_id = _required_string(payload["bedroom_session_id"], "bedroom_session_id")
+            bedroom_turn_epoch = _positive_int(payload["bedroom_turn_epoch"], "bedroom_turn_epoch")
+            room_id = None
+            conversation_id = None
+            fence = None
+            actor_private_stance = None
+        else:
+            required = {"room_id", "conversation_id", "fence", "bedroom_session_id"}
+            missing = required - set(payload)
+            if missing or "bedroom_turn_epoch" in payload:
+                raise ExecutionContractError("invalid group/private execution coordinates")
+            fence_value = payload["fence"]
+            if not isinstance(fence_value, Mapping):
+                raise ExecutionContractError("fence must be an object")
+            fence = ExecutionFence.from_dict(fence_value)
+            room_id = _required_string(payload["room_id"], "room_id")
+            conversation_id = _required_string(payload["conversation_id"], "conversation_id")
+            if fence.room_id != room_id or fence.conversation_id != conversation_id:
+                raise ExecutionContractError("fence room/conversation mismatch")
+            if payload["bedroom_session_id"] is not None:
+                raise ExecutionContractError("bedroom_session_id is allowed only for bedroom mode")
+            bedroom_session_id = None
+            bedroom_turn_epoch = None
+            stance = payload.get("actor_private_stance")
+            if stance is not None:
+                if not isinstance(stance, str) or len(stance) > 2000:
+                    raise ExecutionContractError("actor_private_stance must be bounded text or null")
+            actor_private_stance = stance
         binding_revision = payload["binding_revision"]
         if binding_revision is not None:
             binding_revision = _positive_int(binding_revision, "binding_revision")
@@ -155,6 +172,8 @@ class GatewayExecutionRequest:
             execution_mode=mode,
             fence=fence,
             bedroom_session_id=bedroom_session_id,
+            bedroom_turn_epoch=bedroom_turn_epoch,
+            actor_private_stance=actor_private_stance,
             binding_revision=binding_revision,
         )
 
