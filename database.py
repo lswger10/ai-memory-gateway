@@ -366,6 +366,34 @@ async def apply_model_execution_schema(conn) -> None:
     await conn.execute(MODEL_EXECUTION_MIGRATION_SQL)
 
 
+CONVERSATION_PARTITION_MIGRATION_SQL = """
+ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'legacy',
+    ADD COLUMN IF NOT EXISTS room_id TEXT,
+    ADD COLUMN IF NOT EXISTS canonical_conversation_id TEXT,
+    ADD COLUMN IF NOT EXISTS source_event_id BIGINT,
+    ADD COLUMN IF NOT EXISTS actor_id TEXT,
+    ADD COLUMN IF NOT EXISTS event_role TEXT,
+    ADD COLUMN IF NOT EXISTS fact_identity TEXT,
+    ADD COLUMN IF NOT EXISTS fact_hash TEXT,
+    ADD COLUMN IF NOT EXISTS attachments_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS provenance_json JSONB,
+    ADD COLUMN IF NOT EXISTS bedroom_session_id TEXT,
+    ADD COLUMN IF NOT EXISTS retention_policy TEXT,
+    ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_fact_identity
+    ON conversations(fact_identity) WHERE fact_identity IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_cognitive_partition
+    ON conversations(session_id, source_event_id) WHERE fact_identity IS NOT NULL;
+"""
+
+
+async def apply_conversation_partition_schema(conn) -> None:
+    """Extend the existing conversations partition without rewriting legacy rows."""
+    await conn.execute(CONVERSATION_PARTITION_MIGRATION_SQL)
+
+
 # ============================================================
 # 表结构初始化
 # ============================================================
@@ -413,6 +441,7 @@ async def init_tables():
 
         await apply_scoped_memory_schema(conn)
         await apply_model_execution_schema(conn)
+        await apply_conversation_partition_schema(conn)
         
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_fts 
