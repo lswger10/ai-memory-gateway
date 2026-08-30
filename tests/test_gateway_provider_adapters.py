@@ -104,6 +104,7 @@ def test_anthropic_adapter_renders_only_verified_cache_control_and_ttl():
         if "cache_control" in block
     ]
     assert breakpoints == [{"type": "ephemeral", "ttl": "1h"}]
+    assert "stream_options" not in request.json_body
 
 
 def test_openai_strategy_never_receives_anthropic_cache_control():
@@ -122,6 +123,7 @@ def test_openai_strategy_never_receives_anthropic_cache_control():
     )
     assert "cache_control" not in str(request.json_body)
     assert request.json_body["prompt_cache_key"] == "namespace-hash"
+    assert request.json_body["stream_options"] == {"include_usage": True}
 
 
 def test_openai_responses_renders_profile_model_and_cache_key():

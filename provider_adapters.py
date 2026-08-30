@@ -218,6 +218,7 @@ class OpenAIChatCompletionsAdapter:
             ],
             "max_tokens": max_output_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if prompt_cache_key is not None:
             if profile.cache_strategy != "openai_stable_prefix_v1":
