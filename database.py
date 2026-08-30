@@ -376,6 +376,7 @@ ALTER TABLE conversations
     ADD COLUMN IF NOT EXISTS event_role TEXT,
     ADD COLUMN IF NOT EXISTS fact_identity TEXT,
     ADD COLUMN IF NOT EXISTS fact_hash TEXT,
+    ADD COLUMN IF NOT EXISTS request_id TEXT,
     ADD COLUMN IF NOT EXISTS attachments_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS provenance_json JSONB,
     ADD COLUMN IF NOT EXISTS bedroom_session_id TEXT,

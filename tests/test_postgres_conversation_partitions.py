@@ -20,6 +20,7 @@ async def test_conversation_partition_schema_is_additive_and_idempotent():
     sql = "\n".join(statement for statement, _ in conn.statements)
     assert "ALTER TABLE conversations" in sql
     assert "ADD COLUMN IF NOT EXISTS fact_identity" in sql
+    assert "ADD COLUMN IF NOT EXISTS request_id" in sql
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_fact_identity" in sql
     assert "DROP TABLE" not in sql
     assert "DELETE FROM conversations" not in sql
