@@ -27,6 +27,7 @@ class ContextBundle:
     runtime_kernel_version: str
     room_policy_version: str
     tool_schema_hash: str
+    cache_conversation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +123,7 @@ class GatewayModelExecutionService:
             yield ExecutionStreamEvent("profile", provenance.to_dict())
             namespace = build_cache_namespace(
                 actor_id=request.actor_id,
-                conversation_id=conversation_id,
+                conversation_id=context.cache_conversation_id or conversation_id,
                 profile_id=profile.profile_id,
                 profile_revision=profile.revision,
                 execution_mode=request.execution_mode,

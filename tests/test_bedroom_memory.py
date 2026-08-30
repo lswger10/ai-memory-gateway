@@ -46,6 +46,22 @@ class FakeRepo:
         return "bedroom-archive:1"
 
 
+class FakeConversationStore:
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_bedroom_partition(self, session_id):
+        self.deleted.append(session_id)
+
+
+class FakeHistoryStore:
+    def __init__(self):
+        self.deleted = []
+
+    async def delete_conversation_state(self, conversation_id):
+        self.deleted.append(conversation_id)
+
+
 class BedroomMemoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_pack_uses_actor_prompt_scene_and_private_acl(self):
         from bedroom_memory import BedroomContextPackService, BedroomPackRequest
@@ -95,6 +111,54 @@ class BedroomMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.summaries[0]["scope"], "weiwei-jiao")
         self.assertEqual(archive["receipt_id"], "bedroom-archive:1")
         self.assertEqual(repo.archives[0]["scope"], "weiwei-jiao")
+
+    async def test_no_retention_returns_discard_receipt_and_clears_cognitive_state(self):
+        from bedroom_memory import BedroomRetentionService
+
+        conversations = FakeConversationStore()
+        cache = FakeHistoryStore()
+        service = BedroomRetentionService(
+            FakeRepo(), conversation_store=conversations, history_store=cache
+        )
+        receipt = await service.persist(facts(policy="no-retention"))
+        self.assertTrue(receipt["receipt_id"].startswith("bedroom-discard:"))
+        self.assertEqual(conversations.deleted, ["bedroom-1"])
+        self.assertEqual(cache.deleted, ["bedroom:bedroom-1"])
+
+    async def test_summary_is_persisted_before_active_cognitive_partition_is_cleared(self):
+        from bedroom_memory import BedroomRetentionService
+
+        repo = FakeRepo()
+        conversations = FakeConversationStore()
+        cache = FakeHistoryStore()
+        receipt = await BedroomRetentionService(
+            repo, conversation_store=conversations, history_store=cache
+        ).persist(facts(policy="summary-only"))
+        self.assertEqual(receipt["receipt_id"], "bedroom-summary:1")
+        self.assertEqual(len(repo.summaries), 1)
+        self.assertEqual(conversations.deleted, ["bedroom-1"])
+        self.assertEqual(cache.deleted, ["bedroom:bedroom-1"])
+
+    async def test_execution_components_keep_prior_bedroom_turns_out_of_dynamic_tail(self):
+        from bedroom_memory import BedroomContextPackService, BedroomPackRequest
+
+        payload = facts()
+        payload["session"]["turn_epoch"] = 2
+        payload["turns"] = [
+            {"turn_id": 1, "turn_epoch": 1, "actor_id": "jiao", "role": "agent", "text": "prior accepted", "request_id": "a1", "created_at": "then", "provenance_json": None},
+            {"turn_id": 2, "turn_epoch": 2, "actor_id": "weiwei", "role": "human", "text": "current turn", "request_id": "h2", "created_at": "now", "provenance_json": None},
+        ]
+        service = BedroomContextPackService(
+            FakeRelay(payload),
+            search=AsyncMock(return_value=AuthorizedMemorySearchResult((), (), CandidateAudit())),
+            summary_search=AsyncMock(return_value=()),
+        )
+        components = await service.build_execution_components(
+            BedroomPackRequest("bedroom-1", 2, 2, "jiao")
+        )
+        dynamic = "\n".join(components["dynamic_tail"])
+        self.assertIn("current turn", dynamic)
+        self.assertNotIn("prior accepted", dynamic)
 
 
 if __name__ == "__main__":

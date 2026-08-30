@@ -77,8 +77,9 @@ def _request(*, binding_revision=1):
 
 
 class _ContextBuilder:
-    def __init__(self):
+    def __init__(self, cache_conversation_id=None):
         self.requests = []
+        self.cache_conversation_id = cache_conversation_id
 
     async def build(self, request):
         self.requests.append(request)
@@ -91,6 +92,7 @@ class _ContextBuilder:
             runtime_kernel_version="kernel.v1",
             room_policy_version="group.v1",
             tool_schema_hash="tools.none",
+            cache_conversation_id=self.cache_conversation_id,
         )
 
 
@@ -237,6 +239,30 @@ async def test_binding_revision_mismatch_rejects_before_provider_call():
     with pytest.raises(ValueError, match="binding revision"):
         _ = [event async for event in service.stream(request)]
     assert runner.calls == []
+
+
+@pytest.mark.anyio
+async def test_bedroom_provider_cache_uses_session_partition_not_private_room():
+    from model_usage_store import build_cache_namespace
+
+    profiles = InMemoryModelProfileStore()
+    await profiles.put_profile(_profile("primary"))
+    await profiles.set_actor_default("jiao", "primary")
+    context = _ContextBuilder("bedroom:bedroom-1")
+    runner = _Runner()
+    service = GatewayModelExecutionService(
+        profiles=profiles, context_builder=context, provider_runner=runner,
+        usage_store=InMemoryModelUsageStore(),
+    )
+    _ = [event async for event in service.stream(_request())]
+    expected = build_cache_namespace(
+        actor_id="jiao", conversation_id="bedroom:bedroom-1",
+        profile_id="primary", profile_revision=1, execution_mode="group",
+        actor_prompt_version="jiao.v1", runtime_kernel_version="kernel.v1",
+        room_policy_version="group.v1", tool_schema_hash="tools.none",
+        cache_strategy_version="anthropic_prefix_anchored_v1",
+    )
+    assert runner.calls[0][3] == expected
 
 
 def _request_to_dict(request):

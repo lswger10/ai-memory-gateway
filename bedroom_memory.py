@@ -151,7 +151,7 @@ class BedroomContextPackService:
         )
 
     async def build_execution_components(self, request: BedroomPackRequest) -> dict:
-        """Bedroom transcript is deliberately dynamic and never joins private cache history."""
+        """Only the current Bedroom turn is dynamic; prior accepted turns are persisted history."""
         facts = validate_bedroom_facts(
             await self.relay_client.fetch_bedroom_facts(request.bedroom_session_id)
         )
@@ -199,6 +199,7 @@ class BedroomContextPackService:
             "\n".join(
                 f"{'薇薇' if turn['actor_id']=='weiwei' else profile.actor_id}: {turn['text']}"
                 for turn in facts["turns"]
+                if turn["turn_id"] == request.turn_id
             )
         )
         return {
@@ -223,19 +224,23 @@ def bounded_relationship_summary(facts: dict, maximum_chars: int = 1600) -> str:
 
 
 class BedroomRetentionService:
-    def __init__(self, repository):
+    def __init__(self, repository, *, conversation_store=None, history_store=None):
         self.repository = repository
+        self.conversation_store = conversation_store
+        self.history_store = history_store
 
     async def persist(self, payload: Any) -> dict:
         facts = validate_bedroom_facts(payload)
         session = facts["session"]
         policy = session["retention_policy"]
-        if policy == "no-retention":
-            raise BedroomContractError("no-retention must not enter Gateway")
         scope = PRIVATE_ROOM_SCOPES[session["room_id"]]
         canonical = json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         content_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        if policy == "summary-only":
+        if policy == "no-retention":
+            receipt_id = "bedroom-discard:" + hashlib.sha256(
+                f"{session['bedroom_session_id']}|{content_hash}".encode()
+            ).hexdigest()
+        elif policy == "summary-only":
             receipt_id = await self.repository.persist_summary(
                 session_id=session["bedroom_session_id"],
                 actor_id=session["actor_id"],
@@ -251,6 +256,14 @@ class BedroomRetentionService:
                 scope=scope,
                 facts=facts,
                 content_hash=content_hash,
+            )
+        if self.conversation_store is not None:
+            await self.conversation_store.delete_bedroom_partition(
+                session["bedroom_session_id"]
+            )
+        if self.history_store is not None:
+            await self.history_store.delete_conversation_state(
+                f"bedroom:{session['bedroom_session_id']}"
             )
         return {
             "contract_version": BEDROOM_CONTRACT_VERSION,

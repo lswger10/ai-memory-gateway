@@ -26,6 +26,7 @@ class GatewayExecutionContextBuilder:
         history_compactor: AnchoredHistoryCompactor | None = None,
         conversation_store=None,
         conversation_sync: ConversationSyncService | None = None,
+        bedroom_conversation_sync: ConversationSyncService | None = None,
     ) -> None:
         self.group_context = group_context
         self.bedroom_context = bedroom_context
@@ -34,6 +35,13 @@ class GatewayExecutionContextBuilder:
         self.conversation_store = conversation_store or InMemoryConversationPartitionStore()
         self.conversation_sync = conversation_sync or ConversationSyncService(
             group_context.relay_client, self.conversation_store
+        )
+        self.bedroom_conversation_sync = (
+            bedroom_conversation_sync
+            or ConversationSyncService(
+                getattr(bedroom_context, "relay_client", group_context.relay_client),
+                self.conversation_store,
+            )
         )
 
     async def resolve_coordinates(
@@ -61,7 +69,7 @@ class GatewayExecutionContextBuilder:
         resolved_conversation_id: str,
     ) -> ContextBundle:
         if request.execution_mode == "bedroom":
-            receipt = await self.conversation_sync.ensure_bedroom_synced(
+            receipt = await self.bedroom_conversation_sync.ensure_bedroom_synced(
                 bedroom_session_id=request.bedroom_session_id,
                 current_turn_id=request.current_event_id,
                 actor_id=request.actor_id,
@@ -178,4 +186,5 @@ class GatewayExecutionContextBuilder:
             runtime_kernel_version=components["runtime_kernel_version"],
             room_policy_version=components["room_policy_version"],
             tool_schema_hash=components["tool_schema_hash"],
+            cache_conversation_id=cache_conversation_id,
         )

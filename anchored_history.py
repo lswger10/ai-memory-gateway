@@ -144,6 +144,7 @@ class InMemoryAnchoredHistoryStore:
             raise AnchoredHistoryError("summary token limit must be positive")
         self._summary_token_limit = summary_token_limit
         self._states: dict[str, AnchoredHistoryState] = {}
+        self._identities: dict[str, dict] = {}
         self._lock = asyncio.Lock()
 
     async def get_or_create(
@@ -160,6 +161,11 @@ class InMemoryAnchoredHistoryStore:
                     state_revision=1,
                 )
                 self._states[cache_namespace] = state
+            if identity is not None:
+                prior = self._identities.get(cache_namespace)
+                if prior is not None and prior != identity:
+                    raise AnchoredHistoryError("cache namespace identity changed")
+                self._identities[cache_namespace] = dict(identity)
             return state
 
     async def observe_appended_events(
@@ -215,6 +221,19 @@ class InMemoryAnchoredHistoryStore:
             )
             self._states[cache_namespace] = replacement
             return replacement
+
+    async def delete_conversation_state(self, conversation_id: str) -> None:
+        async with self._lock:
+            self._states = {
+                namespace: state for namespace, state in self._states.items()
+                if self._identities.get(namespace, {}).get("conversation_id")
+                != conversation_id
+            }
+            self._identities = {
+                namespace: identity
+                for namespace, identity in self._identities.items()
+                if identity.get("conversation_id") != conversation_id
+            }
 
 
 def _state_from_row(row) -> AnchoredHistoryState:
@@ -346,3 +365,11 @@ class PostgresAnchoredHistoryStore:
                 if row is None:
                     raise AnchoredHistoryError("cache state revision conflict")
         return _state_from_row(row)
+
+    async def delete_conversation_state(self, conversation_id: str) -> None:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM model_cache_state WHERE conversation_id=$1",
+                conversation_id,
+            )

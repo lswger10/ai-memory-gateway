@@ -55,6 +55,42 @@ class _GroupContext:
         }
 
 
+class _BedroomRelay:
+    def __init__(self):
+        self.payload = {
+            "session": {
+                "bedroom_session_id": "bedroom-1",
+                "room_id": "room_weiwei_jiao",
+                "conversation_id": "conversation-1",
+                "actor_id": "jiao",
+                "retention_policy": "no-retention",
+            },
+            "turns": [
+                {"turn_id": 1, "actor_id": "jiao", "role": "agent", "text": "prior", "request_id": "b1", "created_at": "then", "provenance_json": None},
+                {"turn_id": 2, "actor_id": "weiwei", "role": "human", "text": "current", "request_id": "b2", "created_at": "now", "provenance_json": None},
+            ],
+        }
+
+    async def fetch_bedroom_facts(self, session_id):
+        assert session_id == "bedroom-1"
+        return self.payload
+
+
+class _BedroomContext:
+    def __init__(self):
+        self.relay_client = _BedroomRelay()
+
+    async def build_execution_components(self, request):
+        return {
+            "static_system": ("runtime", "actor", "room"),
+            "dynamic_tail": ("current",),
+            "actor_prompt_version": "actor.v1",
+            "runtime_kernel_version": "runtime.v1",
+            "room_policy_version": "bedroom.v1",
+            "tool_schema_hash": "tools.v1",
+        }
+
+
 class _HistoryStore:
     def __init__(self):
         self.identity = None
@@ -214,3 +250,66 @@ async def test_group_cognitive_transcript_is_shared_while_actor_cache_identity_i
     assert jiao_history.identity["actor_id"] == "jiao"
     assert laoke_history.identity["actor_id"] == "laoke"
     assert '"event_id":2' in "".join(bundle.stable_history)
+
+
+@pytest.mark.anyio
+async def test_compressed_cursor_never_deletes_complete_conversation_partition():
+    from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
+    from conversation_partitions import InMemoryConversationPartitionStore
+
+    relay = _Relay()
+    relay.events = [_event(i) for i in range(1, 6)]
+    context = _GroupContext()
+    context.relay_client = relay
+    conversations = InMemoryConversationPartitionStore()
+    cache = InMemoryAnchoredHistoryStore()
+    builder = GatewayExecutionContextBuilder(
+        group_context=context, bedroom_context=object(),
+        conversation_store=conversations, history_store=cache,
+        history_compactor=AnchoredHistoryCompactor(
+            compact_after_events=3, retain_raw_events=1, summary_token_limit=128
+        ),
+    )
+    prior = _request()
+    request = replace(
+        prior, current_event_id=5, fence=replace(prior.fence, trigger_event_id=5)
+    )
+    bundle = await builder.build(
+        request, _profile(), resolved_room_id="room_weiwei_jiao",
+        resolved_conversation_id="conversation-1",
+    )
+    assert bundle.stable_summary
+    assert await conversations.count_facts("conversation-1") == 5
+    assert [fact.source_event_id for fact in await conversations.list_facts("conversation-1")] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.anyio
+async def test_bedroom_build_uses_session_partition_and_prior_accepted_turns():
+    from conversation_partitions import InMemoryConversationPartitionStore
+
+    payload = {
+        "contract_version": "gateway-model-execution.v1.0",
+        "execution_kind": "full",
+        "actor_id": "jiao",
+        "current_event_id": 2,
+        "generation_request_id": "bedroom-generation-1",
+        "execution_mode": "bedroom",
+        "bedroom_session_id": "bedroom-1",
+        "bedroom_turn_epoch": 2,
+        "binding_revision": 1,
+    }
+    request = GatewayExecutionRequest.from_dict(payload)
+    store = InMemoryConversationPartitionStore()
+    bedroom = _BedroomContext()
+    builder = GatewayExecutionContextBuilder(
+        group_context=_GroupContext(), bedroom_context=bedroom,
+        conversation_store=store,
+    )
+    bundle = await builder.build(
+        request, _profile(), resolved_room_id="room_weiwei_jiao",
+        resolved_conversation_id="conversation-1",
+    )
+    assert bundle.cache_conversation_id == "bedroom:bedroom-1"
+    assert '"event_id":1' in "".join(bundle.stable_history)
+    assert '"event_id":2' not in "".join(bundle.stable_history)
+    assert await store.count_facts("bedroom:bedroom-1") == 2

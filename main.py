@@ -849,7 +849,11 @@ def _get_bedroom_context_service() -> BedroomContextPackService:
 def _get_bedroom_retention_service() -> BedroomRetentionService:
     global _bedroom_retention_service
     if _bedroom_retention_service is None:
-        _bedroom_retention_service = BedroomRetentionService(BedroomPostgresRepository())
+        _bedroom_retention_service = BedroomRetentionService(
+            BedroomPostgresRepository(),
+            conversation_store=PostgresConversationPartitionStore(get_pool),
+            history_store=PostgresAnchoredHistoryStore(get_pool),
+        )
     return _bedroom_retention_service
 
 
@@ -2985,13 +2989,32 @@ async def api_conversation_messages(session_id: str, limit: int = 50, offset: in
                 "SELECT COUNT(*) FROM conversations WHERE session_id = $1", session_id
             )
             rows = await conn.fetch("""
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, room_id,
+                       canonical_conversation_id, source_event_id, actor_id,
+                       event_role, source_kind, bedroom_session_id,
+                       retention_policy, attachments_json, provenance_json
                 FROM conversations WHERE session_id = $1
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
             """, session_id, limit, offset)
-        msgs = [{"id": r["id"], "role": r["role"], "content": r["content"], 
-                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None} for r in rows]
+        def decoded(value, fallback):
+            if value is None:
+                return fallback
+            return json.loads(value) if isinstance(value, str) else value
+        msgs = [{
+            "id": r["id"], "role": r["role"], "content": r["content"],
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            "room_id": r.get("room_id"),
+            "conversation_id": r.get("canonical_conversation_id") or session_id,
+            "source_event_id": r.get("source_event_id"),
+            "actor_id": r.get("actor_id"),
+            "event_role": r.get("event_role"),
+            "source_kind": r.get("source_kind") or "legacy",
+            "bedroom_session_id": r.get("bedroom_session_id"),
+            "retention_policy": r.get("retention_policy"),
+            "attachments": decoded(r.get("attachments_json"), []),
+            "provenance": decoded(r.get("provenance_json"), None),
+        } for r in rows]
         return {"messages": msgs, "total": total}
     except Exception as e:
         return {"error": str(e)}
