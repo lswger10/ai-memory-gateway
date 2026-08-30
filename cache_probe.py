@@ -91,10 +91,14 @@ class GatewayCacheProbeService:
         )
 
     @staticmethod
-    def _context() -> ContextBundle:
+    def _context(profile_id: str) -> ContextBundle:
         # Deliberately large, deterministic stable prefix. Some Anthropic model
         # families only cache once the prefix passes their minimum token size.
-        anchor = "gateway-cache-probe-static-anchor-v1 " * 1400
+        # The Profile marker prevents a prior route/TTL probe from satisfying
+        # the first send of a different Profile.
+        anchor = f"gateway-cache-probe-profile:{profile_id}\n" + (
+            "gateway-cache-probe-static-anchor-v1 " * 1400
+        )
         return ContextBundle(
             static_system=(
                 "gateway-cache-probe-runtime-v1\n" + anchor,
@@ -153,7 +157,7 @@ class GatewayCacheProbeService:
             conversation_id=conversation_id,
             profile_id=profile_id,
         )
-        context = self._context()
+        context = self._context(profile_id)
         namespace = build_cache_namespace(
             actor_id=actor_id,
             conversation_id=conversation_id,

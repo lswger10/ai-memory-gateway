@@ -1,4 +1,5 @@
 import pytest
+from dataclasses import replace
 
 from cache_probe import GatewayCacheProbeService
 from model_execution import ProviderChunk
@@ -165,3 +166,42 @@ async def test_paid_cache_probe_caps_provider_output_to_minimal_tokens():
     )
 
     assert [call[4] for call in runner.calls] == [32, 32]
+
+
+@pytest.mark.anyio
+async def test_paid_cache_probe_uses_a_distinct_stable_prefix_per_profile():
+    store = InMemoryModelProfileStore()
+    first_profile = _profile(strategy="no_prompt_cache_v1", ttl=None)
+    second_profile = replace(
+        first_profile,
+        profile_id="profile-2",
+        route_id="route-2",
+    )
+    await store.put_profile(first_profile)
+    await store.put_profile(second_profile)
+    runner = _Runner(
+        [
+            ProviderUsage.from_provider_values(input_tokens=30, output_tokens=3),
+            ProviderUsage.from_provider_values(input_tokens=30, output_tokens=3),
+            ProviderUsage.from_provider_values(input_tokens=30, output_tokens=3),
+            ProviderUsage.from_provider_values(input_tokens=30, output_tokens=3),
+        ]
+    )
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+
+    await service.run(
+        profile_id="profile-1",
+        actor_id="laoke",
+        room_id="room_weiwei_laoke",
+        conversation_id="canonical-conversation-1",
+    )
+    await service.run(
+        profile_id="profile-2",
+        actor_id="laoke",
+        room_id="room_weiwei_laoke",
+        conversation_id="canonical-conversation-1",
+    )
+
+    first_context = runner.calls[0][2]
+    second_context = runner.calls[2][2]
+    assert first_context.static_system != second_context.static_system
