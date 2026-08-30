@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import inspect
 import json
@@ -257,6 +258,16 @@ def _timestamp_text(value: Any) -> str:
     return str(value)
 
 
+def _timestamp_value(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ConversationPartitionError("created_at must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 class PostgresConversationPartitionStore:
     """Persistent view of Relay-accepted facts in the existing conversations table."""
 
@@ -303,7 +314,7 @@ class PostgresConversationPartitionStore:
                         fact.content_hash,
                         fact.content,
                         fact.request_id,
-                        fact.created_at,
+                        _timestamp_value(fact.created_at),
                         fact.source_kind,
                         json.dumps(fact.provenance, ensure_ascii=False),
                         json.dumps(fact.attachments, ensure_ascii=False),

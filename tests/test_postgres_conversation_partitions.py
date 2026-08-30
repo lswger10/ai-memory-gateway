@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 
 
@@ -118,6 +120,8 @@ async def test_postgres_partition_survives_store_recreation_and_deduplicates():
     fact = ConversationFact.from_relay_event(event)
     first = PostgresConversationPartitionStore(lambda: _pool(pool))
     await first.append_accepted_facts((fact, fact))
+    stored_args = pool.connection.rows[fact.fact_identity]
+    assert isinstance(stored_args[10], datetime)
 
     recreated = PostgresConversationPartitionStore(lambda: _pool(pool))
     restored = await recreated.list_facts("group-1")
