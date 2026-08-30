@@ -47,8 +47,18 @@ class _Runner:
         self.usages = list(usages)
         self.calls = []
 
-    async def run(self, *, profile, request, context, cache_namespace):
-        self.calls.append((profile, request, context, cache_namespace))
+    async def run(
+        self,
+        *,
+        profile,
+        request,
+        context,
+        cache_namespace,
+        max_output_tokens=None,
+    ):
+        self.calls.append(
+            (profile, request, context, cache_namespace, max_output_tokens)
+        )
         yield ProviderChunk("final", {"text": "CACHE_PROBE_OK"})
         usage = self.usages.pop(0)
         yield ProviderChunk(
@@ -134,3 +144,24 @@ async def test_no_cache_profile_can_pass_route_probe_without_fabricated_cache_su
     assert (await store.get_profile("profile-1")).test_status == "passed"
     assert result.second.cache_read_input_tokens is None
 
+
+@pytest.mark.anyio
+async def test_paid_cache_probe_caps_provider_output_to_minimal_tokens():
+    store = InMemoryModelProfileStore()
+    await store.put_profile(_profile())
+    runner = _Runner(
+        [
+            ProviderUsage.from_provider_values(cache_creation_input_tokens=400),
+            ProviderUsage.from_provider_values(cache_read_input_tokens=380),
+        ]
+    )
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+
+    await service.run(
+        profile_id="profile-1",
+        actor_id="jiao",
+        room_id="room_weiwei_jiao",
+        conversation_id="canonical-conversation-1",
+    )
+
+    assert [call[4] for call in runner.calls] == [32, 32]

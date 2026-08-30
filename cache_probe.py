@@ -118,6 +118,7 @@ class GatewayCacheProbeService:
             request=request,
             context=context,
             cache_namespace=cache_namespace,
+            max_output_tokens=32,
         )
         try:
             async for chunk in stream:

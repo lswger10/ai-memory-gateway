@@ -46,8 +46,13 @@ class GatewayProviderRunner:
         request: GatewayExecutionRequest,
         context: ContextBundle,
         cache_namespace: str,
+        max_output_tokens: int | None = None,
     ):
-        maximum = 512 if request.execution_kind == "probe" else 12000
+        maximum = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else (512 if request.execution_kind == "probe" else 12000)
+        )
         system_kinds = ("runtime_kernel", "actor_prompt", "room_policy")
         stable = tuple(
             PromptSegment(kind, text)
@@ -133,11 +138,18 @@ class GatewayProviderRunner:
         request: GatewayExecutionRequest,
         context: ContextBundle,
         cache_namespace: str,
+        max_output_tokens: int | None = None,
     ) -> AsyncIterator[ProviderChunk]:
         try:
             credential = self.credentials.resolve(profile.credential_ref)
             headers = resolve_profile_headers(profile, credential)
-            rendered = self._render(profile, request, context, cache_namespace)
+            rendered = self._render(
+                profile,
+                request,
+                context,
+                cache_namespace,
+                max_output_tokens=max_output_tokens,
+            )
             stream_context = await self.transport.open_stream(
                 pool_key=profile.route_id,
                 base_url=profile.base_url,
