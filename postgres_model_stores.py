@@ -10,6 +10,22 @@ from model_profiles import ModelProfile
 from model_usage_store import ExecutionReceipt, ExecutionReceiptDraft, UsageStoreConflict
 
 
+def _json_object(value):
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise ProfileStoreError("stored Profile JSON must be an object")
+    return value
+
+
+def _json_array(value):
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, list):
+        raise ProfileStoreError("stored Profile list must be an array")
+    return value
+
+
 class PostgresModelProfileStore:
     def __init__(self, pool_factory) -> None:
         self._pool_factory = pool_factory
@@ -36,7 +52,7 @@ class PostgresModelProfileStore:
         pool = await self._pool_factory()
         async with pool.acquire() as conn:
             rows = await conn.fetch("SELECT profile_json FROM model_profiles ORDER BY profile_id")
-        return tuple(ModelProfile.from_dict(dict(row["profile_json"])) for row in rows)
+        return tuple(ModelProfile.from_dict(_json_object(row["profile_json"])) for row in rows)
 
     async def get_profile(self, profile_id: str) -> ModelProfile:
         pool = await self._pool_factory()
@@ -47,7 +63,7 @@ class PostgresModelProfileStore:
             )
         if row is None:
             raise ProfileStoreError(f"unknown Profile: {profile_id}")
-        return ModelProfile.from_dict(dict(row["profile_json"]))
+        return ModelProfile.from_dict(_json_object(row["profile_json"]))
 
     async def set_test_status(self, profile_id: str, status: str) -> ModelProfile:
         profile = await self.get_profile(profile_id)
@@ -101,7 +117,7 @@ class PostgresModelProfileStore:
         row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", profile_id)
         if row is None:
             raise ProfileStoreError(f"unknown Profile: {profile_id}")
-        profile = ModelProfile.from_dict(dict(row["profile_json"]))
+        profile = ModelProfile.from_dict(_json_object(row["profile_json"]))
         if not profile.selectable:
             raise ProfileStoreError(f"Profile is not selectable: {profile_id}")
         return profile
@@ -116,7 +132,7 @@ class PostgresModelProfileStore:
                 if expected_revision is not None and actual != expected_revision:
                     raise ProfileStoreError("binding revision conflict")
                 revision = 1 if row is None else actual + 1
-                fallbacks = list(row["approved_fallback_profile_ids"]) if row else []
+                fallbacks = _json_array(row["approved_fallback_profile_ids"]) if row else []
                 await conn.execute(
                     """INSERT INTO model_actor_bindings(actor_id,default_profile_id,approved_fallback_profile_ids,revision)
                        VALUES($1,$2,$3::jsonb,$4) ON CONFLICT(actor_id) DO UPDATE SET
@@ -176,7 +192,9 @@ class PostgresModelProfileStore:
             primary_id = override["profile_id"] if override else binding["default_profile_id"]
             primary = await self._profile(conn, primary_id)
             fallback_ids = tuple(
-                item for item in binding["approved_fallback_profile_ids"] if item != primary_id
+                item
+                for item in _json_array(binding["approved_fallback_profile_ids"])
+                if item != primary_id
             )
             fallbacks = tuple([await self._profile(conn, item) for item in fallback_ids])
             revision = int(override["revision"] if override else binding["revision"])
