@@ -4,8 +4,50 @@ from attachment_descriptions import (
     AttachmentDescriptionError,
     ImageHistoryItem,
     InMemoryAttachmentDescriptionStore,
+    PostgresAttachmentDescriptionStore,
     plan_image_history,
 )
+
+
+class _Connection:
+    def __init__(self):
+        self.rows = {}
+
+    async def fetchrow(self, sql, *args):
+        key = (args[0], args[1])
+        if "INSERT INTO model_attachment_descriptions" in sql:
+            self.rows.setdefault(key, args[2])
+        value = self.rows.get(key)
+        if value is None:
+            return None
+        return {
+            "attachment_identity": key[0],
+            "description_version": key[1],
+            "description": value,
+        }
+
+
+class _Acquire:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _Pool:
+    def __init__(self):
+        self.connection = _Connection()
+
+    def acquire(self):
+        return _Acquire(self.connection)
+
+
+async def _pool(value):
+    return value
 
 
 @pytest.mark.anyio
@@ -50,3 +92,17 @@ async def test_description_is_idempotent_and_conflicts_are_rejected():
     assert first is retry
     with pytest.raises(AttachmentDescriptionError, match="immutable"):
         await store.put_once("sha256:a", "v1", "different")
+
+
+@pytest.mark.anyio
+async def test_postgres_description_survives_store_recreation_and_rejects_conflict():
+    pool = _Pool()
+    first = PostgresAttachmentDescriptionStore(lambda: _pool(pool))
+    saved = await first.put_once("sha256:a", "vision.v1", "stable description")
+
+    recreated = PostgresAttachmentDescriptionStore(lambda: _pool(pool))
+    restored = await recreated.get("sha256:a", "vision.v1")
+
+    assert restored == saved
+    with pytest.raises(AttachmentDescriptionError, match="immutable"):
+        await recreated.put_once("sha256:a", "vision.v1", "different")

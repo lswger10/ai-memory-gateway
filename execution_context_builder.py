@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from anchored_history import InMemoryAnchoredHistoryStore
+from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
 from bedroom_memory import BedroomContextPackService, BedroomPackRequest
 from group_contracts import CONTRACT_VERSION as GROUP_CONTRACT_VERSION, ContextPackRequest
 from group_memory import GroupContextPackService
@@ -21,10 +21,12 @@ class GatewayExecutionContextBuilder:
         group_context: GroupContextPackService,
         bedroom_context: BedroomContextPackService,
         history_store: InMemoryAnchoredHistoryStore | None = None,
+        history_compactor: AnchoredHistoryCompactor | None = None,
     ) -> None:
         self.group_context = group_context
         self.bedroom_context = bedroom_context
         self.history_store = history_store or InMemoryAnchoredHistoryStore()
+        self.history_compactor = history_compactor or AnchoredHistoryCompactor()
 
     async def resolve_coordinates(
         self, request: GatewayExecutionRequest
@@ -125,6 +127,12 @@ class GatewayExecutionContextBuilder:
         )
         event_ids = tuple(int(event["event_id"]) for event in history)
         await self.history_store.observe_appended_events(namespace, event_ids)
+        state, history = await self.history_compactor.maybe_compact(
+            store=self.history_store,
+            cache_namespace=namespace,
+            state=state,
+            events=tuple(history),
+        )
         stable_history = tuple(
             json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             for event in history

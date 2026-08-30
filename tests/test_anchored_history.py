@@ -1,6 +1,7 @@
 import pytest
 
 from anchored_history import (
+    AnchoredHistoryCompactor,
     AnchoredHistoryError,
     AnchoredHistoryQuery,
     InMemoryAnchoredHistoryStore,
@@ -107,3 +108,52 @@ async def test_compression_cannot_move_cursor_backwards():
             summary_token_count=1,
             compressed_up_to_event_id=39,
         )
+
+
+@pytest.mark.anyio
+async def test_compactor_overwrites_bounded_summary_advances_cursor_and_keeps_tail():
+    store = InMemoryAnchoredHistoryStore(summary_token_limit=16)
+    state = await store.get_or_create("namespace-1")
+    events = tuple(
+        {"event_id": event_id, "actor_id": "weiwei", "content": f"fact-{event_id}"}
+        for event_id in range(1, 7)
+    )
+    compactor = AnchoredHistoryCompactor(
+        compact_after_events=4,
+        retain_raw_events=2,
+        summary_token_limit=16,
+    )
+
+    updated, stable_tail = await compactor.maybe_compact(
+        store=store,
+        cache_namespace="namespace-1",
+        state=state,
+        events=events,
+    )
+
+    assert updated.compressed_up_to_event_id == 4
+    assert updated.state_revision == state.state_revision + 1
+    assert updated.summary_token_count <= 16
+    assert "fact-4" in updated.summary
+    assert [event["event_id"] for event in stable_tail] == [5, 6]
+
+
+@pytest.mark.anyio
+async def test_compactor_does_not_move_cursor_during_normal_append():
+    store = InMemoryAnchoredHistoryStore(summary_token_limit=32)
+    state = await store.get_or_create("namespace-1")
+    compactor = AnchoredHistoryCompactor(
+        compact_after_events=4,
+        retain_raw_events=2,
+        summary_token_limit=32,
+    )
+
+    unchanged, tail = await compactor.maybe_compact(
+        store=store,
+        cache_namespace="namespace-1",
+        state=state,
+        events=({"event_id": 1, "actor_id": "weiwei", "content": "hello"},),
+    )
+
+    assert unchanged == state
+    assert tail[0]["event_id"] == 1
