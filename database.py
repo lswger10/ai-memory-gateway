@@ -261,6 +261,111 @@ async def apply_scoped_memory_schema(conn) -> None:
     await conn.execute(SCOPED_MEMORY_MIGRATION_SQL)
 
 
+MODEL_EXECUTION_MIGRATION_SQL = """
+CREATE TABLE IF NOT EXISTS model_profiles (
+    profile_id TEXT PRIMARY KEY,
+    profile_json JSONB NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    test_status TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (test_status IN ('unverified','passed','failed','unsupported')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_actor_bindings (
+    actor_id TEXT PRIMARY KEY CHECK (actor_id IN ('jiao','laoke')),
+    default_profile_id TEXT NOT NULL REFERENCES model_profiles(profile_id),
+    approved_fallback_profile_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_room_overrides (
+    room_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    profile_id TEXT NOT NULL REFERENCES model_profiles(profile_id),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (room_id, actor_id)
+);
+
+CREATE TABLE IF NOT EXISTS model_profile_probe_results (
+    profile_id TEXT NOT NULL REFERENCES model_profiles(profile_id),
+    profile_revision INTEGER NOT NULL,
+    probe_kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('verified','unverified','unsupported','failed')),
+    observed_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+    sanitized_detail TEXT,
+    tested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (profile_id, profile_revision, probe_kind)
+);
+
+CREATE TABLE IF NOT EXISTS model_cache_state (
+    cache_namespace TEXT PRIMARY KEY,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    conversation_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL REFERENCES model_profiles(profile_id),
+    profile_revision INTEGER NOT NULL,
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('private','group','bedroom')),
+    actor_prompt_version TEXT NOT NULL,
+    runtime_kernel_version TEXT NOT NULL,
+    room_policy_version TEXT NOT NULL,
+    tool_schema_hash TEXT NOT NULL,
+    cache_strategy_version TEXT NOT NULL,
+    compressed_up_to_event_id BIGINT NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    summary_token_count INTEGER NOT NULL DEFAULT 0,
+    state_revision INTEGER NOT NULL DEFAULT 1,
+    stable_prefix_hash TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_attachment_descriptions (
+    attachment_identity TEXT NOT NULL,
+    description_version TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (attachment_identity, description_version)
+);
+
+CREATE TABLE IF NOT EXISTS model_execution_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    generation_request_id TEXT NOT NULL UNIQUE,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    room_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL REFERENCES model_profiles(profile_id),
+    profile_revision INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    route_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    adapter_version TEXT NOT NULL,
+    cache_strategy TEXT NOT NULL,
+    requested_cache_ttl TEXT,
+    observed_cache_support TEXT NOT NULL,
+    fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+    fallback_from_profile_id TEXT,
+    input_tokens BIGINT,
+    output_tokens BIGINT,
+    cache_creation_input_tokens BIGINT,
+    cache_read_input_tokens BIGINT,
+    cached_tokens BIGINT,
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_execution_receipts_context
+    ON model_execution_receipts(actor_id, room_id, conversation_id, created_at);
+"""
+
+
+async def apply_model_execution_schema(conn) -> None:
+    """Apply additive Gateway-owned Profile/cache/usage tables."""
+    await conn.execute(MODEL_EXECUTION_MIGRATION_SQL)
+
+
 # ============================================================
 # 表结构初始化
 # ============================================================
@@ -307,6 +412,7 @@ async def init_tables():
         """)
 
         await apply_scoped_memory_schema(conn)
+        await apply_model_execution_schema(conn)
         
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_fts 
