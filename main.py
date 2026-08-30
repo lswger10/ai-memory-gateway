@@ -14,6 +14,8 @@ AI Memory Gateway — 带记忆系统的 LLM 转发网关
 
 import os
 import json
+import base64
+import hashlib
 import uuid
 import asyncio
 import secrets
@@ -23,7 +25,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -84,6 +86,14 @@ from model_execution_contracts import (
 from model_profiles import ModelProfile, ProfileContractError, resolve_feature_flags
 from model_profile_store import ProfileStoreError
 from memory_policy import room_members
+from actor_prompt_profiles import load_actor_prompt_profiles
+from actor_prompt_store import (
+    ActiveActorPromptMapping,
+    ActorPromptRevisionConflict,
+    ActorPromptStoreError,
+    InMemoryActorPromptVersionStore,
+    PostgresActorPromptVersionStore,
+)
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -331,6 +341,7 @@ async def lifespan(app: FastAPI):
     if MEMORY_ENABLED:
         try:
             await init_tables()
+            await _ensure_actor_prompt_store()
             await ensure_token_usage_table()
             count = await get_all_memories_count()
             print(f"✅ 记忆系统已启动，当前记忆数量：{count}")
@@ -437,6 +448,8 @@ _model_profile_store = None
 _model_usage_store = None
 _model_provider_runner: GatewayProviderRunner | None = None
 _cache_probe_service: GatewayCacheProbeService | None = None
+_actor_prompt_store = None
+_actor_prompt_mapping = None
 _model_runtime_lock = asyncio.Lock()
 
 # 静态文件和模板配置
@@ -545,6 +558,7 @@ async def _stream_gateway_execution(request: Request, expected_kind: str):
     if execution_request.execution_kind != expected_kind:
         return _model_execution_error(422, "execution_kind_mismatch")
     try:
+        await _refresh_actor_prompt_store()
         service = await _get_model_execution_service()
     except Exception:
         return _model_execution_error(503, "model_execution_unavailable")
@@ -772,6 +786,179 @@ def _usage_dict(usage) -> dict:
     }
 
 
+def _actor_persona_management_enabled() -> bool:
+    return os.environ.get("ACTOR_PERSONA_MANAGEMENT_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _require_actor_persona_management() -> None:
+    if not _actor_persona_management_enabled():
+        raise HTTPException(status_code=404, detail="actor_persona_management_disabled")
+    if not GATEWAY_SECRET:
+        raise HTTPException(status_code=503, detail="actor_persona_auth_not_configured")
+    if not _db_module.DATABASE_URL:
+        raise HTTPException(status_code=503, detail="actor_persona_storage_not_configured")
+
+
+async def _ensure_actor_prompt_store():
+    global _actor_prompt_store, _actor_prompt_mapping
+    if _actor_prompt_store is None:
+        builtins = load_actor_prompt_profiles()
+        _actor_prompt_store = (
+            PostgresActorPromptVersionStore(get_pool, builtins)
+            if _db_module.DATABASE_URL
+            else InMemoryActorPromptVersionStore(builtins)
+        )
+    await _actor_prompt_store.initialize()
+    if (
+        _actor_prompt_mapping is None
+        or getattr(_actor_prompt_mapping, "store", None) is not _actor_prompt_store
+    ):
+        _actor_prompt_mapping = ActiveActorPromptMapping(_actor_prompt_store)
+    return _actor_prompt_store
+
+
+async def _refresh_actor_prompt_store():
+    store = await _ensure_actor_prompt_store()
+    await store.refresh_active()
+    return store
+
+
+def _active_actor_prompt_mapping():
+    global _actor_prompt_store, _actor_prompt_mapping
+    if _actor_prompt_store is None:
+        builtins = load_actor_prompt_profiles()
+        _actor_prompt_store = (
+            PostgresActorPromptVersionStore(get_pool, builtins)
+            if _db_module.DATABASE_URL
+            else InMemoryActorPromptVersionStore(builtins)
+        )
+    if (
+        _actor_prompt_mapping is None
+        or getattr(_actor_prompt_mapping, "store", None) is not _actor_prompt_store
+    ):
+        _actor_prompt_mapping = ActiveActorPromptMapping(_actor_prompt_store)
+    return _actor_prompt_mapping
+
+
+def _actor_prompt_version_public(version, active_version_id: str) -> dict:
+    return version.to_public_dict(active=version.version_id == active_version_id)
+
+
+@app.get("/api/actor-prompts")
+async def list_actor_prompts():
+    _require_actor_persona_management()
+    store = await _refresh_actor_prompt_store()
+    actors = {}
+    for actor_id in ("jiao", "laoke"):
+        active = await store.get_active_state(actor_id)
+        versions = await store.list_versions(actor_id)
+        actors[actor_id] = {
+            "actor_id": actor_id,
+            "active_version_id": active.version_id,
+            "revision": active.revision,
+            "versions": [
+                _actor_prompt_version_public(version, active.version_id)
+                for version in versions
+            ],
+        }
+    return {"actors": actors}
+
+
+@app.post("/api/actor-prompts/{actor_id}/versions")
+async def create_actor_prompt_version(actor_id: str, request: Request):
+    _require_actor_persona_management()
+    if actor_id not in {"jiao", "laoke"}:
+        raise HTTPException(status_code=404, detail="actor_not_found")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {
+            "source_filename", "prompt_base64", "content_sha256"
+        }:
+            raise ValueError
+        source_filename = body["source_filename"]
+        prompt_base64 = body["prompt_base64"]
+        expected_sha = body["content_sha256"]
+        if (
+            not isinstance(source_filename, str)
+            or source_filename != Path(source_filename).name
+            or "/" in source_filename
+            or "\\" in source_filename
+            or len(source_filename) > 160
+            or not source_filename.lower().endswith(".md")
+            or not isinstance(prompt_base64, str)
+            or not isinstance(expected_sha, str)
+            or len(expected_sha) != 64
+        ):
+            raise ValueError
+        maximum = max(1, int(os.environ.get("ACTOR_PROMPT_MAX_BYTES", "262144")))
+        prompt_bytes = base64.b64decode(prompt_base64, validate=True)
+        if len(prompt_bytes) > maximum:
+            raise HTTPException(status_code=413, detail="actor_prompt_too_large")
+        if hashlib.sha256(prompt_bytes).hexdigest() != expected_sha.lower():
+            raise ValueError
+        prompt_text = prompt_bytes.decode("utf-8", "strict")
+        if not prompt_text.strip() or "\x00" in prompt_text:
+            raise ValueError
+        store = await _ensure_actor_prompt_store()
+        version = await store.create_version(actor_id, source_filename, prompt_text)
+    except HTTPException:
+        raise
+    except (ActorPromptStoreError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_actor_prompt") from exc
+    active = await store.get_active_state(actor_id)
+    return {"version": _actor_prompt_version_public(version, active.version_id)}
+
+
+@app.post("/api/actor-prompts/{actor_id}/activate")
+async def activate_actor_prompt_version(actor_id: str, request: Request):
+    _require_actor_persona_management()
+    if actor_id not in {"jiao", "laoke"}:
+        raise HTTPException(status_code=404, detail="actor_not_found")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"version_id", "expected_revision"}:
+            raise ValueError
+        version_id = body["version_id"]
+        expected = body["expected_revision"]
+        if (
+            not isinstance(version_id, str)
+            or not version_id
+            or isinstance(expected, bool)
+            or not isinstance(expected, int)
+            or expected < 0
+        ):
+            raise ValueError
+        store = await _ensure_actor_prompt_store()
+        active = await store.activate(actor_id, version_id, expected_revision=expected)
+    except ActorPromptRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail="actor_prompt_revision_conflict") from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="actor_prompt_version_not_found") from exc
+    except (ActorPromptStoreError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_actor_prompt_activation") from exc
+    return {"accepted": True, "active": active.to_public_dict()}
+
+
+@app.get("/api/actor-prompts/{actor_id}/versions/{version_id}/export")
+async def export_actor_prompt_version(actor_id: str, version_id: str):
+    _require_actor_persona_management()
+    if actor_id not in {"jiao", "laoke"}:
+        raise HTTPException(status_code=404, detail="actor_not_found")
+    try:
+        store = await _ensure_actor_prompt_store()
+        prompt_text = await store.export_text(actor_id, version_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="actor_prompt_version_not_found") from exc
+    filename = f"{actor_id}-{version_id.split(':')[-1][:16]}.md"
+    return Response(
+        content=prompt_text.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.post("/api/cache-probes")
 async def run_cache_probe(request: Request):
     global _cache_probe_service
@@ -828,6 +1015,7 @@ def _get_group_context_service() -> GroupContextPackService:
             search = build_synthetic_scoped_search(rows)
         _group_context_service = GroupContextPackService(
             RelayGroupClient(relay_url, relay_key),
+            prompt_profiles=_active_actor_prompt_mapping(),
             **({"search": search} if search is not None else {}),
         )
     return _group_context_service
@@ -841,7 +1029,8 @@ def _get_bedroom_context_service() -> BedroomContextPackService:
         if not relay_url or not relay_key:
             raise RelayGroupError(503, "dependency_unavailable")
         _bedroom_context_service = BedroomContextPackService(
-            RelayGroupClient(relay_url, relay_key)
+            RelayGroupClient(relay_url, relay_key),
+            prompt_profiles=_active_actor_prompt_mapping(),
         )
     return _bedroom_context_service
 
@@ -922,6 +1111,7 @@ async def _build_group_context_pack(request: Request, pack_kind: str):
     except (ValueError, json.JSONDecodeError, ContractError, TypeError):
         return _group_error(422, "invalid_group_payload", "Invalid Group payload")
     try:
+        await _refresh_actor_prompt_store()
         pack = await _get_group_context_service().build(
             pack_request, pack_kind=pack_kind
         )
@@ -959,6 +1149,7 @@ async def bedroom_context_pack_full(request: Request):
         return _group_error(401, "invalid_service_key", "Invalid service key")
     try:
         pack_request = BedroomPackRequest.from_dict(await request.json())
+        await _refresh_actor_prompt_store()
         pack = await _get_bedroom_context_service().build(pack_request)
     except BedroomContractError:
         return _group_error(409, "stale_fence", "Bedroom generation is stale")

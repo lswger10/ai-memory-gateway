@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 import asyncpg
 
+from actor_prompt_store import ACTOR_PROMPT_MIGRATION_SQL
+
 from memory_policy import (
     AuthorizedMemorySearchResult,
     CandidateAudit,
@@ -453,6 +455,7 @@ async def init_tables():
         await apply_scoped_memory_schema(conn)
         await apply_model_execution_schema(conn)
         await apply_conversation_partition_schema(conn)
+        await conn.execute(ACTOR_PROMPT_MIGRATION_SQL)
         
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_fts 
