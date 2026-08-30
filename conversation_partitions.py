@@ -77,7 +77,7 @@ class ConversationFact:
 
     @classmethod
     def from_relay_event(cls, event: dict[str, Any]) -> "ConversationFact":
-        if not isinstance(event, dict) or event.get("visibility") != "public":
+        if not isinstance(event, dict) or event.get("visibility") not in {"room", "public"}:
             raise ConversationPartitionError("Relay event is not an accepted public fact")
         room_id = str(event.get("room_id") or "")
         conversation_id = str(event.get("conversation_id") or "")

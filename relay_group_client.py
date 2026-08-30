@@ -113,6 +113,7 @@ class RelayGroupClient:
         current_event_id: int,
         after_event_id: int,
         through_event_id: int,
+        include_current_event: bool = False,
     ) -> tuple[dict[str, Any], ...]:
         """Read immutable accepted facts in ascending anchored pages."""
         events: list[dict[str, Any]] = []
@@ -127,6 +128,7 @@ class RelayGroupClient:
                 "after_event_id": cursor,
                 "through_event_id": through_event_id,
                 "page_size": 500,
+                "include_current_event": include_current_event,
             }
             headers = {
                 "Authorization": f"Bearer {self.service_key}",
