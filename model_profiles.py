@@ -21,6 +21,7 @@ _PROFILE_FIELDS = {
     "model",
     "adapter_version",
     "credential_ref",
+    "headers",
     "capabilities",
     "cache_strategy",
     "requested_cache_ttl",
@@ -131,6 +132,7 @@ class ModelProfile:
     model: str
     adapter_version: str
     credential_ref: str
+    headers: tuple[tuple[str, str], ...]
     capabilities: ProfileCapabilities
     cache_strategy: str
     requested_cache_ttl: str | None
@@ -168,6 +170,17 @@ class ModelProfile:
                 raise ProfileContractError(
                     "requested cache TTL was not observed for this route"
                 )
+        headers_value = payload.get("headers", {})
+        if not isinstance(headers_value, Mapping):
+            raise ProfileContractError("headers must be an object")
+        headers: list[tuple[str, str]] = []
+        for name, value in headers_value.items():
+            headers.append(
+                (
+                    _required_string(name, "headers name"),
+                    _required_string(value, f"headers.{name}"),
+                )
+            )
         return cls(
             profile_id=_required_string(payload.get("profile_id"), "profile_id"),
             display_name=_required_string(payload.get("display_name"), "display_name"),
@@ -184,6 +197,7 @@ class ModelProfile:
             credential_ref=_required_string(
                 payload.get("credential_ref"), "credential_ref"
             ),
+            headers=tuple(sorted(headers, key=lambda item: item[0].lower())),
             capabilities=capabilities,
             cache_strategy=strategy,
             requested_cache_ttl=ttl,
