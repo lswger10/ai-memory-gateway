@@ -90,11 +90,17 @@ class AnthropicMessagesAdapter:
         profile: ModelProfile,
         layout: AnthropicPromptLayout,
         max_output_tokens: int,
+        apply_cache_control: bool = True,
     ) -> RenderedProviderRequest:
         if profile.protocol not in {"anthropic_messages", "anthropic_messages_compatible"}:
             raise ProviderAdapterError("Profile protocol is not Anthropic Messages")
-        if profile.cache_strategy != "anthropic_prefix_anchored_v1":
-            raise ProviderAdapterError("Anthropic anchored layout requires matching strategy")
+        expected_strategy = (
+            "anthropic_prefix_anchored_v1"
+            if apply_cache_control
+            else "no_prompt_cache_v1"
+        )
+        if profile.cache_strategy != expected_strategy:
+            raise ProviderAdapterError("Anthropic layout cache strategy mismatch")
         system = [
             {"type": "text", "text": _text(segment)} for segment in layout.system
         ]
@@ -111,11 +117,12 @@ class AnthropicMessagesAdapter:
                     ],
                 }
             )
-        breakpoint = _cache_control(layout.breakpoint.requested_ttl)
-        if messages:
-            messages[-1]["content"][-1]["cache_control"] = breakpoint
-        else:
-            system[-1]["cache_control"] = breakpoint
+        if apply_cache_control:
+            breakpoint = _cache_control(layout.breakpoint.requested_ttl)
+            if messages:
+                messages[-1]["content"][-1]["cache_control"] = breakpoint
+            else:
+                system[-1]["cache_control"] = breakpoint
         for segment in layout.dynamic_messages:
             messages.append(
                 {

@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Mapping
 
-from cache_strategies import AnthropicPrefixAnchoredV1, PromptSegment
+from cache_strategies import (
+    AnthropicPrefixAnchoredV1,
+    AnthropicPromptLayout,
+    CacheBreakpoint,
+    PromptSegment,
+)
 from model_execution import ContextBundle, ProviderChunk, ProviderRunUnavailable
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
 from model_profiles import ModelProfile
@@ -57,15 +62,32 @@ class GatewayProviderRunner:
             PromptSegment("current_event", text) for text in context.dynamic_tail
         )
         if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
-            layout = AnthropicPrefixAnchoredV1().build_layout(
-                tools=(),
-                stable_segments=stable,
-                dynamic_segments=dynamic,
-                capabilities=profile.capabilities,
-                requested_ttl=profile.requested_cache_ttl,
-            )
+            cache_enabled = profile.cache_strategy == "anthropic_prefix_anchored_v1"
+            if cache_enabled:
+                layout = AnthropicPrefixAnchoredV1().build_layout(
+                    tools=(),
+                    stable_segments=stable,
+                    dynamic_segments=dynamic,
+                    capabilities=profile.capabilities,
+                    requested_ttl=profile.requested_cache_ttl,
+                )
+            elif profile.cache_strategy == "no_prompt_cache_v1":
+                layout = AnthropicPromptLayout(
+                    tools=(),
+                    system=stable[:3],
+                    stable_messages=stable[3:],
+                    dynamic_messages=dynamic,
+                    breakpoint=CacheBreakpoint("none", None),
+                )
+            else:
+                raise ProviderRunUnavailable(
+                    "Anthropic route received incompatible cache strategy"
+                )
             return AnthropicMessagesAdapter().render(
-                profile=profile, layout=layout, max_output_tokens=maximum
+                profile=profile,
+                layout=layout,
+                max_output_tokens=maximum,
+                apply_cache_control=cache_enabled,
             )
 
         instructions = "\n\n".join(context.static_system)

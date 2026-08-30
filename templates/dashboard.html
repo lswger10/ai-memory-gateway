@@ -35,6 +35,10 @@
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
                     <span class="nav-label">对话线</span>
                 </a>
+                <a href="#" class="nav-item" data-section="models">
+                    <span class="nav-icon">◎</span>
+                    <span class="nav-label">模型与缓存</span>
+                </a>
                 <a href="#" class="nav-item" data-section="settings">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg></span>
                     <span class="nav-label">设置</span>
@@ -441,6 +445,73 @@
             </section>
 
             <!-- 设置 Section -->
+            <section id="section-models" class="section">
+                <div class="section-header">
+                    <h1>模型与缓存</h1>
+                    <p class="section-desc">Model Profile、人工验证、显式 fallback 与供应商真实 usage</p>
+                </div>
+
+                <div id="models-msg" class="msg-container"></div>
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">Model Profile</h3>
+                    <p class="form-hint">这里只保存路线配置和环境变量名称，不保存 API Key。新配置必须通过人工探针后才会出现在聊天模型选择器。</p>
+                    <div class="settings-grid">
+                        <div class="settings-field"><label>Profile ID</label><input id="model-profile-id" class="input" placeholder="ofox-claude-opus"></div>
+                        <div class="settings-field"><label>显示名称</label><input id="model-profile-name" class="input" placeholder="OFOX Claude Opus"></div>
+                        <div class="settings-field"><label>Provider</label><input id="model-profile-provider" class="input" placeholder="ofox"></div>
+                        <div class="settings-field"><label>Protocol</label><select id="model-profile-protocol" class="input"><option value="anthropic_messages">anthropic_messages</option><option value="anthropic_messages_compatible">anthropic_messages_compatible</option><option value="openai_responses">openai_responses</option><option value="openai_chat_completions">openai_chat_completions</option></select></div>
+                        <div class="settings-field"><label>Base URL</label><input id="model-profile-base-url" class="input" placeholder="https://api.example.com"></div>
+                        <div class="settings-field"><label>Route ID</label><input id="model-profile-route-id" class="input" placeholder="provider-route-1"></div>
+                        <div class="settings-field"><label>模型</label><input id="model-profile-model" class="input" placeholder="provider/model-name"></div>
+                        <div class="settings-field"><label>API Key 环境变量名</label><input id="model-profile-key-env" class="input" placeholder="OFOX_API_KEY"></div>
+                        <div class="settings-field"><label>Header templates (JSON)</label><input id="model-profile-headers" class="input" value='{"Authorization":"Bearer ${credential}"}'><small class="form-hint">只写模板，不粘贴真实 Key。Anthropic 可用 {"x-api-key":"${credential}","anthropic-version":"2023-06-01"}</small></div>
+                        <div class="settings-field"><label>Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option></select></div>
+                        <div class="settings-field"><label>请求 TTL</label><select id="model-profile-cache-ttl" class="input"><option value="">不请求</option><option value="5m">5m</option><option value="1h">1h（必须由真实探针验证）</option></select></div>
+                    </div>
+                    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:12px 0;">
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-streaming" checked> streaming</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-structured"> structured output</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-tools"> tools</label>
+                        <label class="checkbox-label"><input type="checkbox" id="model-cap-reasoning"> reasoning controls</label>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveModelProfile()">保存为未验证 Profile</button>
+                </div>
+
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">已配置 Profile</h3>
+                    <div id="model-profile-list"></div>
+                </div>
+
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">人工双发探针</h3>
+                    <p class="form-hint">此按钮会真实调用供应商两次并产生费用。不会自动运行，也不是缓存保活。</p>
+                    <div class="settings-grid">
+                        <div class="settings-field"><label>Profile</label><select id="probe-profile" class="input"></select></div>
+                        <div class="settings-field"><label>Actor</label><select id="probe-actor" class="input"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
+                        <div class="settings-field"><label>Room</label><select id="probe-room" class="input"><option value="room_weiwei_jiao">椒椒私聊</option><option value="room_weiwei_laoke">老克私聊</option><option value="room_group_home">客厅</option></select></div>
+                        <div class="settings-field"><label>Canonical conversation ID</label><input id="probe-conversation" class="input" placeholder="从 Relay /app/rooms 取得"></div>
+                    </div>
+                    <button class="btn btn-warning" onclick="runCacheProbe()">确认产生两次调用并运行</button>
+                    <pre id="cache-probe-result" class="form-hint" style="white-space:pre-wrap;margin-top:12px;"></pre>
+                </div>
+
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">Actor 默认与自动 fallback</h3>
+                    <p class="form-hint">自动 fallback 只使用这里明确保存的有序 Profile ID，不跨到未批准路线。</p>
+                    <div class="settings-grid">
+                        <div class="settings-field"><label>Actor</label><select id="binding-actor" class="input"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
+                        <div class="settings-field"><label>默认 Profile</label><select id="binding-default-profile" class="input"></select></div>
+                        <div class="settings-field"><label>有序 fallback IDs</label><input id="binding-fallbacks" class="input" placeholder="profile-b, profile-c"></div>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveActorBinding()">保存默认与 fallback</button>
+                </div>
+
+                <div class="card table-card">
+                    <h3 class="settings-group-title" style="padding:16px;">真实 Usage / Cache 结果</h3>
+                    <div style="overflow:auto;"><table class="data-table"><thead><tr><th>Actor</th><th>Profile / Model</th><th>Cache</th><th>Input</th><th>Output</th><th>Write</th><th>Read</th><th>Cached</th></tr></thead><tbody id="model-usage-body"></tbody></table></div>
+                </div>
+            </section>
+
             <section id="section-settings" class="section">
                 <div class="section-header">
                     <h2>设置</h2>
@@ -631,6 +702,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.6"></script>
+    <script src="/static/js/dashboard.js?v=3.7-model-profiles"></script>
 </body>
 </html>

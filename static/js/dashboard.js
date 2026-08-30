@@ -114,8 +114,171 @@ function switchSection(name) {
     if (name === 'threads') {
         loadThreads();
     }
+    if (name === 'models') {
+        loadModelProfilesAndUsage();
+    }
     if (name === 'settings') {
         loadSettings();
+    }
+}
+
+// ============================================
+// Model Profiles / provider cache telemetry
+// ============================================
+let _gatewayModelProfiles = [];
+let _gatewayModelBindings = {};
+
+function _modelField(id) {
+    return document.getElementById(id);
+}
+
+function _modelMessage(text, error = false) {
+    const box = _modelField('models-msg');
+    if (!box) return;
+    box.innerHTML = `<div class="msg-box ${error ? 'msg-error' : 'msg-success'}">${escapeHtml(text)}</div>`;
+}
+
+function _profilePayload() {
+    const strategy = _modelField('model-profile-cache-strategy').value;
+    const ttl = _modelField('model-profile-cache-ttl').value || null;
+    return {
+        profile_id: _modelField('model-profile-id').value.trim(),
+        display_name: _modelField('model-profile-name').value.trim(),
+        enabled: true,
+        test_status: 'unverified',
+        provider: _modelField('model-profile-provider').value.trim(),
+        protocol: _modelField('model-profile-protocol').value,
+        base_url: _modelField('model-profile-base-url').value.trim(),
+        route_id: _modelField('model-profile-route-id').value.trim(),
+        model: _modelField('model-profile-model').value.trim(),
+        adapter_version: 'gateway-profile.v1',
+        credential_ref: 'env:' + _modelField('model-profile-key-env').value.trim(),
+        headers: JSON.parse(_modelField('model-profile-headers').value || '{}'),
+        capabilities: {
+            streaming: _modelField('model-cap-streaming').checked,
+            structured_output: _modelField('model-cap-structured').checked,
+            tools: _modelField('model-cap-tools').checked,
+            reasoning_controls: _modelField('model-cap-reasoning').checked,
+            cache_strategies: [strategy],
+            cache_ttls: ttl ? [ttl] : [],
+            usage_fields: ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'cached_tokens']
+        },
+        cache_strategy: strategy,
+        requested_cache_ttl: ttl,
+        revision: 1
+    };
+}
+
+async function saveModelProfile() {
+    try {
+        const response = await fetch('/api/model-profiles', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(_profilePayload())
+        });
+        if (!response.ok) throw new Error((await response.json()).detail || '保存失败');
+        _modelMessage('Profile 已保存为“未验证”。请按需运行人工探针。');
+        await loadModelProfilesAndUsage();
+    } catch (error) {
+        _modelMessage(error.message, true);
+    }
+}
+
+function _cacheOutcomeLabel(value) {
+    return ({read_hit: '命中读取', write_only_unverified: '仅写入·未验证', miss: '未命中', metrics_unavailable: '供应商未返回指标'})[value] || value || '—';
+}
+
+function _renderModelProfiles() {
+    const list = _modelField('model-profile-list');
+    if (list) {
+        list.innerHTML = _gatewayModelProfiles.length ? _gatewayModelProfiles.map(profile => `
+            <div class="memory-item" style="margin-bottom:10px;">
+                <strong>${escapeHtml(profile.display_name)}</strong>
+                <span class="badge">${escapeHtml(profile.test_status)}</span>
+                <div class="form-hint">${escapeHtml(profile.provider)} · ${escapeHtml(profile.protocol)} · ${escapeHtml(profile.model)}</div>
+                <div class="form-hint">${escapeHtml(profile.cache_strategy)} · TTL ${escapeHtml(profile.requested_cache_ttl || 'none')} · key ${profile.credential_configured ? 'configured' : 'missing'}</div>
+            </div>`).join('') : '<p class="form-hint">尚无 Model Profile。</p>';
+    }
+    const options = _gatewayModelProfiles.map(profile => `<option value="${escapeHtml(profile.profile_id)}">${escapeHtml(profile.display_name)} · ${escapeHtml(profile.test_status)}</option>`).join('');
+    ['probe-profile', 'binding-default-profile'].forEach(id => {
+        const select = _modelField(id);
+        if (select) select.innerHTML = options;
+    });
+}
+
+function _renderModelUsage(cacheView) {
+    const body = _modelField('model-usage-body');
+    if (!body) return;
+    const n = value => value === null || value === undefined ? '—' : String(value);
+    body.innerHTML = cacheView.length ? cacheView.map(item => `<tr>
+        <td>${escapeHtml(item.actor_id)}</td><td>${escapeHtml(item.profile_id)}<br><small>${escapeHtml(item.model)}</small></td>
+        <td>${escapeHtml(_cacheOutcomeLabel(item.cache_outcome))}</td>
+        <td>${n(item.input_tokens)}</td><td>${n(item.output_tokens)}</td>
+        <td>${n(item.cache_creation_input_tokens)}</td><td>${n(item.cache_read_input_tokens)}</td><td>${n(item.cached_tokens)}</td>
+    </tr>`).join('') : '<tr><td colspan="8">暂无真实供应商 usage。</td></tr>';
+}
+
+async function loadModelProfilesAndUsage() {
+    try {
+        const [profiles, bindings, usage] = await Promise.all([
+            fetch('/api/model-profiles').then(r => r.ok ? r.json() : Promise.reject(new Error('Model Profile 管理未启用'))),
+            fetch('/api/model-bindings').then(r => r.json()),
+            fetch('/api/model-usage/summary').then(r => r.json())
+        ]);
+        _gatewayModelProfiles = profiles.profiles || [];
+        _gatewayModelBindings = bindings.bindings || {};
+        _renderModelProfiles();
+        _renderModelUsage(usage.cache_view || []);
+    } catch (error) {
+        _modelMessage(error.message, true);
+    }
+}
+
+async function runCacheProbe() {
+    const conversationId = _modelField('probe-conversation').value.trim();
+    if (!conversationId) return _modelMessage('请填写 Relay 返回的 canonical conversation ID。', true);
+    try {
+        const response = await fetch('/api/cache-probes', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                profile_id: _modelField('probe-profile').value,
+                actor_id: _modelField('probe-actor').value,
+                room_id: _modelField('probe-room').value,
+                conversation_id: conversationId,
+                confirm_provider_charges: true
+            })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '探针失败');
+        _modelField('cache-probe-result').textContent = JSON.stringify(data, null, 2);
+        await loadModelProfilesAndUsage();
+    } catch (error) {
+        _modelMessage(error.message, true);
+    }
+}
+
+async function saveActorBinding() {
+    const actorId = _modelField('binding-actor').value;
+    const profileId = _modelField('binding-default-profile').value;
+    const current = _gatewayModelBindings[actorId] || {};
+    const roomValues = Object.values(current);
+    const revision = roomValues.length ? roomValues[0].binding_revision : null;
+    const fallbackIds = _modelField('binding-fallbacks').value.split(',').map(value => value.trim()).filter(Boolean);
+    try {
+        let response = await fetch('/api/model-bindings', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'set_actor_default', actor_id: actorId, profile_id: profileId, expected_revision: revision})
+        });
+        if (!response.ok) throw new Error((await response.json()).detail || '默认 Profile 保存失败');
+        const accepted = await response.json();
+        response = await fetch('/api/model-bindings', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'set_fallbacks', actor_id: actorId, profile_ids: fallbackIds, expected_revision: accepted.revision})
+        });
+        if (!response.ok) throw new Error((await response.json()).detail || 'fallback 保存失败');
+        _modelMessage('Actor 默认与显式 fallback 已保存。');
+        await loadModelProfilesAndUsage();
+    } catch (error) {
+        _modelMessage(error.message, true);
     }
 }
 

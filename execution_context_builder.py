@@ -96,7 +96,21 @@ class GatewayExecutionContextBuilder:
             tool_schema_hash=components["tool_schema_hash"],
             cache_strategy_version=profile.cache_strategy,
         )
-        state = await self.history_store.get_or_create(namespace)
+        state = await self.history_store.get_or_create(
+            namespace,
+            identity={
+                "actor_id": request.actor_id,
+                "conversation_id": resolved_conversation_id,
+                "profile_id": profile.profile_id,
+                "profile_revision": profile.revision,
+                "execution_mode": request.execution_mode,
+                "actor_prompt_version": components["actor_prompt_version"],
+                "runtime_kernel_version": components["runtime_kernel_version"],
+                "room_policy_version": components["room_policy_version"],
+                "tool_schema_hash": components["tool_schema_hash"],
+                "cache_strategy_version": profile.cache_strategy,
+            },
+        )
         history = await self.group_context.relay_client.fetch_model_history_facts(
             actor_id=request.actor_id,
             room_id=resolved_room_id,

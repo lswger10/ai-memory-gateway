@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from model_profiles import ModelProfile
 
@@ -57,6 +57,22 @@ class InMemoryModelProfileStore:
                 raise ProfileStoreError("Profile revision cannot move backwards")
             self._profiles[profile.profile_id] = profile
             return profile
+
+    async def get_profile(self, profile_id: str) -> ModelProfile:
+        async with self._lock:
+            profile = self._profiles.get(profile_id)
+            if profile is None:
+                raise ProfileStoreError(f"unknown Profile: {profile_id}")
+            return profile
+
+    async def set_test_status(self, profile_id: str, status: str) -> ModelProfile:
+        async with self._lock:
+            profile = self._profiles.get(profile_id)
+            if profile is None:
+                raise ProfileStoreError(f"unknown Profile: {profile_id}")
+            updated = replace(profile, test_status=status)
+            self._profiles[profile_id] = updated
+            return updated
 
     def _selectable(self, profile_id: str) -> ModelProfile:
         profile = self._profiles.get(profile_id)

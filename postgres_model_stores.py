@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 
 from model_execution_contracts import ProviderUsage
 from model_profile_store import ProfileStoreError, ResolvedProfiles, RoomOverride, StoredBinding
@@ -36,6 +37,65 @@ class PostgresModelProfileStore:
         async with pool.acquire() as conn:
             rows = await conn.fetch("SELECT profile_json FROM model_profiles ORDER BY profile_id")
         return tuple(ModelProfile.from_dict(dict(row["profile_json"])) for row in rows)
+
+    async def get_profile(self, profile_id: str) -> ModelProfile:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT profile_json FROM model_profiles WHERE profile_id=$1",
+                profile_id,
+            )
+        if row is None:
+            raise ProfileStoreError(f"unknown Profile: {profile_id}")
+        return ModelProfile.from_dict(dict(row["profile_json"]))
+
+    async def set_test_status(self, profile_id: str, status: str) -> ModelProfile:
+        profile = await self.get_profile(profile_id)
+        updated = replace(profile, test_status=status)
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """UPDATE model_profiles
+                   SET profile_json=$2::jsonb,test_status=$3,updated_at=NOW()
+                   WHERE profile_id=$1 AND revision=$4""",
+                profile_id,
+                json.dumps(updated.to_dict(), ensure_ascii=False),
+                status,
+                profile.revision,
+            )
+        if result.endswith("0"):
+            raise ProfileStoreError("profile changed during probe")
+        return updated
+
+    async def record_probe_result(
+        self,
+        *,
+        profile_id: str,
+        profile_revision: int,
+        probe_kind: str,
+        status: str,
+        observed_capabilities: dict,
+        sanitized_detail: str | None = None,
+    ) -> None:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO model_profile_probe_results(
+                     profile_id,profile_revision,probe_kind,status,
+                     observed_capabilities,sanitized_detail
+                   ) VALUES($1,$2,$3,$4,$5::jsonb,$6)
+                   ON CONFLICT(profile_id,profile_revision,probe_kind) DO UPDATE SET
+                     status=EXCLUDED.status,
+                     observed_capabilities=EXCLUDED.observed_capabilities,
+                     sanitized_detail=EXCLUDED.sanitized_detail,
+                     tested_at=NOW()""",
+                profile_id,
+                profile_revision,
+                probe_kind,
+                status,
+                json.dumps(observed_capabilities),
+                sanitized_detail,
+            )
 
     async def _profile(self, conn, profile_id: str) -> ModelProfile:
         row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", profile_id)

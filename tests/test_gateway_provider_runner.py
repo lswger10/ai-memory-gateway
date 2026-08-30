@@ -132,3 +132,41 @@ async def test_anthropic_runner_keeps_dynamic_tail_after_cache_breakpoint(monkey
     usage = next(chunk for chunk in chunks if chunk.event == "usage")
     assert usage.data["usage"].cache_read_input_tokens == 20
     assert usage.data["observed_cache_support"] == "verified"
+
+
+@pytest.mark.anyio
+async def test_anthropic_no_cache_profile_sends_no_cache_control():
+    payload = profile().to_dict()
+    payload["test_status"] = "passed"
+    payload["capabilities"]["cache_strategies"] = ["no_prompt_cache_v1"]
+    payload["capabilities"]["cache_ttls"] = []
+    payload["cache_strategy"] = "no_prompt_cache_v1"
+    payload["requested_cache_ttl"] = None
+    uncached = ModelProfile.from_dict(payload)
+    transport = Transport()
+    runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver())
+    context = ContextBundle(
+        static_system=("kernel", "actor", "room"),
+        stable_summary="summary",
+        stable_history=("old fact",),
+        dynamic_tail=("current event",),
+        actor_prompt_version="actor.v1",
+        runtime_kernel_version="kernel.v1",
+        room_policy_version="room.v1",
+        tool_schema_hash="tools.none.v1",
+    )
+
+    await _consume(
+        runner.run(
+            profile=uncached,
+            request=request(),
+            context=context,
+            cache_namespace="cache-uncached",
+        )
+    )
+
+    assert "cache_control" not in str(transport.calls[0]["json_body"])
+
+
+async def _consume(stream):
+    return [item async for item in stream]

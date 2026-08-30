@@ -18,6 +18,7 @@ import uuid
 import asyncio
 import secrets
 import httpx
+from dataclasses import replace
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -65,6 +66,9 @@ from model_execution import GatewayModelExecutionService
 from execution_context_builder import GatewayExecutionContextBuilder
 from gateway_provider_runner import GatewayProviderRunner
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+from cache_dashboard import build_cache_usage_view
+from anchored_history import PostgresAnchoredHistoryStore
+from cache_probe import GatewayCacheProbeService
 from model_execution_contracts import (
     CONTRACT_VERSION as MODEL_EXECUTION_CONTRACT_VERSION,
     ExecutionContractError,
@@ -425,6 +429,7 @@ _model_execution_service: GatewayModelExecutionService | None = None
 _model_profile_store: PostgresModelProfileStore | None = None
 _model_usage_store: PostgresModelUsageStore | None = None
 _model_provider_runner: GatewayProviderRunner | None = None
+_cache_probe_service: GatewayCacheProbeService | None = None
 _model_runtime_lock = asyncio.Lock()
 
 # 静态文件和模板配置
@@ -559,6 +564,7 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             context_builder=GatewayExecutionContextBuilder(
                 group_context=_get_group_context_service(),
                 bedroom_context=_get_bedroom_context_service(),
+                history_store=PostgresAnchoredHistoryStore(get_pool),
             ),
             provider_runner=_model_provider_runner,
             usage_store=_model_usage_store,
@@ -621,6 +627,10 @@ async def put_model_profile(request: Request):
     _require_model_management()
     try:
         profile = ModelProfile.from_dict(await request.json())
+        # A management write declares a route; it is not evidence that the
+        # route or its cache semantics were actually observed.  Only the
+        # explicit bounded probe may promote test_status later.
+        profile = replace(profile, test_status="unverified")
         await _get_model_execution_service()
         assert _model_profile_store is not None
         stored = await _model_profile_store.put_profile(profile)
@@ -701,6 +711,7 @@ async def model_usage_summary():
     assert _model_usage_store is not None
     receipts = await _model_usage_store.list_receipts(limit=200)
     return {
+        "cache_view": list(build_cache_usage_view(receipts)),
         "receipts": [
             {
                 "generation_request_id": row.generation_request_id,
@@ -726,6 +737,54 @@ async def model_usage_summary():
             }
             for row in receipts
         ]
+    }
+
+
+def _usage_dict(usage) -> dict:
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "cached_tokens": usage.cached_tokens,
+    }
+
+
+@app.post("/api/cache-probes")
+async def run_cache_probe(request: Request):
+    global _cache_probe_service
+    _require_model_management()
+    try:
+        body = await request.json()
+        if body.get("confirm_provider_charges") is not True:
+            raise HTTPException(status_code=409, detail="provider_charge_confirmation_required")
+        actor_id = str(body["actor_id"])
+        room_id = str(body["room_id"])
+        if actor_id not in room_members(room_id):
+            raise ValueError
+        values = {
+            "profile_id": str(body["profile_id"]),
+            "actor_id": actor_id,
+            "room_id": room_id,
+            "conversation_id": str(body["conversation_id"]),
+        }
+        if _cache_probe_service is None:
+            await _get_model_execution_service()
+            assert _model_profile_store is not None
+            assert _model_provider_runner is not None
+            _cache_probe_service = GatewayCacheProbeService(
+                profiles=_model_profile_store,
+                provider_runner=_model_provider_runner,
+            )
+        result = await _cache_probe_service.run(**values)
+    except HTTPException:
+        raise
+    except (KeyError, TypeError, ValueError, ProfileStoreError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_cache_probe") from exc
+    return {
+        "status": result.status,
+        "first": _usage_dict(result.first),
+        "second": _usage_dict(result.second),
     }
 
 
