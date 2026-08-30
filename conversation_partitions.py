@@ -59,6 +59,10 @@ class ConversationFact:
     attachments: tuple[dict[str, Any], ...] = ()
     bedroom_session_id: str | None = None
     retention_policy: str | None = None
+    burst_id: str | None = None
+    event_type: str | None = None
+    reply_to_event_id: int | None = None
+    mentions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         strings = (
@@ -98,6 +102,10 @@ class ConversationFact:
             source_kind="relay_event",
             provenance=_bounded_mapping(event.get("provenance"), "provenance"),
             attachments=_attachment_references(event.get("attachments")),
+            burst_id=event.get("burst_id"),
+            event_type=event.get("event_type"),
+            reply_to_event_id=event.get("reply_to_event_id"),
+            mentions=tuple(event.get("mentions") or ()),
         )
 
     @classmethod
@@ -143,9 +151,32 @@ class ConversationFact:
             "attachments": self.attachments,
             "bedroom_session_id": self.bedroom_session_id,
             "retention_policy": self.retention_policy,
+            "burst_id": self.burst_id,
+            "event_type": self.event_type,
+            "reply_to_event_id": self.reply_to_event_id,
+            "mentions": self.mentions,
         }
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def to_history_event(self) -> dict[str, Any]:
+        return {
+            "event_id": self.source_event_id,
+            "room_id": self.room_id,
+            "conversation_id": self.conversation_id,
+            "burst_id": self.burst_id,
+            "actor_id": self.actor_id,
+            "role": self.role,
+            "event_type": self.event_type,
+            "content": self.content,
+            "reply_to_event_id": self.reply_to_event_id,
+            "mentions": list(self.mentions),
+            "created_at": self.created_at,
+            "request_id": self.request_id,
+            "visibility": "room",
+            "provenance": self.provenance,
+            "attachments": list(self.attachments),
+        }
 
 
 class InMemoryConversationPartitionStore:
@@ -238,12 +269,13 @@ class PostgresConversationPartitionStore:
                             fact_identity, fact_hash, content, request_id,
                             created_at, source_kind, provenance_json,
                             attachments_json, bedroom_session_id,
-                            retention_policy, role, accepted_at
+                            retention_policy, role, accepted_at, burst_id,
+                            event_type, reply_to_event_id, mentions_json
                         ) VALUES (
                             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
                             $11::timestamptz,$12,$13::jsonb,$14::jsonb,$15,$16,
                             CASE WHEN $6 = 'human' THEN 'user' ELSE 'assistant' END,
-                            NOW()
+                            NOW(),$17,$18,$19,$20::jsonb
                         )
                         ON CONFLICT (fact_identity) WHERE fact_identity IS NOT NULL
                         DO UPDATE SET fact_identity = EXCLUDED.fact_identity
@@ -265,6 +297,10 @@ class PostgresConversationPartitionStore:
                         json.dumps(fact.attachments, ensure_ascii=False),
                         fact.bedroom_session_id,
                         fact.retention_policy,
+                        fact.burst_id,
+                        fact.event_type,
+                        fact.reply_to_event_id,
+                        json.dumps(fact.mentions, ensure_ascii=False),
                     )
                     if row is None or row["fact_hash"] != fact.content_hash:
                         raise ConversationPartitionConflict("accepted fact identity changed")
@@ -289,7 +325,8 @@ class PostgresConversationPartitionStore:
                        source_event_id, actor_id, event_role, fact_identity,
                        fact_hash, content, request_id, created_at, source_kind,
                        provenance_json, attachments_json, bedroom_session_id,
-                       retention_policy
+                       retention_policy, burst_id, event_type,
+                       reply_to_event_id, mentions_json
                 FROM conversations
                 WHERE session_id = $1
                   AND fact_identity IS NOT NULL
@@ -344,4 +381,8 @@ class PostgresConversationPartitionStore:
             attachments=tuple(_json_value(row["attachments_json"], [])),
             bedroom_session_id=row["bedroom_session_id"],
             retention_policy=row["retention_policy"],
+            burst_id=row.get("burst_id"),
+            event_type=row.get("event_type"),
+            reply_to_event_id=row.get("reply_to_event_id"),
+            mentions=tuple(_json_value(row.get("mentions_json"), [])),
         )

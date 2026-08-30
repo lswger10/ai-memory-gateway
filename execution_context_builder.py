@@ -4,6 +4,8 @@ import json
 
 from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
 from bedroom_memory import BedroomContextPackService, BedroomPackRequest
+from conversation_partitions import InMemoryConversationPartitionStore
+from conversation_sync import ConversationSyncService
 from group_contracts import CONTRACT_VERSION as GROUP_CONTRACT_VERSION, ContextPackRequest
 from group_memory import GroupContextPackService
 from model_execution import ContextBundle
@@ -22,11 +24,17 @@ class GatewayExecutionContextBuilder:
         bedroom_context: BedroomContextPackService,
         history_store: InMemoryAnchoredHistoryStore | None = None,
         history_compactor: AnchoredHistoryCompactor | None = None,
+        conversation_store=None,
+        conversation_sync: ConversationSyncService | None = None,
     ) -> None:
         self.group_context = group_context
         self.bedroom_context = bedroom_context
         self.history_store = history_store or InMemoryAnchoredHistoryStore()
         self.history_compactor = history_compactor or AnchoredHistoryCompactor()
+        self.conversation_store = conversation_store or InMemoryConversationPartitionStore()
+        self.conversation_sync = conversation_sync or ConversationSyncService(
+            group_context.relay_client, self.conversation_store
+        )
 
     async def resolve_coordinates(
         self, request: GatewayExecutionRequest
@@ -53,6 +61,11 @@ class GatewayExecutionContextBuilder:
         resolved_conversation_id: str,
     ) -> ContextBundle:
         if request.execution_mode == "bedroom":
+            receipt = await self.conversation_sync.ensure_bedroom_synced(
+                bedroom_session_id=request.bedroom_session_id,
+                current_turn_id=request.current_event_id,
+                actor_id=request.actor_id,
+            )
             components = await self.bedroom_context.build_execution_components(
                 BedroomPackRequest(
                     request.bedroom_session_id,
@@ -61,18 +74,22 @@ class GatewayExecutionContextBuilder:
                     request.actor_id,
                 )
             )
-            return ContextBundle(
-                static_system=components["static_system"],
-                stable_summary="",
-                stable_history=(),
-                dynamic_tail=components["dynamic_tail"],
-                actor_prompt_version=components["actor_prompt_version"],
-                runtime_kernel_version=components["runtime_kernel_version"],
-                room_policy_version=components["room_policy_version"],
-                tool_schema_hash=components["tool_schema_hash"],
+            return await self._assemble(
+                request=request,
+                profile=profile,
+                components=components,
+                cache_conversation_id=receipt.partition_id,
+                partition_id=receipt.partition_id,
+                through_stable_event_id=max(0, request.current_event_id - 1),
             )
 
         assert request.fence is not None
+        await self.conversation_sync.ensure_relay_synced(
+            actor_id=request.actor_id,
+            room_id=resolved_room_id,
+            conversation_id=resolved_conversation_id,
+            current_event_id=request.current_event_id,
+        )
         pack_request = ContextPackRequest.from_dict(
             {
                 "contract_version": GROUP_CONTRACT_VERSION,
@@ -88,9 +105,28 @@ class GatewayExecutionContextBuilder:
         components = await self.group_context.build_execution_components(
             pack_request, pack_kind=request.execution_kind
         )
+        return await self._assemble(
+            request=request,
+            profile=profile,
+            components=components,
+            cache_conversation_id=resolved_conversation_id,
+            partition_id=resolved_conversation_id,
+            through_stable_event_id=max(0, request.current_event_id - 1),
+        )
+
+    async def _assemble(
+        self,
+        *,
+        request: GatewayExecutionRequest,
+        profile: ModelProfile,
+        components: dict,
+        cache_conversation_id: str,
+        partition_id: str,
+        through_stable_event_id: int,
+    ) -> ContextBundle:
         namespace = build_cache_namespace(
             actor_id=request.actor_id,
-            conversation_id=resolved_conversation_id,
+            conversation_id=cache_conversation_id,
             profile_id=profile.profile_id,
             profile_revision=profile.revision,
             execution_mode=request.execution_mode,
@@ -104,7 +140,7 @@ class GatewayExecutionContextBuilder:
             namespace,
             identity={
                 "actor_id": request.actor_id,
-                "conversation_id": resolved_conversation_id,
+                "conversation_id": cache_conversation_id,
                 "profile_id": profile.profile_id,
                 "profile_revision": profile.revision,
                 "execution_mode": request.execution_mode,
@@ -115,16 +151,12 @@ class GatewayExecutionContextBuilder:
                 "cache_strategy_version": profile.cache_strategy,
             },
         )
-        history = await self.group_context.relay_client.fetch_model_history_facts(
-            actor_id=request.actor_id,
-            room_id=resolved_room_id,
-            conversation_id=resolved_conversation_id,
-            current_event_id=request.current_event_id,
+        facts = await self.conversation_store.list_facts(
+            partition_id,
             after_event_id=state.compressed_up_to_event_id,
-            through_event_id=max(
-                state.compressed_up_to_event_id, request.current_event_id - 1
-            ),
+            through_event_id=max(state.compressed_up_to_event_id, through_stable_event_id),
         )
+        history = tuple(fact.to_history_event() for fact in facts)
         event_ids = tuple(int(event["event_id"]) for event in history)
         await self.history_store.observe_appended_events(namespace, event_ids)
         state, history = await self.history_compactor.maybe_compact(

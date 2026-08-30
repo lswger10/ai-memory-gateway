@@ -1,4 +1,5 @@
 import pytest
+from dataclasses import replace
 
 from anchored_history import AnchoredHistoryState
 from execution_context_builder import GatewayExecutionContextBuilder
@@ -7,8 +8,37 @@ from model_profiles import ModelProfile
 
 
 class _Relay:
+    def __init__(self):
+        self.events = [_event(1), _event(2)]
+
     async def fetch_model_history_facts(self, **kwargs):
-        return ()
+        return tuple(
+            event for event in self.events
+            if event["event_id"] > kwargs["after_event_id"]
+            and event["event_id"] <= kwargs["through_event_id"]
+        )
+
+
+def _event(
+    event_id, *, actor_id="weiwei", room_id="room_weiwei_jiao",
+    conversation_id="conversation-1"
+):
+    return {
+        "event_id": event_id,
+        "room_id": room_id,
+        "conversation_id": conversation_id,
+        "burst_id": f"burst-{event_id}",
+        "actor_id": actor_id,
+        "role": "human" if actor_id == "weiwei" else "agent",
+        "event_type": "human_message" if actor_id == "weiwei" else "agent_final",
+        "content": f"message-{event_id}",
+        "reply_to_event_id": None,
+        "mentions": [],
+        "created_at": f"2026-08-30T00:00:0{event_id}Z",
+        "request_id": f"request-{event_id}",
+        "visibility": "room",
+        "provenance": None,
+    }
 
 
 class _GroupContext:
@@ -103,7 +133,7 @@ async def test_context_builder_persists_complete_cache_identity_before_history_r
         history_store=history,
     )
 
-    await builder.build(
+    bundle = await builder.build(
         _request(),
         _profile(),
         resolved_room_id="room_weiwei_jiao",
@@ -122,3 +152,65 @@ async def test_context_builder_persists_complete_cache_identity_before_history_r
         "tool_schema_hash": "tools.v1",
         "cache_strategy_version": "no_prompt_cache_v1",
     }
+    assert '"event_id":1' in bundle.stable_history[0]
+    assert '"event_id":2' not in "".join(bundle.stable_history)
+
+
+@pytest.mark.anyio
+async def test_group_cognitive_transcript_is_shared_while_actor_cache_identity_is_separate():
+    from conversation_partitions import InMemoryConversationPartitionStore
+
+    relay = _Relay()
+    relay.events = [
+        _event(i, room_id="room_group_home", conversation_id="group-1")
+        for i in (1, 2)
+    ]
+    context = _GroupContext()
+    context.relay_client = relay
+    store = InMemoryConversationPartitionStore()
+    jiao_history = _HistoryStore()
+    jiao = GatewayExecutionContextBuilder(
+        group_context=context, bedroom_context=object(), history_store=jiao_history,
+        conversation_store=store,
+    )
+    await jiao.build(
+        replace(
+            _request(), room_id="room_group_home", conversation_id="group-1",
+            fence=replace(
+                _request().fence, room_id="room_group_home", conversation_id="group-1"
+            ),
+        ),
+        _profile(), resolved_room_id="room_group_home",
+        resolved_conversation_id="group-1",
+    )
+
+    relay.events.append(
+        _event(3, actor_id="jiao", room_id="room_group_home", conversation_id="group-1")
+    )
+    prior = _request()
+    request = replace(
+        prior,
+        actor_id="laoke",
+        current_event_id=3,
+        generation_request_id="generation-2",
+        room_id="room_group_home",
+        conversation_id="group-1",
+        fence=replace(
+            prior.fence, room_id="room_group_home", conversation_id="group-1",
+            trigger_event_id=3,
+        ),
+    )
+    laoke_history = _HistoryStore()
+    laoke = GatewayExecutionContextBuilder(
+        group_context=context, bedroom_context=object(), history_store=laoke_history,
+        conversation_store=store,
+    )
+    bundle = await laoke.build(
+        request, _profile(),
+        resolved_room_id="room_group_home", resolved_conversation_id="group-1",
+    )
+
+    assert await store.count_facts("group-1") == 3
+    assert jiao_history.identity["actor_id"] == "jiao"
+    assert laoke_history.identity["actor_id"] == "laoke"
+    assert '"event_id":2' in "".join(bundle.stable_history)

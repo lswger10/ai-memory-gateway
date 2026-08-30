@@ -380,6 +380,10 @@ ALTER TABLE conversations
     ADD COLUMN IF NOT EXISTS provenance_json JSONB,
     ADD COLUMN IF NOT EXISTS bedroom_session_id TEXT,
     ADD COLUMN IF NOT EXISTS retention_policy TEXT,
+    ADD COLUMN IF NOT EXISTS burst_id TEXT,
+    ADD COLUMN IF NOT EXISTS event_type TEXT,
+    ADD COLUMN IF NOT EXISTS reply_to_event_id BIGINT,
+    ADD COLUMN IF NOT EXISTS mentions_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_fact_identity

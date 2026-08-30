@@ -68,6 +68,10 @@ from gateway_provider_runner import GatewayProviderRunner
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_usage_view
 from anchored_history import InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
+from conversation_partitions import (
+    InMemoryConversationPartitionStore,
+    PostgresConversationPartitionStore,
+)
 from cache_probe import GatewayCacheProbeService
 from model_profile_store import InMemoryModelProfileStore
 from model_usage_store import InMemoryModelUsageStore
@@ -569,10 +573,12 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
                 _model_profile_store, Path(ephemeral_fixture)
             )
             history_store = InMemoryAnchoredHistoryStore()
+            conversation_store = InMemoryConversationPartitionStore()
         else:
             _model_profile_store = PostgresModelProfileStore(get_pool)
             _model_usage_store = PostgresModelUsageStore(get_pool)
             history_store = PostgresAnchoredHistoryStore(get_pool)
+            conversation_store = PostgresConversationPartitionStore(get_pool)
         _model_provider_runner = GatewayProviderRunner()
         _model_execution_service = GatewayModelExecutionService(
             profiles=_model_profile_store,
@@ -580,6 +586,7 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
                 group_context=_get_group_context_service(),
                 bedroom_context=_get_bedroom_context_service(),
                 history_store=history_store,
+                conversation_store=conversation_store,
             ),
             provider_runner=_model_provider_runner,
             usage_store=_model_usage_store,
