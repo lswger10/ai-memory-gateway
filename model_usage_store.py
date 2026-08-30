@@ -99,9 +99,10 @@ class InMemoryModelUsageStore:
             self._receipts[draft.generation_request_id] = (draft, receipt)
             return receipt
 
-    async def list_receipts(self) -> tuple[ExecutionReceipt, ...]:
+    async def list_receipts(self, *, limit: int = 200) -> tuple[ExecutionReceipt, ...]:
         async with self._lock:
-            return tuple(item[1] for item in self._receipts.values())
+            values = tuple(item[1] for item in self._receipts.values())
+            return values[-limit:]
 
 
 def build_cache_namespace(

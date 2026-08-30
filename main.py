@@ -67,8 +67,11 @@ from execution_context_builder import GatewayExecutionContextBuilder
 from gateway_provider_runner import GatewayProviderRunner
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_usage_view
-from anchored_history import PostgresAnchoredHistoryStore
+from anchored_history import InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
 from cache_probe import GatewayCacheProbeService
+from model_profile_store import InMemoryModelProfileStore
+from model_usage_store import InMemoryModelUsageStore
+from model_runtime_fixture import bootstrap_ephemeral_model_profiles
 from model_execution_contracts import (
     CONTRACT_VERSION as MODEL_EXECUTION_CONTRACT_VERSION,
     ExecutionContractError,
@@ -426,8 +429,8 @@ _group_extraction_service = None
 _bedroom_context_service = None
 _bedroom_retention_service = None
 _model_execution_service: GatewayModelExecutionService | None = None
-_model_profile_store: PostgresModelProfileStore | None = None
-_model_usage_store: PostgresModelUsageStore | None = None
+_model_profile_store = None
+_model_usage_store = None
 _model_provider_runner: GatewayProviderRunner | None = None
 _cache_probe_service: GatewayCacheProbeService | None = None
 _model_runtime_lock = asyncio.Lock()
@@ -556,15 +559,27 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
     async with _model_runtime_lock:
         if _model_execution_service is not None:
             return _model_execution_service
-        _model_profile_store = PostgresModelProfileStore(get_pool)
-        _model_usage_store = PostgresModelUsageStore(get_pool)
+        ephemeral_fixture = os.environ.get(
+            "MODEL_EXECUTION_EPHEMERAL_FIXTURE", ""
+        ).strip()
+        if ephemeral_fixture:
+            _model_profile_store = InMemoryModelProfileStore()
+            _model_usage_store = InMemoryModelUsageStore()
+            await bootstrap_ephemeral_model_profiles(
+                _model_profile_store, Path(ephemeral_fixture)
+            )
+            history_store = InMemoryAnchoredHistoryStore()
+        else:
+            _model_profile_store = PostgresModelProfileStore(get_pool)
+            _model_usage_store = PostgresModelUsageStore(get_pool)
+            history_store = PostgresAnchoredHistoryStore(get_pool)
         _model_provider_runner = GatewayProviderRunner()
         _model_execution_service = GatewayModelExecutionService(
             profiles=_model_profile_store,
             context_builder=GatewayExecutionContextBuilder(
                 group_context=_get_group_context_service(),
                 bedroom_context=_get_bedroom_context_service(),
-                history_store=PostgresAnchoredHistoryStore(get_pool),
+                history_store=history_store,
             ),
             provider_runner=_model_provider_runner,
             usage_store=_model_usage_store,

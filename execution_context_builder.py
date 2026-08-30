@@ -83,7 +83,9 @@ class GatewayExecutionContextBuilder:
                 "actor_private_stance": request.actor_private_stance,
             }
         )
-        components = await self.group_context.build_execution_components(pack_request)
+        components = await self.group_context.build_execution_components(
+            pack_request, pack_kind=request.execution_kind
+        )
         namespace = build_cache_namespace(
             actor_id=request.actor_id,
             conversation_id=resolved_conversation_id,

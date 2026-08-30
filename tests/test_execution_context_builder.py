@@ -14,7 +14,7 @@ class _Relay:
 class _GroupContext:
     relay_client = _Relay()
 
-    async def build_execution_components(self, request):
+    async def build_execution_components(self, request, *, pack_kind):
         return {
             "static_system": ("runtime", "actor", "room"),
             "dynamic_tail": ("dynamic",),
@@ -122,4 +122,3 @@ async def test_context_builder_persists_complete_cache_identity_before_history_r
         "tool_schema_hash": "tools.v1",
         "cache_strategy_version": "no_prompt_cache_v1",
     }
-

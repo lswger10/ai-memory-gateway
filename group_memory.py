@@ -896,6 +896,20 @@ def _dynamic_context_segments(memories, summaries, actor_private_stance, facts) 
     return tuple(segment for segment in segments if segment)
 
 
+_PROBE_RESPONSE_CONTRACT = (
+    "\nProbe response contract: Return exactly one JSON object with all "
+    "of these fields and no markdown: action, urge, reason_code, "
+    "reaction, reaction_target_event_id, reply_to_event_id, "
+    "burst_stance. Your entire response must be raw JSON; do not "
+    "include prose or code fences. action must be pass, react, reply, "
+    "or react+reply; urge must be strong, normal, weak, or pass. "
+    "reason_code must be exactly one of direct_address, disagreement, "
+    "add_context, social_reaction, silence_is_weird, or other_bounded. "
+    "Use null when no reaction or target applies. If action is pass, "
+    "urge must be pass. Keep burst_stance to at most two short lines."
+)
+
+
 class GroupContextPackService:
     def __init__(
         self,
@@ -952,18 +966,7 @@ class GroupContextPackService:
         )
 
         if pack_kind == "probe":
-            system_content += (
-                "\nProbe response contract: Return exactly one JSON object with all "
-                "of these fields and no markdown: action, urge, reason_code, "
-                "reaction, reaction_target_event_id, reply_to_event_id, "
-                "burst_stance. Your entire response must be raw JSON; do not "
-                "include prose or code fences. action must be pass, react, reply, "
-                "or react+reply; urge must be strong, normal, weak, or pass. "
-                "reason_code must be exactly one of direct_address, disagreement, "
-                "add_context, social_reaction, silence_is_weird, or other_bounded. "
-                "Use null when no reaction or target applies. If action is pass, "
-                "urge must be pass. Keep burst_stance to at most two short lines."
-            )
+            system_content += _PROBE_RESPONSE_CONTRACT
             content = _render_public_context(facts, maximum_events=4)
             messages = [
                 {"role": "system", "content": system_content},
@@ -997,9 +1000,11 @@ class GroupContextPackService:
         )
 
     async def build_execution_components(
-        self, request: ContextPackRequest
+        self, request: ContextPackRequest, *, pack_kind: str = "full"
     ) -> dict:
         """Build cache-safe components; all retrieved/fresh facts remain dynamic."""
+        if pack_kind not in {"probe", "full"}:
+            raise ValueError("pack_kind must be probe or full")
         requested = request.to_dict()
         members = room_members(requested["room_id"])
         policy = build_retrieval_policy(
@@ -1010,14 +1015,17 @@ class GroupContextPackService:
         result = await self.search(query, policy, 10)
         summaries = await self.summary_search(query, policy, 6)
         profile = self.prompt_profiles[requested["actor_id"]]
+        dynamic_tail = _dynamic_context_segments(
+            result.memories,
+            summaries,
+            requested.get("actor_private_stance"),
+            facts,
+        )
+        if pack_kind == "probe":
+            dynamic_tail = (*dynamic_tail, _PROBE_RESPONSE_CONTRACT.strip())
         return {
             "static_system": _static_system_segments(profile, policy),
-            "dynamic_tail": _dynamic_context_segments(
-                result.memories,
-                summaries,
-                requested.get("actor_private_stance"),
-                facts,
-            ),
+            "dynamic_tail": dynamic_tail,
             "actor_prompt_version": profile.prompt_version,
             "runtime_kernel_version": "group-runtime-kernel.v1",
             "room_policy_version": f"{requested['room_id']}.v1",

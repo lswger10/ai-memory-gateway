@@ -121,6 +121,30 @@ class GroupContextPackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(payload["token_budget"], 512)
         self.assertIn("jiao", json.dumps(payload["provider_neutral_messages"]))
 
+    async def test_execution_probe_contract_is_dynamic_tail_not_static_prefix(self):
+        from group_contracts import ContextPackRequest
+        from group_memory import GroupContextPackService
+
+        relay = FakeRelayClient(FACTS)
+        service = GroupContextPackService(
+            relay,
+            search=AsyncMock(
+                return_value=AuthorizedMemorySearchResult((), (), CandidateAudit())
+            ),
+        )
+
+        probe = await service.build_execution_components(
+            ContextPackRequest.from_dict(PACK_REQUEST), pack_kind="probe"
+        )
+        full = await service.build_execution_components(
+            ContextPackRequest.from_dict(PACK_REQUEST), pack_kind="full"
+        )
+
+        probe_contract = "Probe response contract"
+        self.assertNotIn(probe_contract, "\n".join(probe["static_system"]))
+        self.assertIn(probe_contract, "\n".join(probe["dynamic_tail"]))
+        self.assertNotIn(probe_contract, "\n".join(full["dynamic_tail"]))
+
     async def test_gateway_does_not_reparse_names_as_strong_mentions(self):
         from group_contracts import ContextPackRequest
         from group_memory import GroupContextPackService
