@@ -61,6 +61,13 @@ from bedroom_memory import (
     BedroomPostgresRepository,
     BedroomRetentionService,
 )
+from model_execution import GatewayModelExecutionService
+from model_execution_contracts import (
+    CONTRACT_VERSION as MODEL_EXECUTION_CONTRACT_VERSION,
+    ExecutionContractError,
+    GatewayExecutionRequest,
+)
+from model_profiles import resolve_feature_flags
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -406,6 +413,7 @@ _group_candidate_service = None
 _group_extraction_service = None
 _bedroom_context_service = None
 _bedroom_retention_service = None
+_model_execution_service: GatewayModelExecutionService | None = None
 
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -428,6 +436,7 @@ async def gateway_auth_middleware(request: Request, call_next):
         or path == "/internal/group/memory-candidates"
         or path == "/internal/group/extraction/closed-bursts"
         or path.startswith("/internal/bedroom/")
+        or path.startswith("/internal/model-execution/")
     ):
         return await call_next(request)
 
@@ -480,6 +489,55 @@ def _group_bearer(request: Request) -> str:
     authorization = request.headers.get("Authorization", "")
     prefix = "Bearer "
     return authorization[len(prefix):] if authorization.startswith(prefix) else ""
+
+
+def _model_execution_error(status_code: int, code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "contract_version": MODEL_EXECUTION_CONTRACT_VERSION,
+            "error": {"code": code},
+        },
+    )
+
+
+async def _stream_gateway_execution(request: Request, expected_kind: str):
+    if not resolve_feature_flags()["model_execution"]:
+        return _model_execution_error(404, "model_execution_disabled")
+    if (
+        request.headers.get("X-Gateway-Execution-Version")
+        != MODEL_EXECUTION_CONTRACT_VERSION
+    ):
+        return _model_execution_error(409, "contract_version_mismatch")
+    expected_key = os.environ.get("GROUP_ORCHESTRATOR_SERVICE_KEY", "")
+    if not expected_key or not secrets.compare_digest(
+        _group_bearer(request), expected_key
+    ):
+        return _model_execution_error(403, "principal_not_allowed")
+    try:
+        execution_request = GatewayExecutionRequest.from_dict(await request.json())
+    except (ExecutionContractError, ValueError, TypeError, json.JSONDecodeError):
+        return _model_execution_error(422, "invalid_execution_payload")
+    if execution_request.execution_kind != expected_kind:
+        return _model_execution_error(422, "execution_kind_mismatch")
+    if _model_execution_service is None:
+        return _model_execution_error(503, "model_execution_unavailable")
+
+    async def events():
+        async for event in _model_execution_service.stream(execution_request):
+            yield f"event: {event.event}\ndata: {json.dumps(event.data, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.post("/internal/model-execution/probe")
+async def model_execution_probe(request: Request):
+    return await _stream_gateway_execution(request, "probe")
+
+
+@app.post("/internal/model-execution/stream")
+async def model_execution_stream(request: Request):
+    return await _stream_gateway_execution(request, "full")
 
 
 def _get_group_context_service() -> GroupContextPackService:
