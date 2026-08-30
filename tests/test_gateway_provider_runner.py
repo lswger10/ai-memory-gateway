@@ -168,5 +168,35 @@ async def test_anthropic_no_cache_profile_sends_no_cache_control():
     assert "cache_control" not in str(transport.calls[0]["json_body"])
 
 
+def test_openai_render_keeps_compressed_summary_before_anchored_history():
+    payload = profile().to_dict()
+    payload.update(
+        protocol="openai_chat_completions",
+        cache_strategy="openai_stable_prefix_v1",
+        requested_cache_ttl=None,
+    )
+    payload["capabilities"]["cache_strategies"] = ["openai_stable_prefix_v1"]
+    payload["capabilities"]["cache_ttls"] = []
+    openai = ModelProfile.from_dict(payload)
+    context = ContextBundle(
+        static_system=("kernel", "actor", "room"),
+        stable_summary="bounded compressed summary",
+        stable_history=("anchored fact",),
+        dynamic_tail=("current event",),
+        actor_prompt_version="actor.v1",
+        runtime_kernel_version="kernel.v1",
+        room_policy_version="room.v1",
+        tool_schema_hash="tools.none.v1",
+    )
+
+    rendered = GatewayProviderRunner()._render(
+        openai, request(), context, "cache-openai"
+    )
+
+    assert rendered.json_body["messages"][1]["content"] == "bounded compressed summary"
+    assert rendered.json_body["messages"][2]["content"] == "anchored fact"
+    assert rendered.json_body["messages"][3]["content"] == "current event"
+
+
 async def _consume(stream):
     return [item async for item in stream]

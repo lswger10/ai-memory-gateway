@@ -91,9 +91,13 @@ class GatewayProviderRunner:
             )
 
         instructions = "\n\n".join(context.static_system)
+        stable_text = (
+            *((context.stable_summary,) if context.stable_summary else ()),
+            *context.stable_history,
+        )
         messages = tuple(
             {"role": "user", "content": text}
-            for text in (*context.stable_history, *context.dynamic_tail)
+            for text in (*stable_text, *context.dynamic_tail)
         )
         cache_key = (
             cache_namespace

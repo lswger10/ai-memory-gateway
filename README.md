@@ -26,6 +26,16 @@ Give your AI long-term memory. A lightweight proxy gateway that adds a memory la
 
 ## 🏗️ 架构
 
+### Tidal Group / typed-room execution（新主链）
+
+在 Tidal 的新主链中，Gateway 不只是“记忆转发器”，而是唯一的模型执行面：它管理 actor-specific prompt、Memory ACL、Context Pack、Model Profiles、provider adapters、实际模型请求、Prompt Cache 和真实 usage/cache telemetry。Relay 仍是公开消息事实源；Orchestrator 只负责谁先说、串行、抢占/取消与 fence 生命周期，不能直接持有 provider key 或自行拼 prompt。
+
+Model Profile 将 actor identity 与供应商分开。同一个 `jiao` 或 `laoke` 可以人工切换到任意已启用且已实测通过的 Profile；自动 fallback 只按人工批准的有序名单执行。Profile 的 `base_url`、协议、model、credential env、headers 与 capabilities 均显式配置，不因“compatible”字样猜测缓存、tools 或 TTL 能力。
+
+Claude/Anthropic 风格长会话使用 `anthropic_prefix_anchored_v1`：静态 tools/system 与锚定历史位于缓存断点之前，动态 memory、当前事件、stance 和 Bedroom context 位于断点之后。历史使用 `compressed_up_to_event_id`，达到阈值时以一次原子覆盖式有界摘要推进游标；正常追加不移动游标。默认不做任何付费 Prompt Cache 保活，只复用 HTTP/TCP/TLS 连接。1h TTL 只有在该 Profile 对应真实 route 的双发探针观察到 cache-read 后才可标记通过。
+
+相关开关默认关闭：`MODEL_EXECUTION_ENABLED=false`、`MODEL_PROFILE_MANAGEMENT_ENABLED=false`、`MODEL_PROFILE_PWA_ENABLED=false`。密钥只通过 Profile 的 `credential_ref=env:...` 从 Gateway 服务端环境读取，不能写入 Git 或下发浏览器。
+
 ```
 你的客户端（Kelivo / ChatBox / ...）
         ↓
