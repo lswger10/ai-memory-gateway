@@ -78,6 +78,23 @@ async def test_restart_store_deduplicates_replayed_relay_facts():
 
 
 @pytest.mark.anyio
+async def test_sync_watermark_repairs_older_fact_even_when_current_row_already_exists():
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+    from conversation_sync import ConversationSyncService
+
+    store = InMemoryConversationPartitionStore()
+    await store.append_accepted_facts((ConversationFact.from_relay_event(relay_event(2)),))
+    relay = FakeRelay((relay_event(1), relay_event(2)))
+    await ConversationSyncService(relay, store).ensure_relay_synced(
+        actor_id="jiao", room_id="room_group_home", conversation_id="group-1",
+        current_event_id=2,
+    )
+    assert relay.history_calls[0]["after_event_id"] == 0
+    assert [fact.source_event_id for fact in await store.list_facts("group-1")] == [1, 2]
+    assert await store.synced_through_event_id("group-1") == 2
+
+
+@pytest.mark.anyio
 async def test_missing_current_fact_blocks_generation_instead_of_using_partial_history():
     from conversation_partitions import InMemoryConversationPartitionStore
     from conversation_sync import ConversationSyncIncomplete, ConversationSyncService

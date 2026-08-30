@@ -390,6 +390,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_fact_identity
     ON conversations(fact_identity) WHERE fact_identity IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_cognitive_partition
     ON conversations(session_id, source_event_id) WHERE fact_identity IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS conversation_partition_sync_state (
+    partition_id TEXT PRIMARY KEY,
+    synced_through_event_id BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 

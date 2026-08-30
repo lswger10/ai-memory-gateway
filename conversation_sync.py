@@ -31,13 +31,13 @@ class ConversationSyncService:
         conversation_id: str,
         current_event_id: int,
     ) -> ConversationSyncReceipt:
-        latest = await self.store.latest_event_id(conversation_id)
+        cursor = await self.store.synced_through_event_id(conversation_id)
         events = await self.relay_client.fetch_model_history_facts(
             actor_id=actor_id,
             room_id=room_id,
             conversation_id=conversation_id,
             current_event_id=current_event_id,
-            after_event_id=min(latest, current_event_id),
+            after_event_id=min(cursor, current_event_id),
             through_event_id=current_event_id,
             include_current_event=True,
         )
@@ -51,6 +51,7 @@ class ConversationSyncService:
                 raise ConversationSyncIncomplete("Relay returned mismatched conversation fact")
             facts.append(ConversationFact.from_relay_event(event))
         inserted = await self.store.append_accepted_facts(tuple(facts))
+        await self.store.mark_synced_through(conversation_id, current_event_id)
         persisted = await self.store.list_facts(
             conversation_id,
             through_event_id=current_event_id,
@@ -97,6 +98,7 @@ class ConversationSyncService:
             facts.append(ConversationFact.from_bedroom_turn(session, turn))
         inserted = await self.store.append_accepted_facts(tuple(facts))
         partition_id = f"bedroom:{bedroom_session_id}"
+        await self.store.mark_synced_through(partition_id, current_turn_id)
         persisted = await self.store.list_facts(partition_id, through_event_id=current_turn_id)
         if not any(fact.source_event_id == current_turn_id for fact in persisted):
             raise ConversationSyncIncomplete("Bedroom history is not synced through current turn")

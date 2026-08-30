@@ -182,6 +182,7 @@ class ConversationFact:
 class InMemoryConversationPartitionStore:
     def __init__(self) -> None:
         self._facts: dict[str, ConversationFact] = {}
+        self._sync_watermarks: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
     async def append_accepted_facts(self, facts: Iterable[ConversationFact]) -> int:
@@ -220,6 +221,16 @@ class InMemoryConversationPartitionStore:
     async def count_facts(self, partition_id: str) -> int:
         return len(await self.list_facts(partition_id))
 
+    async def synced_through_event_id(self, partition_id: str) -> int:
+        async with self._lock:
+            return self._sync_watermarks.get(partition_id, 0)
+
+    async def mark_synced_through(self, partition_id: str, event_id: int) -> None:
+        async with self._lock:
+            self._sync_watermarks[partition_id] = max(
+                event_id, self._sync_watermarks.get(partition_id, 0)
+            )
+
     async def delete_bedroom_partition(self, bedroom_session_id: str) -> None:
         partition_id = f"bedroom:{bedroom_session_id}"
         async with self._lock:
@@ -227,6 +238,7 @@ class InMemoryConversationPartitionStore:
                 identity: fact for identity, fact in self._facts.items()
                 if fact.partition_id != partition_id
             }
+            self._sync_watermarks.pop(partition_id, None)
 
 
 def _json_value(value: Any, fallback: Any) -> Any:
@@ -354,12 +366,41 @@ class PostgresConversationPartitionStore:
     async def count_facts(self, partition_id: str) -> int:
         return len(await self.list_facts(partition_id))
 
+    async def synced_through_event_id(self, partition_id: str) -> int:
+        pool = await self._pool()
+        async with pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT synced_through_event_id FROM conversation_partition_sync_state WHERE partition_id=$1",
+                partition_id,
+            )
+        return int(value or 0)
+
+    async def mark_synced_through(self, partition_id: str, event_id: int) -> None:
+        pool = await self._pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO conversation_partition_sync_state(
+                       partition_id,synced_through_event_id,updated_at
+                     ) VALUES($1,$2,NOW())
+                     ON CONFLICT(partition_id) DO UPDATE SET
+                       synced_through_event_id=GREATEST(
+                         conversation_partition_sync_state.synced_through_event_id,
+                         EXCLUDED.synced_through_event_id
+                       ), updated_at=NOW()""",
+                partition_id,
+                event_id,
+            )
+
     async def delete_bedroom_partition(self, bedroom_session_id: str) -> None:
         pool = await self._pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
                     "DELETE FROM conversations WHERE session_id = $1",
+                    f"bedroom:{bedroom_session_id}",
+                )
+                await conn.execute(
+                    "DELETE FROM conversation_partition_sync_state WHERE partition_id = $1",
                     f"bedroom:{bedroom_session_id}",
                 )
 
