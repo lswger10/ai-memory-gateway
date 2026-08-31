@@ -4,7 +4,15 @@ from model_execution_contracts import ProviderUsage
 from model_usage_store import ExecutionReceipt
 
 
-def _receipt(*, observed, creation=None, read=None, cached=None, usage_received=True):
+def _receipt(
+    *,
+    observed,
+    creation=None,
+    read=None,
+    cached=None,
+    usage_received=True,
+    protocol="anthropic_messages_compatible",
+):
     return ExecutionReceipt(
         "receipt-1",
         "generation-1",
@@ -14,7 +22,7 @@ def _receipt(*, observed, creation=None, read=None, cached=None, usage_received=
         "profile-1",
         3,
         "provider",
-        "anthropic_messages_compatible",
+        protocol,
         "route-1",
         "model-1",
         "adapter-v1",
@@ -94,3 +102,27 @@ def test_dashboard_separates_observable_hit_ratio_from_telemetry_coverage():
         "observable_hit_ratio": 0.5,
         "telemetry_coverage_ratio": 2 / 3,
     }
+
+
+def test_pre_migration_receipts_use_real_cache_fields_as_usage_evidence():
+    values = build_cache_usage_view(
+        (
+            _receipt(
+                observed="unverified",
+                protocol="openai_chat_completions",
+                cached=0,
+                usage_received=False,
+            ),
+            _receipt(
+                observed="unverified",
+                creation=0,
+                read=0,
+                usage_received=False,
+            ),
+        )
+    )
+
+    assert [value["cache_outcome"] for value in values] == [
+        "OBSERVED_MISS",
+        "OBSERVED_MISS",
+    ]

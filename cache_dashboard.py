@@ -7,7 +7,17 @@ def _cache_outcome(receipt: ExecutionReceipt) -> str:
     usage = receipt.usage
     if (usage.cache_read_input_tokens or 0) > 0 or (usage.cached_tokens or 0) > 0:
         return "HIT"
-    if not receipt.provider_usage_received:
+    provider_usage_evidence = receipt.provider_usage_received or any(
+        value is not None
+        for value in (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_creation_input_tokens,
+            usage.cache_read_input_tokens,
+            usage.cached_tokens,
+        )
+    )
+    if not provider_usage_evidence:
         return "UNOBSERVABLE"
     if receipt.protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
         observable = (
