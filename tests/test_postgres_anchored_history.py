@@ -156,3 +156,49 @@ async def test_postgres_compression_rejects_stale_revision_without_partial_curso
 async def _pool(pool):
     return pool
 
+
+class _PostgresCteVisibilityConnection:
+    """Model PostgreSQL's same-statement visibility for data-modifying CTEs."""
+
+    async def fetchrow(self, sql, *args):
+        if "INSERT INTO model_cache_state" not in sql:
+            raise AssertionError(sql)
+        if "FROM inserted" not in sql:
+            return None
+        return {
+            "cache_namespace": args[0],
+            "compressed_up_to_event_id": 0,
+            "summary": "",
+            "summary_token_count": 0,
+            "state_revision": 1,
+        }
+
+
+class _PostgresCteVisibilityPool:
+    def acquire(self):
+        return _Acquire(_PostgresCteVisibilityConnection())
+
+
+@pytest.mark.anyio
+async def test_postgres_cache_state_creation_reads_insert_returning_row():
+    pool = _PostgresCteVisibilityPool()
+    store = PostgresAnchoredHistoryStore(lambda: _pool(pool))
+
+    state = await store.get_or_create(
+        "namespace-new",
+        identity={
+            "actor_id": "laoke",
+            "conversation_id": "conversation-new",
+            "profile_id": "profile-new",
+            "profile_revision": 1,
+            "execution_mode": "private",
+            "actor_prompt_version": "actor.v2",
+            "runtime_kernel_version": "runtime.v1",
+            "room_policy_version": "room.v1",
+            "tool_schema_hash": "tools.v1",
+            "cache_strategy_version": "anthropic_prefix_anchored_v1",
+        },
+    )
+
+    assert state.cache_namespace == "namespace-new"
+    assert state.state_revision == 1

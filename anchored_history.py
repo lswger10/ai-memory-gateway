@@ -284,10 +284,16 @@ class PostgresAnchoredHistoryStore:
                        cache_strategy_version
                      ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                      ON CONFLICT(cache_namespace) DO NOTHING
+                     RETURNING cache_namespace,compressed_up_to_event_id,summary,
+                               summary_token_count,state_revision
                    )
                    SELECT cache_namespace,compressed_up_to_event_id,summary,
+                          summary_token_count,state_revision FROM inserted
+                   UNION ALL
+                   SELECT cache_namespace,compressed_up_to_event_id,summary,
                           summary_token_count,state_revision
-                   FROM model_cache_state WHERE cache_namespace=$1""",
+                   FROM model_cache_state WHERE cache_namespace=$1
+                   LIMIT 1""",
                 cache_namespace,
                 identity["actor_id"],
                 identity["conversation_id"],
