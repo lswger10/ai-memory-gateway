@@ -20,10 +20,16 @@ class _PromptStore:
 def _enable(monkeypatch):
     monkeypatch.setenv("ACTOR_PERSONA_MANAGEMENT_ENABLED", "true")
     monkeypatch.setattr(main, "GATEWAY_SECRET", "persona-test-secret")
+    monkeypatch.setattr(
+        main, "ACTOR_PERSONA_PROXY_SECRET", "persona-proxy-test-secret"
+    )
     monkeypatch.setattr(main._db_module, "DATABASE_URL", "postgresql://test")
     store = _PromptStore()
     monkeypatch.setattr(main, "_actor_prompt_store", store)
-    client = TestClient(main.app, headers={"X-Gateway-Key": "persona-test-secret"})
+    client = TestClient(
+        main.app,
+        headers={"X-Gateway-Persona-Key": "persona-proxy-test-secret"},
+    )
     return store, client
 
 
@@ -69,11 +75,40 @@ def test_management_upload_list_activate_and_export_keep_body_private(monkeypatc
     assert "attachment" in exported.headers["content-disposition"]
 
 
+def test_persona_proxy_key_cannot_access_other_gateway_management(monkeypatch):
+    _store, client = _enable(monkeypatch)
+
+    assert client.get("/api/model-profiles").status_code == 401
+    assert client.get("/api/memories").status_code == 401
+    assert client.get("/api/actor-prompts/raw-secrets").status_code == 401
+    assert client.get("/api/actor-prompts/jiao/versions").status_code == 401
+
+
+def test_full_gateway_admin_key_still_allows_persona_management(monkeypatch):
+    _store, _client = _enable(monkeypatch)
+    response = TestClient(main.app).get(
+        "/api/actor-prompts",
+        headers={"X-Gateway-Key": "persona-test-secret"},
+    )
+    assert response.status_code == 200
+
+
 def test_management_rejects_wrong_actor_oversize_and_non_markdown(monkeypatch):
     _store, client = _enable(monkeypatch)
     monkeypatch.setenv("ACTOR_PROMPT_MAX_BYTES", "16")
 
+    # The narrowly scoped proxy key must not authorize an unknown actor path.
     assert client.post(
+        "/api/actor-prompts/weiwei/versions",
+        json=_payload("x.md", "valid"),
+    ).status_code == 401
+
+    # Full management auth still reaches the application-level actor check.
+    admin_client = TestClient(
+        main.app,
+        headers={"X-Gateway-Key": "persona-test-secret"},
+    )
+    assert admin_client.post(
         "/api/actor-prompts/weiwei/versions",
         json=_payload("x.md", "valid"),
     ).status_code == 404

@@ -36,7 +36,7 @@ Claude/Anthropic 风格长会话使用 `anthropic_prefix_anchored_v1`：静态 t
 
 相关开关默认关闭：`MODEL_EXECUTION_ENABLED=false`、`MODEL_PROFILE_MANAGEMENT_ENABLED=false`、`MODEL_PROFILE_PWA_ENABLED=false`、`ACTOR_PERSONA_MANAGEMENT_ENABLED=false`。密钥只通过 Profile 的 `credential_ref=env:...` 从 Gateway 服务端环境读取，不能写入 Git 或下发浏览器。
 
-完整 actor Persona 不应写入仓库中的 `actor_prompt_profiles.json`。该文件只保留 `jiao.v1` / `laoke.v1` 的最小故障回滚文本。启用 `ACTOR_PERSONA_MANAGEMENT_ENABLED=true` 后，可通过受 `GATEWAY_SECRET` 保护的管理接口或 Tidal household Settings 上传 UTF-8 `.md`；未配置 `GATEWAY_SECRET` 时管理接口会拒绝运行。Gateway 校验原始 UTF-8 bytes 的 SHA 后，将正文作为不可变版本存入 PostgreSQL；列表只返回元数据，正文只能通过受鉴权导出取得。上传不会自动激活，切换使用 revision/CAS 防止并发覆盖，任何旧版本和内置 v1 都可回滚。每次模型执行/Context Pack 构建前会刷新活动 revision，使不同 Gateway worker 使用同一版本。`ACTOR_PROMPT_MAX_BYTES` 是单份 Markdown 的应用层上限，默认 262144 bytes。
+完整 actor Persona 不应写入仓库中的 `actor_prompt_profiles.json`。该文件只保留 `jiao.v1` / `laoke.v1` 的最小故障回滚文本。启用 `ACTOR_PERSONA_MANAGEMENT_ENABLED=true` 后，可通过受 `GATEWAY_SECRET` 保护的管理接口或 Tidal household Settings 上传 UTF-8 `.md`；Relay 代理应使用独立的 `ACTOR_PERSONA_PROXY_SECRET`，Gateway 仅接受它访问现有 Persona 列表、保存、启用/回滚和导出接口，不能访问其它 management API。未配置 `GATEWAY_SECRET` 时管理接口会拒绝运行。Gateway 校验原始 UTF-8 bytes 的 SHA 后，将正文作为不可变版本存入 PostgreSQL；列表只返回元数据，正文只能通过受鉴权导出取得。上传不会自动激活，切换使用 revision/CAS 防止并发覆盖，任何旧版本和内置 v1 都可回滚。每次模型执行/Context Pack 构建前会刷新活动 revision，使不同 Gateway worker 使用同一版本。`ACTOR_PROMPT_MAX_BYTES` 是单份 Markdown 的应用层上限，默认 262144 bytes。
 
 ```
 你的客户端（Kelivo / ChatBox / ...）
@@ -82,6 +82,7 @@ Claude/Anthropic 风格长会话使用 `anthropic_prefix_anchored_v1`：静态 t
 | `DEFAULT_MODEL` | 默认模型 | `anthropic/claude-sonnet-4.5` |
 | `PORT` | 端口 | `8000` |
 | `GATEWAY_SECRET`（可选） | 网关鉴权密钥，设置后所有 API 端点需要携带此密钥 | `your-secret-key` |
+| `ACTOR_PERSONA_PROXY_SECRET`（可选） | Relay Persona 代理专用窄权限密钥；仅允许现有 Persona list/save/activate/rollback/export 接口 | `separate-persona-proxy-key` |
 
 5. 部署，访问你的网关地址看到 `{"status":"running"}` 就成功了
 

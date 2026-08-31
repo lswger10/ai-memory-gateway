@@ -14,6 +14,7 @@ AI Memory Gateway — 带记忆系统的 LLM 转发网关
 
 import os
 import json
+import re
 import base64
 import hashlib
 import uuid
@@ -120,6 +121,11 @@ PORT = int(os.getenv("PORT", "8080"))
 #   - URL参数方式：?gateway_key=你的密钥（方便浏览器访问 dashboard）
 # 不设置则跳过鉴权（兼容旧部署，仅建议内网环境使用）
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
+
+# Narrow credential used only by Relay's actor Persona proxy. It is deliberately
+# separate from GATEWAY_SECRET so possession never grants general management
+# access.
+ACTOR_PERSONA_PROXY_SECRET = os.getenv("ACTOR_PERSONA_PROXY_SECRET", "")
 
 # 记忆系统开关（数据库出问题时可以临时关掉）
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
@@ -464,6 +470,24 @@ templates = Jinja2Templates(directory="templates")
 # 不需要鉴权的路径（根路径精确匹配，其余按前缀匹配）
 PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico")
 
+
+def actor_persona_proxy_path_allowed(path: str, method: str) -> bool:
+    """Return whether the narrow Relay credential may access this request."""
+    if method == "GET" and path == "/api/actor-prompts":
+        return True
+    if method == "POST" and re.fullmatch(
+        r"/api/actor-prompts/(?:jiao|laoke)/(?:versions|activate)", path
+    ):
+        return True
+    return bool(
+        method == "GET"
+        and re.fullmatch(
+            r"/api/actor-prompts/(?:jiao|laoke)/versions/"
+            r"[A-Za-z0-9:._-]+/export",
+            path,
+        )
+    )
+
 @app.middleware("http")
 async def gateway_auth_middleware(request: Request, call_next):
     """检查 GATEWAY_SECRET，保护所有非公开端点"""
@@ -477,8 +501,8 @@ async def gateway_auth_middleware(request: Request, call_next):
     ):
         return await call_next(request)
 
-    # 未设置密钥时跳过鉴权（兼容旧部署，但会打印警告）
-    if not GATEWAY_SECRET:
+    # 未设置任何密钥时跳过鉴权（兼容旧部署，但会打印警告）
+    if not GATEWAY_SECRET and not ACTOR_PERSONA_PROXY_SECRET:
         if not hasattr(gateway_auth_middleware, "_warned"):
             print("⚠️  GATEWAY_SECRET 未设置！所有 API 端点不受保护！")
             print("⚠️  请在环境变量中设置 GATEWAY_SECRET 以启用鉴权")
@@ -501,15 +525,24 @@ async def gateway_auth_middleware(request: Request, call_next):
         request.headers.get("X-Gateway-Key", "")
         or request.query_params.get("gateway_key", "")
     )
+    persona_key = request.headers.get("X-Gateway-Persona-Key", "")
 
-    # compare_digest 防时序侧信道攻击
-    if not secrets.compare_digest(provided_key, GATEWAY_SECRET):
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Unauthorized. Provide X-Gateway-Key header or gateway_key parameter."},
-        )
+    # The full administrator credential preserves existing behavior. The
+    # Persona credential is method-and-path scoped and never accepted through
+    # the query string.
+    if GATEWAY_SECRET and secrets.compare_digest(provided_key, GATEWAY_SECRET):
+        return await call_next(request)
+    if (
+        ACTOR_PERSONA_PROXY_SECRET
+        and secrets.compare_digest(persona_key, ACTOR_PERSONA_PROXY_SECRET)
+        and actor_persona_proxy_path_allowed(path, request.method)
+    ):
+        return await call_next(request)
 
-    return await call_next(request)
+    return JSONResponse(
+        status_code=401,
+        content={"error": "Unauthorized Gateway credential or scope."},
+    )
 
 
 def _group_error(status_code: int, code: str, message: str) -> JSONResponse:
