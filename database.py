@@ -355,8 +355,28 @@ CREATE TABLE IF NOT EXISTS model_execution_receipts (
     cache_read_input_tokens BIGINT,
     cached_tokens BIGINT,
     status TEXT NOT NULL,
+    stable_prefix_hash TEXT,
+    prompt_cache_key TEXT,
+    runtime_kernel_version TEXT,
+    persona_version TEXT,
+    room_policy_version TEXT,
+    tool_schema_hash TEXT,
+    summary_version BIGINT,
+    compressed_up_to_event_id BIGINT,
+    provider_usage_received BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE model_execution_receipts
+    ADD COLUMN IF NOT EXISTS stable_prefix_hash TEXT,
+    ADD COLUMN IF NOT EXISTS prompt_cache_key TEXT,
+    ADD COLUMN IF NOT EXISTS runtime_kernel_version TEXT,
+    ADD COLUMN IF NOT EXISTS persona_version TEXT,
+    ADD COLUMN IF NOT EXISTS room_policy_version TEXT,
+    ADD COLUMN IF NOT EXISTS tool_schema_hash TEXT,
+    ADD COLUMN IF NOT EXISTS summary_version BIGINT,
+    ADD COLUMN IF NOT EXISTS compressed_up_to_event_id BIGINT,
+    ADD COLUMN IF NOT EXISTS provider_usage_received BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_model_execution_receipts_context
     ON model_execution_receipts(actor_id, room_id, conversation_id, created_at);

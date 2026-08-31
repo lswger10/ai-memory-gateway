@@ -9,6 +9,7 @@ from model_usage_store import (
     ExecutionReceiptDraft,
     InMemoryModelUsageStore,
     build_cache_namespace,
+    build_stable_prefix_hash,
 )
 from provider_adapters import build_provider_provenance
 
@@ -28,6 +29,9 @@ class ContextBundle:
     room_policy_version: str
     tool_schema_hash: str
     cache_conversation_id: str | None = None
+    stable_prefix_hash: str | None = None
+    summary_version: int | None = None
+    compressed_up_to_event_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +138,7 @@ class GatewayModelExecutionService:
                 cache_strategy_version=profile.cache_strategy,
             )
             usage = ProviderUsage.from_provider_values()
+            provider_usage_received = False
             observed_cache_support = "unverified"
             final_seen = False
             final_data: dict[str, Any] | None = None
@@ -150,6 +155,19 @@ class GatewayModelExecutionService:
                         if not isinstance(candidate, ProviderUsage):
                             raise ProviderRunUnavailable("provider usage shape is invalid")
                         usage = candidate
+                        provider_usage_received = bool(
+                            chunk.data.get("provider_usage_received", False)
+                            or any(
+                                value is not None
+                                for value in (
+                                    candidate.input_tokens,
+                                    candidate.output_tokens,
+                                    candidate.cache_creation_input_tokens,
+                                    candidate.cache_read_input_tokens,
+                                    candidate.cached_tokens,
+                                )
+                            )
+                        )
                         observed_cache_support = str(
                             chunk.data.get("observed_cache_support", "unverified")
                         )
@@ -191,6 +209,30 @@ class GatewayModelExecutionService:
                     fallback_from_profile_id=fallback_from,
                     usage=usage,
                     status="succeeded",
+                    stable_prefix_hash=(
+                        context.stable_prefix_hash
+                        or build_stable_prefix_hash(
+                            static_system=context.static_system,
+                            stable_summary=context.stable_summary,
+                            stable_history=context.stable_history,
+                        )
+                    ),
+                    prompt_cache_key=(
+                        namespace
+                        if profile.cache_strategy == "openai_stable_prefix_v1"
+                        else None
+                    ),
+                    runtime_kernel_version=context.runtime_kernel_version,
+                    persona_version=context.actor_prompt_version,
+                    room_policy_version=context.room_policy_version,
+                    tool_schema_hash=context.tool_schema_hash,
+                    summary_version=context.summary_version or 1,
+                    compressed_up_to_event_id=(
+                        context.compressed_up_to_event_id
+                        if context.compressed_up_to_event_id is not None
+                        else 0
+                    ),
+                    provider_usage_received=provider_usage_received,
                 )
             )
             yield ExecutionStreamEvent("final", final_data or {})

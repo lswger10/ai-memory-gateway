@@ -52,6 +52,8 @@ async def test_profile_schema_is_additive_and_idempotent():
     assert conn.calls == [MODEL_EXECUTION_MIGRATION_SQL, MODEL_EXECUTION_MIGRATION_SQL]
     assert "CREATE TABLE IF NOT EXISTS model_profiles" in MODEL_EXECUTION_MIGRATION_SQL
     assert "CREATE TABLE IF NOT EXISTS model_execution_receipts" in MODEL_EXECUTION_MIGRATION_SQL
+    assert "ADD COLUMN IF NOT EXISTS stable_prefix_hash" in MODEL_EXECUTION_MIGRATION_SQL
+    assert "ADD COLUMN IF NOT EXISTS provider_usage_received" in MODEL_EXECUTION_MIGRATION_SQL
     assert "DROP TABLE" not in MODEL_EXECUTION_MIGRATION_SQL.upper()
     assert "UPDATE memories" not in MODEL_EXECUTION_MIGRATION_SQL
 

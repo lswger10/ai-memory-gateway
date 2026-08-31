@@ -11,7 +11,7 @@ from group_memory import GroupContextPackService
 from model_execution import ContextBundle
 from model_execution_contracts import GatewayExecutionRequest
 from model_profiles import ModelProfile
-from model_usage_store import build_cache_namespace
+from model_usage_store import build_cache_namespace, build_stable_prefix_hash
 
 
 class GatewayExecutionContextBuilder:
@@ -177,6 +177,11 @@ class GatewayExecutionContextBuilder:
             json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             for event in history
         )
+        stable_prefix_hash = build_stable_prefix_hash(
+            static_system=components["static_system"],
+            stable_summary=state.summary,
+            stable_history=stable_history,
+        )
         return ContextBundle(
             static_system=components["static_system"],
             stable_summary=state.summary,
@@ -187,4 +192,7 @@ class GatewayExecutionContextBuilder:
             room_policy_version=components["room_policy_version"],
             tool_schema_hash=components["tool_schema_hash"],
             cache_conversation_id=cache_conversation_id,
+            stable_prefix_hash=stable_prefix_hash,
+            summary_version=state.state_revision,
+            compressed_up_to_event_id=state.compressed_up_to_event_id,
         )

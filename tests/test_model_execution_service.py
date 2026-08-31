@@ -228,6 +228,15 @@ async def test_execution_receipt_records_actual_fallback_and_usage():
     assert receipt.fallback_used is True
     assert receipt.fallback_from_profile_id == "primary"
     assert receipt.usage.cache_read_input_tokens == 20
+    assert receipt.stable_prefix_hash
+    assert receipt.prompt_cache_key is None
+    assert receipt.runtime_kernel_version == "kernel.v1"
+    assert receipt.persona_version == "jiao.v1"
+    assert receipt.room_policy_version == "group.v1"
+    assert receipt.tool_schema_hash == "tools.none"
+    assert receipt.summary_version == 1
+    assert receipt.compressed_up_to_event_id == 0
+    assert receipt.provider_usage_received is True
 
 
 @pytest.mark.anyio

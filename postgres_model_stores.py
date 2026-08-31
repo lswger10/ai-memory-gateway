@@ -216,14 +216,30 @@ class PostgresModelUsageStore:
             draft.fallback_used, draft.fallback_from_profile_id, draft.usage.input_tokens,
             draft.usage.output_tokens, draft.usage.cache_creation_input_tokens,
             draft.usage.cache_read_input_tokens, draft.usage.cached_tokens, draft.status,
+            draft.stable_prefix_hash, draft.prompt_cache_key,
+            draft.runtime_kernel_version, draft.persona_version,
+            draft.room_policy_version, draft.tool_schema_hash,
+            draft.summary_version, draft.compressed_up_to_event_id,
+            draft.provider_usage_received,
         )
         async with pool.acquire() as conn:
             existing = await conn.fetchrow("SELECT * FROM model_execution_receipts WHERE generation_request_id=$1", draft.generation_request_id)
             if existing is None:
                 await conn.execute(
-                    """INSERT INTO model_execution_receipts VALUES(
+                    """INSERT INTO model_execution_receipts(
+                    receipt_id,generation_request_id,actor_id,room_id,conversation_id,
+                    profile_id,profile_revision,provider,protocol,route_id,model,
+                    adapter_version,cache_strategy,requested_cache_ttl,
+                    observed_cache_support,fallback_used,fallback_from_profile_id,
+                    input_tokens,output_tokens,cache_creation_input_tokens,
+                    cache_read_input_tokens,cached_tokens,status,stable_prefix_hash,
+                    prompt_cache_key,runtime_kernel_version,persona_version,
+                    room_policy_version,tool_schema_hash,summary_version,
+                    compressed_up_to_event_id,provider_usage_received,created_at
+                    ) VALUES(
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                    $18,$19,$20,$21,$22,$23,NOW())""", *values
+                    $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,NOW())""",
+                    *values,
                 )
             else:
                 if existing["receipt_id"] != receipt_id:
@@ -234,6 +250,11 @@ class PostgresModelUsageStore:
             draft.protocol, draft.route_id, draft.model, draft.adapter_version,
             draft.cache_strategy, draft.requested_cache_ttl, draft.observed_cache_support,
             draft.fallback_used, draft.fallback_from_profile_id, draft.usage, draft.status,
+            draft.stable_prefix_hash, draft.prompt_cache_key,
+            draft.runtime_kernel_version, draft.persona_version,
+            draft.room_policy_version, draft.tool_schema_hash,
+            draft.summary_version, draft.compressed_up_to_event_id,
+            draft.provider_usage_received,
         )
 
     async def list_receipts(self, *, limit: int = 200) -> tuple[ExecutionReceipt, ...]:
@@ -251,6 +272,10 @@ class PostgresModelUsageStore:
                     input_tokens=row["input_tokens"], output_tokens=row["output_tokens"],
                     cache_creation_input_tokens=row["cache_creation_input_tokens"],
                     cache_read_input_tokens=row["cache_read_input_tokens"], cached_tokens=row["cached_tokens"],
-                ), row["status"],
+                ), row["status"], row["stable_prefix_hash"],
+                row["prompt_cache_key"], row["runtime_kernel_version"],
+                row["persona_version"], row["room_policy_version"],
+                row["tool_schema_hash"], row["summary_version"],
+                row["compressed_up_to_event_id"], row["provider_usage_received"],
             ) for row in rows
         )

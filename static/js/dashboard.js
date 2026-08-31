@@ -184,7 +184,7 @@ async function saveModelProfile() {
 }
 
 function _cacheOutcomeLabel(value) {
-    return ({read_hit: '命中读取', write_only_unverified: '仅写入·未验证', miss: '未命中', metrics_unavailable: '供应商未返回指标'})[value] || value || '—';
+    return ({HIT: '命中', OBSERVED_MISS: '可观测未命中', UNOBSERVABLE: '供应商指标不可观测'})[value] || value || '—';
 }
 
 function _renderModelProfiles() {
@@ -205,7 +205,7 @@ function _renderModelProfiles() {
     });
 }
 
-function _renderModelUsage(cacheView) {
+function _renderModelUsage(cacheView, observability) {
     const body = _modelField('model-usage-body');
     if (!body) return;
     const n = value => value === null || value === undefined ? '—' : String(value);
@@ -215,6 +215,11 @@ function _renderModelUsage(cacheView) {
         <td>${n(item.input_tokens)}</td><td>${n(item.output_tokens)}</td>
         <td>${n(item.cache_creation_input_tokens)}</td><td>${n(item.cache_read_input_tokens)}</td><td>${n(item.cached_tokens)}</td>
     </tr>`).join('') : '<tr><td colspan="8">暂无真实供应商 usage。</td></tr>';
+    const summary = _modelField('model-usage-summary');
+    if (summary) {
+        const percent = value => value === null || value === undefined ? '—' : `${(value * 100).toFixed(1)}%`;
+        summary.textContent = `可观测命中率 ${percent(observability?.observable_hit_ratio)} · 遥测覆盖率 ${percent(observability?.telemetry_coverage_ratio)}`;
+    }
 }
 
 async function loadModelProfilesAndUsage() {
@@ -227,7 +232,7 @@ async function loadModelProfilesAndUsage() {
         _gatewayModelProfiles = profiles.profiles || [];
         _gatewayModelBindings = bindings.bindings || {};
         _renderModelProfiles();
-        _renderModelUsage(usage.cache_view || []);
+        _renderModelUsage(usage.cache_view || [], usage.cache_observability || {});
     } catch (error) {
         _modelMessage(error.message, true);
     }

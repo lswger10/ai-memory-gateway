@@ -35,6 +35,15 @@ def _draft(**overrides):
             cached_tokens=None,
         ),
         "status": "succeeded",
+        "stable_prefix_hash": "stable-prefix-hash",
+        "prompt_cache_key": None,
+        "runtime_kernel_version": "kernel.v2",
+        "persona_version": "jiao.v3",
+        "room_policy_version": "private.v1",
+        "tool_schema_hash": "tools-none",
+        "summary_version": 4,
+        "compressed_up_to_event_id": 88,
+        "provider_usage_received": True,
     }
     values.update(overrides)
     return ExecutionReceiptDraft(**values)
@@ -74,6 +83,10 @@ async def test_provider_usage_round_trips_exact_values_and_nulls():
     assert receipt.usage == usage
     assert receipt.usage.cache_creation_input_tokens is None
     assert receipt.usage.cached_tokens == 7
+    assert receipt.stable_prefix_hash == "stable-prefix-hash"
+    assert receipt.summary_version == 4
+    assert receipt.compressed_up_to_event_id == 88
+    assert receipt.provider_usage_received is True
 
 
 def test_cache_namespace_includes_actor_conversation_profile_and_versions():

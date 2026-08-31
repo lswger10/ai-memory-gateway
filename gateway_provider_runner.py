@@ -198,7 +198,11 @@ class GatewayProviderRunner:
         usage = adapter.parse_usage(usage_values)
         yield ProviderChunk(
             "usage",
-            {"usage": usage, "observed_cache_support": _observed_cache_support(usage)},
+            {
+                "usage": usage,
+                "observed_cache_support": _observed_cache_support(usage),
+                "provider_usage_received": bool(usage_values),
+            },
         )
 
     async def _openai_chat(self, response, profile, request):
@@ -219,7 +223,14 @@ class GatewayProviderRunner:
             yield ProviderChunk("probe", _parse_probe(text))
         yield ProviderChunk("final", {"text": text})
         usage = adapter.parse_usage(usage_values)
-        yield ProviderChunk("usage", {"usage": usage, "observed_cache_support": _observed_cache_support(usage)})
+        yield ProviderChunk(
+            "usage",
+            {
+                "usage": usage,
+                "observed_cache_support": _observed_cache_support(usage),
+                "provider_usage_received": bool(usage_values),
+            },
+        )
 
     async def _openai_responses(self, response, profile, request):
         adapter = OpenAIResponsesAdapter()
@@ -239,7 +250,14 @@ class GatewayProviderRunner:
             yield ProviderChunk("probe", _parse_probe(text))
         yield ProviderChunk("final", {"text": text})
         usage = adapter.parse_usage(usage_values)
-        yield ProviderChunk("usage", {"usage": usage, "observed_cache_support": _observed_cache_support(usage)})
+        yield ProviderChunk(
+            "usage",
+            {
+                "usage": usage,
+                "observed_cache_support": _observed_cache_support(usage),
+                "provider_usage_received": bool(usage_values),
+            },
+        )
 
 
 async def _sse_json(response) -> AsyncIterator[tuple[str, dict[str, Any]]]:

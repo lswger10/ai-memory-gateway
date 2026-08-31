@@ -33,6 +33,15 @@ class ExecutionReceiptDraft:
     fallback_from_profile_id: str | None
     usage: ProviderUsage
     status: str
+    stable_prefix_hash: str | None = None
+    prompt_cache_key: str | None = None
+    runtime_kernel_version: str | None = None
+    persona_version: str | None = None
+    room_policy_version: str | None = None
+    tool_schema_hash: str | None = None
+    summary_version: int | None = None
+    compressed_up_to_event_id: int | None = None
+    provider_usage_received: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +65,15 @@ class ExecutionReceipt:
     fallback_from_profile_id: str | None
     usage: ProviderUsage
     status: str
+    stable_prefix_hash: str | None = None
+    prompt_cache_key: str | None = None
+    runtime_kernel_version: str | None = None
+    persona_version: str | None = None
+    room_policy_version: str | None = None
+    tool_schema_hash: str | None = None
+    summary_version: int | None = None
+    compressed_up_to_event_id: int | None = None
+    provider_usage_received: bool = False
 
 
 class InMemoryModelUsageStore:
@@ -95,6 +113,15 @@ class InMemoryModelUsageStore:
                 fallback_from_profile_id=draft.fallback_from_profile_id,
                 usage=draft.usage,
                 status=draft.status,
+                stable_prefix_hash=draft.stable_prefix_hash,
+                prompt_cache_key=draft.prompt_cache_key,
+                runtime_kernel_version=draft.runtime_kernel_version,
+                persona_version=draft.persona_version,
+                room_policy_version=draft.room_policy_version,
+                tool_schema_hash=draft.tool_schema_hash,
+                summary_version=draft.summary_version,
+                compressed_up_to_event_id=draft.compressed_up_to_event_id,
+                provider_usage_received=draft.provider_usage_received,
             )
             self._receipts[draft.generation_request_id] = (draft, receipt)
             return receipt
@@ -137,4 +164,23 @@ def build_cache_namespace(
         elif not isinstance(value, str) or not value:
             raise ValueError(f"{field} must be a non-empty string")
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_stable_prefix_hash(
+    *,
+    static_system: tuple[str, ...],
+    stable_summary: str,
+    stable_history: tuple[str, ...],
+) -> str:
+    canonical = json.dumps(
+        {
+            "static_system": static_system,
+            "stable_summary": stable_summary,
+            "stable_history": stable_history,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

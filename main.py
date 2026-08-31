@@ -69,7 +69,7 @@ from model_execution import GatewayModelExecutionService
 from execution_context_builder import GatewayExecutionContextBuilder
 from gateway_provider_runner import GatewayProviderRunner
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
-from cache_dashboard import build_cache_usage_view
+from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
 from anchored_history import InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
 from conversation_partitions import (
     InMemoryConversationPartitionStore,
@@ -781,6 +781,7 @@ async def model_usage_summary():
     receipts = await _model_usage_store.list_receipts(limit=200)
     return {
         "cache_view": list(build_cache_usage_view(receipts)),
+        "cache_observability": build_cache_observability_summary(receipts),
         "receipts": [
             {
                 "generation_request_id": row.generation_request_id,
@@ -796,6 +797,15 @@ async def model_usage_summary():
                 "observed_cache_support": row.observed_cache_support,
                 "fallback_used": row.fallback_used,
                 "fallback_from_profile_id": row.fallback_from_profile_id,
+                "stable_prefix_hash": row.stable_prefix_hash,
+                "prompt_cache_key": row.prompt_cache_key,
+                "runtime_kernel_version": row.runtime_kernel_version,
+                "persona_version": row.persona_version,
+                "room_policy_version": row.room_policy_version,
+                "tool_schema_hash": row.tool_schema_hash,
+                "summary_version": row.summary_version,
+                "compressed_up_to_event_id": row.compressed_up_to_event_id,
+                "provider_usage_received": row.provider_usage_received,
                 "usage": {
                     "input_tokens": row.usage.input_tokens,
                     "output_tokens": row.usage.output_tokens,

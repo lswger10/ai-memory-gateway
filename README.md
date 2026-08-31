@@ -34,6 +34,8 @@ Model Profile 将 actor identity 与供应商分开。同一个 `jiao` 或 `laok
 
 Claude/Anthropic 风格长会话使用 `anthropic_prefix_anchored_v1`：静态 tools/system 与锚定历史位于缓存断点之前，动态 memory、当前事件、stance 和 Bedroom context 位于断点之后。历史使用 `compressed_up_to_event_id`，达到阈值时以一次原子覆盖式有界摘要推进游标；正常追加不移动游标。默认不做任何付费 Prompt Cache 保活，只复用 HTTP/TCP/TLS 连接。1h TTL 只有在该 Profile 对应真实 route 的双发探针观察到 cache-read 后才可标记通过。
 
+每次真实 generation 的 receipt 同时记录稳定前缀 hash、实际 OpenAI prompt cache key（非 OpenAI 路径为 null）、runtime/persona/room/tool 版本、summary revision、压缩游标，以及供应商是否真的返回 usage。Dashboard 将缓存结果严格区分为 `HIT`、`OBSERVED_MISS`、`UNOBSERVABLE`，并分别显示“可观测请求中的命中率”和“全部请求中的遥测覆盖率”；缺字段不能被当作 miss。
+
 相关开关默认关闭：`MODEL_EXECUTION_ENABLED=false`、`MODEL_PROFILE_MANAGEMENT_ENABLED=false`、`MODEL_PROFILE_PWA_ENABLED=false`、`ACTOR_PERSONA_MANAGEMENT_ENABLED=false`。密钥只通过 Profile 的 `credential_ref=env:...` 从 Gateway 服务端环境读取，不能写入 Git 或下发浏览器。
 
 完整 actor Persona 不应写入仓库中的 `actor_prompt_profiles.json`。该文件只保留 `jiao.v1` / `laoke.v1` 的最小故障回滚文本。启用 `ACTOR_PERSONA_MANAGEMENT_ENABLED=true` 后，可通过受 `GATEWAY_SECRET` 保护的管理接口或 Tidal household Settings 上传 UTF-8 `.md`；Relay 代理应使用独立的 `ACTOR_PERSONA_PROXY_SECRET`，Gateway 仅接受它访问现有 Persona 列表、保存、启用/回滚和导出接口，不能访问其它 management API。未配置 `GATEWAY_SECRET` 时管理接口会拒绝运行。Gateway 校验原始 UTF-8 bytes 的 SHA 后，将正文作为不可变版本存入 PostgreSQL；列表只返回元数据，正文只能通过受鉴权导出取得。上传不会自动激活，切换使用 revision/CAS 防止并发覆盖，任何旧版本和内置 v1 都可回滚。每次模型执行/Context Pack 构建前会刷新活动 revision，使不同 Gateway worker 使用同一版本。`ACTOR_PROMPT_MAX_BYTES` 是单份 Markdown 的应用层上限，默认 262144 bytes。
