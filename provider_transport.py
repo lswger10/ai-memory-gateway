@@ -4,8 +4,22 @@ import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
+
+
+def _endpoint_path_for_base_url(base_url: str, path: str) -> str:
+    base_segments = tuple(
+        segment for segment in urlsplit(base_url).path.split("/") if segment
+    )
+    path_segments = tuple(segment for segment in path.split("/") if segment)
+    maximum_overlap = min(len(base_segments), len(path_segments))
+    for size in range(maximum_overlap, 0, -1):
+        if base_segments[-size:] == path_segments[:size]:
+            remaining = path_segments[size:]
+            return "/" + "/".join(remaining)
+    return "/" + "/".join(path_segments)
 
 
 class EnvironmentCredentialResolver:
@@ -71,7 +85,8 @@ class PooledHttpTransport:
         json_body: dict[str, Any],
     ) -> Any:
         client = await self._client(pool_key, base_url, headers)
-        return await client.request(method, path, json=json_body)
+        endpoint_path = _endpoint_path_for_base_url(base_url, path)
+        return await client.request(method, endpoint_path, json=json_body)
 
     async def open_stream(
         self,
@@ -84,7 +99,8 @@ class PooledHttpTransport:
         json_body: dict[str, Any],
     ):
         client = await self._client(pool_key, base_url, headers)
-        return client.stream(method, path, json=json_body)
+        endpoint_path = _endpoint_path_for_base_url(base_url, path)
+        return client.stream(method, endpoint_path, json=json_body)
 
     async def close(self) -> None:
         async with self._lock:

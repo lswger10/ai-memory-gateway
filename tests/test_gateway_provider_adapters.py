@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from cache_strategies import AnthropicPrefixAnchoredV1, PromptSegment
@@ -215,3 +216,55 @@ async def test_transport_reuses_one_async_client_across_requests():
     assert len(created[0].calls) == 2
     await transport.close()
     assert created[0].closed is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("base_url", "endpoint_path", "expected_url"),
+    (
+        (
+            "https://api.ofox.ai/v1",
+            "/v1/chat/completions",
+            "https://api.ofox.ai/v1/chat/completions",
+        ),
+        (
+            "https://api.openai.com",
+            "/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            "https://api.ofox.ai/anthropic",
+            "/v1/messages",
+            "https://api.ofox.ai/anthropic/v1/messages",
+        ),
+    ),
+)
+async def test_transport_joins_profile_base_url_without_duplicate_route_segments(
+    base_url, endpoint_path, expected_url
+):
+    observed = []
+
+    async def handler(request):
+        observed.append(str(request.url))
+        return httpx.Response(200, json={"ok": True})
+
+    def factory(**kwargs):
+        return httpx.AsyncClient(
+            **kwargs,
+            transport=httpx.MockTransport(handler),
+        )
+
+    transport = PooledHttpTransport(client_factory=factory)
+    try:
+        await transport.request(
+            pool_key="route-under-test",
+            base_url=base_url,
+            headers={"Authorization": "Bearer test-only"},
+            method="POST",
+            path=endpoint_path,
+            json_body={"model": "test-model"},
+        )
+    finally:
+        await transport.close()
+
+    assert observed == [expected_url]
