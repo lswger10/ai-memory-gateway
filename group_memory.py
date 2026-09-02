@@ -933,6 +933,18 @@ class GroupContextPackService:
         self.last_search: AuthorizedMemorySearchResult | None = None
         self.last_summary_candidate_ids: tuple[int, ...] = ()
 
+    def build_stable_execution_components(self, actor_id: str, room_id: str) -> dict:
+        """Return only the versioned system prefix for an actor and room."""
+        policy = build_retrieval_policy(actor_id, room_id, room_members(room_id))
+        profile = self.prompt_profiles[actor_id]
+        return {
+            "static_system": _static_system_segments(profile, policy),
+            "actor_prompt_version": profile.prompt_version,
+            "runtime_kernel_version": "group-runtime-kernel.v1",
+            "room_policy_version": f"{room_id}.v1",
+            "tool_schema_hash": "tools.none.v1",
+        }
+
     async def build(
         self, request: ContextPackRequest, *, pack_kind: str
     ) -> OpaqueContextPack:
@@ -1026,11 +1038,10 @@ class GroupContextPackService:
         )
         if pack_kind == "probe":
             dynamic_tail = (*dynamic_tail, _PROBE_RESPONSE_CONTRACT.strip())
+        stable = self.build_stable_execution_components(
+            requested["actor_id"], requested["room_id"]
+        )
         return {
-            "static_system": _static_system_segments(profile, policy),
+            **stable,
             "dynamic_tail": dynamic_tail,
-            "actor_prompt_version": profile.prompt_version,
-            "runtime_kernel_version": "group-runtime-kernel.v1",
-            "room_policy_version": f"{requested['room_id']}.v1",
-            "tool_schema_hash": "tools.none.v1",
         }

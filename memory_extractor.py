@@ -17,18 +17,14 @@ from typing import List, Dict
 class GroupExtractionUnavailable(RuntimeError):
     pass
 
-API_KEY = os.getenv("API_KEY", "")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
-
-# 记忆模型专用 API Key（不设则回退到主 API_KEY）
-# 适用于中转站按模型分组、不同模型需要不同 Key 的场景
+# 记忆整理使用独立的显式配置，不再回退到已退休的全局 AI 路线。
 MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "")
+MEMORY_API_BASE_URL = os.getenv("MEMORY_API_BASE_URL", "")
 
-# 用来提取记忆的模型（便宜的就行）
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4")
+MEMORY_MODEL = os.getenv("MEMORY_MODEL", "")
 
 def get_memory_api_key() -> str:
-    return MEMORY_API_KEY or API_KEY
+    return MEMORY_API_KEY
 
 
 _EXPLICIT_MEMORY_NEGATION_RE = re.compile(
@@ -147,8 +143,8 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     返回：
         记忆列表，格式 [{"content": "...", "importance": N}, ...]
     """
-    if not API_KEY:
-        print("⚠️  API_KEY 未设置，跳过记忆提取")
+    if not MEMORY_API_KEY or not MEMORY_API_BASE_URL or not MEMORY_MODEL:
+        print("⚠️  记忆整理模型配置不完整，跳过记忆提取")
         return []
 
     if not messages:
@@ -180,7 +176,7 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                API_BASE_URL,
+                MEMORY_API_BASE_URL,
                 headers={
                     "Authorization": f"Bearer {get_memory_api_key()}",
                     "Content-Type": "application/json",
@@ -273,8 +269,8 @@ async def extract_group_memories(facts: Dict) -> List[Dict]:
     scope authorization, dedupe, and persistence remain in group_memory.py.
     """
     key = get_memory_api_key()
-    if not key:
-        raise GroupExtractionUnavailable("memory extraction key is not configured")
+    if not key or not MEMORY_API_BASE_URL or not MEMORY_MODEL:
+        raise GroupExtractionUnavailable("memory extraction route is not configured")
     events = [facts["trigger_event"]] + list(
         facts.get("accepted_burst_public_events") or []
     )
@@ -293,7 +289,7 @@ async def extract_group_memories(facts: Dict) -> List[Dict]:
     ]
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
-            API_BASE_URL,
+            MEMORY_API_BASE_URL,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={
                 "model": MEMORY_MODEL,
@@ -359,7 +355,7 @@ async def score_memories(texts: List[str]) -> List[Dict]:
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                API_BASE_URL,
+                MEMORY_API_BASE_URL,
                 headers={
                     "Authorization": f"Bearer {get_memory_api_key()}",
                     "Content-Type": "application/json",

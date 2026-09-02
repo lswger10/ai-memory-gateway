@@ -96,6 +96,28 @@ class BedroomContextPackService:
         self.prompt_profiles = prompt_profiles or load_actor_prompt_profiles()
         self.last_candidate_ids: tuple[int, ...] = ()
 
+    def build_stable_execution_components(self, actor_id: str, room_id: str) -> dict:
+        if PRIVATE_ROOM_ACTORS.get(room_id) != actor_id:
+            raise BedroomContractError("Bedroom actor does not match room")
+        policy = build_retrieval_policy(actor_id, room_id, room_members(room_id))
+        profile = self.prompt_profiles[actor_id]
+        return {
+            "static_system": (
+                _COMMON_RUNTIME_KERNEL,
+                f"Actor prompt [{profile.prompt_version}]: {profile.prompt_text}",
+                (
+                    f"Room policy: speak only as {actor_id} in {room_id}; "
+                    "authorized relationship scopes are "
+                    + ", ".join(policy.allowed_scopes)
+                    + "."
+                ),
+            ),
+            "actor_prompt_version": profile.prompt_version,
+            "runtime_kernel_version": "group-runtime-kernel.v1",
+            "room_policy_version": f"{room_id}.bedroom.v1",
+            "tool_schema_hash": "tools.none.v1",
+        }
+
     async def build(self, request: BedroomPackRequest) -> OpaqueContextPack:
         facts = validate_bedroom_facts(
             await self.relay_client.fetch_bedroom_facts(request.bedroom_session_id)
@@ -171,16 +193,7 @@ class BedroomContextPackService:
         memories = await self.search(query, policy, 10)
         summaries = await self.summary_search(query, policy, 6)
         profile = self.prompt_profiles[request.actor_id]
-        static_system = (
-            _COMMON_RUNTIME_KERNEL,
-            f"Actor prompt [{profile.prompt_version}]: {profile.prompt_text}",
-            (
-                f"Room policy: speak only as {request.actor_id} in {room_id}; "
-                "authorized relationship scopes are "
-                + ", ".join(policy.allowed_scopes)
-                + "."
-            ),
-        )
+        stable = self.build_stable_execution_components(request.actor_id, room_id)
         dynamic: list[str] = [
             "Temporary Bedroom scene layer (not identity or permanent memory): "
             + str(session.get("scene_context") or "private relationship scene")
@@ -205,12 +218,8 @@ class BedroomContextPackService:
         return {
             "room_id": room_id,
             "conversation_id": session["conversation_id"],
-            "static_system": static_system,
+            **stable,
             "dynamic_tail": tuple(dynamic),
-            "actor_prompt_version": profile.prompt_version,
-            "runtime_kernel_version": "group-runtime-kernel.v1",
-            "room_policy_version": f"{room_id}.bedroom.v1",
-            "tool_schema_hash": "tools.none.v1",
         }
 
 

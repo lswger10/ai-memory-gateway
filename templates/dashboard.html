@@ -31,10 +31,6 @@
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
                     <span class="nav-label">对话记录</span>
                 </a>
-                <a href="#" class="nav-item" data-section="threads">
-                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-                    <span class="nav-label">对话线</span>
-                </a>
                 <a href="#" class="nav-item" data-section="models">
                     <span class="nav-icon">◎</span>
                     <span class="nav-label">模型与缓存</span>
@@ -390,60 +386,6 @@
                 </details>
             </section>
 
-            <!-- 对话线管理 Section -->
-            <section id="section-threads" class="section">
-                <div class="section-header">
-                    <h1>对话线管理</h1>
-                    <p class="section-desc">管理分区缓存的对话线、查看编辑摘要</p>
-                </div>
-                <div class="card" id="thread-status-card">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                        <h4>当前活跃对话线</h4>
-                        <button class="btn btn-sm" onclick="loadThreads()">刷新</button>
-                    </div>
-                    <div id="thread-status" style="color: var(--text-muted);">加载中...</div>
-                </div>
-                <div class="card">
-                    <h4 style="margin-bottom: 12px;">新建对话线</h4>
-                    <div style="display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;">
-                        <div style="flex: 1; min-width: 200px;">
-                            <label class="form-label" style="font-size: 13px;">对话线ID</label>
-                            <input type="text" id="new-thread-id" class="search-input" placeholder="例如: my-thread">
-                        </div>
-                        <div style="flex: 1; min-width: 200px;">
-                            <label class="form-label" style="font-size: 13px;">继承摘要自（可选）</label>
-                            <select id="new-thread-copy-from" class="select-input">
-                                <option value="">不继承，从零开始</option>
-                            </select>
-                        </div>
-                        <button class="btn btn-primary" onclick="createThread()">创建</button>
-                    </div>
-                    <div id="thread-create-msg" class="msg-container" style="margin-top: 8px;"></div>
-                </div>
-                <div class="card">
-                    <h4 style="margin-bottom: 12px;">所有对话线</h4>
-                    <div id="thread-list" style="min-height: 60px;">
-                        <div style="text-align: center; color: var(--text-muted); padding: 20px 0;">加载中...</div>
-                    </div>
-                </div>
-                <div id="summaryModal" class="modal" style="display:none;">
-                    <div class="modal-content" style="max-width: 700px;">
-                        <h3>编辑摘要 — <span id="summary-modal-sid"></span></h3>
-                        <div class="form-group">
-                            <textarea id="summary-editor" class="textarea" rows="16" style="font-size: 14px; line-height: 1.6;"></textarea>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <span id="summary-char-count" style="color: var(--text-muted); font-size: 13px;"></span>
-                            <div style="display: flex; gap: 8px;">
-                                <button class="btn btn-danger" onclick="clearSummary()">清空摘要</button>
-                                <button class="btn btn-secondary" onclick="closeSummaryModal()">取消</button>
-                                <button class="btn btn-primary" onclick="saveSummary()">保存</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
             <!-- 设置 Section -->
             <section id="section-models" class="section">
                 <div class="section-header">
@@ -511,34 +453,18 @@
                     <div id="model-usage-summary" class="form-hint" style="margin-bottom:10px;"></div>
                     <div style="overflow:auto;"><table class="data-table"><thead><tr><th>Actor</th><th>Profile / Model</th><th>Cache</th><th>Input</th><th>Output</th><th>Write</th><th>Read</th><th>Cached</th></tr></thead><tbody id="model-usage-body"></tbody></table></div>
                 </div>
+
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">Conversation Cache Pin</h3>
+                    <p class="form-hint">Pin 属于 conversation。只有当前已验证且明确支持 1h cache 的 Profile 会产生约 50 分钟一次的保活调用；不支持的 actor 保持 paused。</p>
+                    <div id="conversation-cache-pin-list"><p class="form-hint">尚无 pin。</p></div>
+                </div>
             </section>
 
             <section id="section-settings" class="section">
                 <div class="section-header">
                     <h2>设置</h2>
                     <div id="settings-msg" class="msg-box" style="display:none;"></div>
-                </div>
-
-                <!-- 基础连接 -->
-                <div class="card settings-card">
-                    <h3 class="settings-group-title">基础连接</h3>
-                    <div class="settings-field">
-                        <label>API Base URL</label>
-                        <input type="text" id="set-API_BASE_URL" class="input" placeholder="https://openrouter.ai/api/v1/chat/completions">
-                    </div>
-                    <div class="settings-field">
-                        <label>API Key</label>
-                        <input type="text" id="set-API_KEY" class="input" placeholder="sk-or-...">
-                        <small class="form-hint" id="set-API_KEY-hint">打码显示，留空不改</small>
-                    </div>
-                    <div class="settings-field">
-                        <label>默认模型</label>
-                        <div class="combo-box" id="combo-DEFAULT_MODEL">
-                            <input type="text" id="set-DEFAULT_MODEL" class="combo-input" placeholder="搜索或输入模型名..." autocomplete="off">
-                            <div class="combo-dropdown" id="dropdown-DEFAULT_MODEL"></div>
-                        </div>
-                        <small class="form-hint"><span id="model-count-hint"></span> <a href="#" onclick="loadModelList();return false;" style="color:var(--primary);">刷新列表</a></small>
-                    </div>
                 </div>
 
                 <!-- 记忆系统 -->
@@ -558,7 +484,7 @@
                     <div class="settings-field">
                         <label>记忆模型 API Key (MEMORY_API_KEY)</label>
                         <input type="text" id="set-MEMORY_API_KEY" class="input" placeholder="sk-...">
-                        <small class="form-hint" id="set-MEMORY_API_KEY-hint">不设则使用主 API Key，适用于中转站不同模型需要不同 Key 的场景</small>
+                        <small class="form-hint" id="set-MEMORY_API_KEY-hint">仅供独立记忆提取任务；不会回退到 Model Profile 的供应商密钥</small>
                     </div>
                     <div class="settings-field">
                         <label>最大注入记忆数 (MAX_MEMORIES_INJECT)</label>
@@ -572,47 +498,6 @@
                         <label>提取间隔轮数 (MEMORY_EXTRACT_INTERVAL)</label>
                         <input type="number" id="set-MEMORY_EXTRACT_INTERVAL" class="input" min="0" max="20">
                         <small class="form-hint">0=关闭提取，1=每轮，N=每N轮</small>
-                    </div>
-                </div>
-
-                <!-- 缓存分区 -->
-                <div class="card settings-card">
-                    <h3 class="settings-group-title">缓存分区</h3>
-                    <div class="settings-field settings-toggle-row">
-                        <label>启用缓存分区</label>
-                        <label class="toggle"><input type="checkbox" id="set-CACHE_PARTITION_ENABLED"><span class="toggle-slider"></span></label>
-                    </div>
-                    <div class="settings-field">
-                        <label>轮转周期 (CACHE_PARTITION_X)</label>
-                        <input type="number" id="set-CACHE_PARTITION_X" class="input" min="5" max="100">
-                    </div>
-                    <div class="settings-field">
-                        <label>触发模式</label>
-                        <select id="set-CACHE_PARTITION_TRIGGER" class="input">
-                            <option value="rounds">按轮次 (rounds)</option>
-                            <option value="time">按时间窗口 (time)</option>
-                        </select>
-                        <small class="form-hint">rounds = B区满X轮触发；time = A区最早消息超过时间窗口触发</small>
-                    </div>
-                    <div class="settings-field" id="field-CACHE_PARTITION_WINDOW">
-                        <label>时间窗口（分钟）</label>
-                        <input type="number" id="set-CACHE_PARTITION_WINDOW" class="input" min="5" max="1440">
-                        <small class="form-hint">仅 time 模式生效，A区最早消息超过此时间后触发轮转</small>
-                    </div>
-                    <div class="settings-field">
-                        <label>缓存TTL (CACHE_TTL)</label>
-                        <select id="set-CACHE_TTL" class="input">
-                            <option value="5m">5分钟（默认，写入1.25x）</option>
-                            <option value="1h">1小时（写入2x，读0.1x，消息间隔常超5分钟更划算）</option>
-                        </select>
-                        <small class="form-hint">上游需支持 Anthropic cache_control ttl（Claude 原生 API / OpenRouter 均支持）</small>
-                    </div>
-                    <div class="settings-field">
-                        <label>摘要模型</label>
-                        <div class="combo-box" id="combo-CACHE_SUMMARY_MODEL">
-                            <input type="text" id="set-CACHE_SUMMARY_MODEL" class="combo-input" placeholder="搜索或输入模型名..." autocomplete="off">
-                            <div class="combo-dropdown" id="dropdown-CACHE_SUMMARY_MODEL"></div>
-                        </div>
                     </div>
                 </div>
 
@@ -665,33 +550,6 @@
                     <div class="settings-field">
                         <label>语义阈值 <span class="slider-val" id="val-MEMORY_SEMANTIC_THRESHOLD"></span></label>
                         <input type="range" id="set-MEMORY_SEMANTIC_THRESHOLD" min="0" max="1" step="0.05" oninput="updateSliderVal('MEMORY_SEMANTIC_THRESHOLD')">
-                    </div>
-                </div>
-
-                <!-- 其他 -->
-                <div class="card settings-card">
-                    <h3 class="settings-group-title">其他</h3>
-                    <div class="settings-field settings-toggle-row">
-                        <label>强制流式传输 (FORCE_STREAM)</label>
-                        <label class="toggle"><input type="checkbox" id="set-FORCE_STREAM"><span class="toggle-slider"></span></label>
-                    </div>
-                    <div class="settings-field">
-                        <label>推理强度 (REASONING_EFFORT)</label>
-                        <select id="set-REASONING_EFFORT" class="input">
-                            <option value="">不设置</option>
-                            <option value="low">low</option>
-                            <option value="medium">medium</option>
-                            <option value="high">high</option>
-                        </select>
-                    </div>
-                </div>
-
-                <!-- System Prompt -->
-                <div class="card settings-card">
-                    <h3 class="settings-group-title">System Prompt</h3>
-                    <div class="settings-field">
-                        <textarea id="set-systemPrompt" class="textarea" rows="12" placeholder="留空则使用 system_prompt.txt 的默认内容"></textarea>
-                        <small class="form-hint" id="prompt-char-count"></small>
                     </div>
                 </div>
 

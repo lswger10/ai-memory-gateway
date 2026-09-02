@@ -220,9 +220,9 @@ def test_group_batch_pipeline_rejects_pairwise_scope_with_third_party_evidence()
 def test_group_extractor_without_key_keeps_queue_retryable():
     import memory_extractor
 
-    with patch.object(memory_extractor, "API_KEY", ""), patch.object(
-        memory_extractor, "MEMORY_API_KEY", ""
-    ):
+    with patch.object(memory_extractor, "MEMORY_API_KEY", ""), patch.object(
+        memory_extractor, "MEMORY_API_BASE_URL", ""
+    ), patch.object(memory_extractor, "MEMORY_MODEL", ""):
         with pytest.raises(memory_extractor.GroupExtractionUnavailable):
             asyncio.run(memory_extractor.extract_group_memories(CLOSED_FACTS))
 

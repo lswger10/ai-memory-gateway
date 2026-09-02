@@ -111,9 +111,6 @@ function switchSection(name) {
     if (name === 'conversations') {
         loadConversationList(1);
     }
-    if (name === 'threads') {
-        loadThreads();
-    }
     if (name === 'models') {
         loadModelProfilesAndUsage();
     }
@@ -127,6 +124,7 @@ function switchSection(name) {
 // ============================================
 let _gatewayModelProfiles = [];
 let _gatewayModelBindings = {};
+let _conversationCachePins = [];
 
 function _modelField(id) {
     return document.getElementById(id);
@@ -222,17 +220,41 @@ function _renderModelUsage(cacheView, observability) {
     }
 }
 
+function _renderConversationCachePins() {
+    const list = _modelField('conversation-cache-pin-list');
+    if (!list) return;
+    if (!_conversationCachePins.length) {
+        list.innerHTML = '<p class="form-hint">尚无 pin。</p>';
+        return;
+    }
+    list.innerHTML = _conversationCachePins.map(pin => {
+        const actors = Object.entries(pin.actors || {}).map(([actor, state]) =>
+            `<div class="form-hint">${escapeHtml(actor)} · ${escapeHtml(state.status)} · ${escapeHtml(state.profile_id || 'unbound')} · ` +
+            `last ${escapeHtml(state.last_keepalive || '—')} · next ${escapeHtml(state.next_keepalive || '—')} · ` +
+            `calls ${state.call_count || 0} · cache read ${state.cache_read_input_tokens ?? '—'}</div>`
+        ).join('');
+        return `<div class="memory-item" style="margin-bottom:10px;">
+            <strong>${escapeHtml(pin.room_id)} · ${escapeHtml(pin.execution_mode)}</strong>
+            <span class="badge">${pin.enabled ? 'pin on' : 'pin off'} · ${escapeHtml(pin.status)}</span>
+            <div class="form-hint">${escapeHtml(pin.conversation_id)}</div>${actors}
+        </div>`;
+    }).join('');
+}
+
 async function loadModelProfilesAndUsage() {
     try {
-        const [profiles, bindings, usage] = await Promise.all([
+        const [profiles, bindings, usage, pins] = await Promise.all([
             fetch('/api/model-profiles').then(r => r.ok ? r.json() : Promise.reject(new Error('Model Profile 管理未启用'))),
             fetch('/api/model-bindings').then(r => r.json()),
-            fetch('/api/model-usage/summary').then(r => r.json())
+            fetch('/api/model-usage/summary').then(r => r.json()),
+            fetch('/api/cache-pins').then(r => r.json())
         ]);
         _gatewayModelProfiles = profiles.profiles || [];
         _gatewayModelBindings = bindings.bindings || {};
         _renderModelProfiles();
         _renderModelUsage(usage.cache_view || [], usage.cache_observability || {});
+        _conversationCachePins = pins.pins || [];
+        _renderConversationCachePins();
     } catch (error) {
         _modelMessage(error.message, true);
     }
@@ -1685,293 +1707,6 @@ function formatConvTime(isoStr) {
 }
 
 // ============================================
-// 对话线管理
-// ============================================
-
-let _threadData = { threads: [], active_session_id: '' };
-let _summaryEditSid = '';
-
-async function loadThreads() {
-    try {
-        const [statusResp, threadsResp] = await Promise.all([
-            fetch('/api/partition/status'),
-            fetch('/api/partition/threads')
-        ]);
-        const status = await statusResp.json();
-        const data = await threadsResp.json();
-        _threadData = data;
-        
-        renderThreadStatus(status);
-        renderThreadList(data.threads);
-        updateCopyFromSelect(data.threads);
-    } catch(e) {
-        document.getElementById('thread-status').textContent = '加载失败: ' + e.message;
-    }
-}
-
-function renderThreadStatus(status) {
-    const el = document.getElementById('thread-status');
-    if (!status.enabled) {
-        el.innerHTML = '<span style="color: var(--danger);">⚠️ 分区缓存未启用（CACHE_PARTITION_ENABLED=false）</span>';
-        return;
-    }
-    
-    el.innerHTML = `
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
-            <div><strong>活跃对话线</strong><br><span style="font-size: 18px; color: var(--primary);">${status.active_session_id || '未设置'}</span></div>
-            <div><strong>轮转周期</strong><br>每 ${status.partition_x} 轮</div>
-            <div><strong>摘要长度</strong><br>${status.summary_length} 字</div>
-            <div><strong>A区起始轮</strong><br>第 ${status.a_start_round} 轮</div>
-        </div>
-    `;
-}
-
-function renderThreadList(threads) {
-    const el = document.getElementById('thread-list');
-    if (!threads || threads.length === 0) {
-        el.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 20px 0;">暂无对话线</div>';
-        return;
-    }
-    
-    let html = '';
-    for (const t of threads) {
-        const isActive = t.is_active;
-        const tokens = t.chat_tokens > 0 ? (t.chat_tokens >= 1000 ? (t.chat_tokens / 1000).toFixed(1) + 'K' : t.chat_tokens) : '0';
-        const summaryPreview = t.summary ? (t.summary.substring(0, 80) + (t.summary.length > 80 ? '...' : '')) : '（无摘要）';
-        const updatedStr = t.updated_at ? formatConvTime(t.updated_at) : '';
-        
-        html += `
-        <div style="border: 1px solid ${isActive ? 'var(--primary)' : 'var(--border)'}; border-radius: 8px; padding: 14px; margin-bottom: 8px; ${isActive ? 'background: var(--bg-card); box-shadow: 0 0 0 1px var(--primary);' : ''}">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <span style="font-weight: 600; font-size: 15px;">${t.session_id}</span>
-                    ${isActive ? '<span style="background: var(--primary); color: white; font-size: 11px; padding: 2px 8px; border-radius: 10px;">活跃</span>' : ''}
-                </div>
-                <div style="display: flex; gap: 6px;">
-                    <button class="btn btn-sm" onclick="renameThread('${t.session_id}')">改名</button>
-                    <button class="btn btn-sm" onclick="openSummaryModal('${t.session_id}')">摘要</button>
-                    ${!isActive ? `<button class="btn btn-sm btn-primary" onclick="switchThread('${t.session_id}')">切换到此</button>` : ''}
-                    ${!isActive ? `<button class="btn btn-sm" onclick="deleteThread('${t.session_id}', ${t.message_count || 0})" style="color: var(--error);">删除</button>` : ''}
-                </div>
-            </div>
-            <div style="color: var(--text-muted); font-size: 13px; line-height: 1.5;">
-                <div>${summaryPreview}</div>
-                <div style="margin-top: 6px; display: flex; gap: 16px;">
-                    <span>${t.message_count} 条消息</span>
-                    <span>${tokens}</span>
-                    <span>摘要 ${t.summary_length} 字</span>
-                    ${updatedStr ? `<span>更新于 ${updatedStr}</span>` : ''}
-                </div>
-            </div>
-        </div>`;
-    }
-    
-    el.innerHTML = html;
-}
-
-function updateCopyFromSelect(threads) {
-    const sel = document.getElementById('new-thread-copy-from');
-    // 保留第一个option
-    sel.innerHTML = '<option value="">不继承，从零开始</option>';
-    for (const t of threads) {
-        if (t.summary_length > 0) {
-            sel.innerHTML += `<option value="${t.session_id}">${t.session_id} (${t.summary_length}字)</option>`;
-        }
-    }
-}
-
-async function createThread() {
-    const newId = document.getElementById('new-thread-id').value.trim();
-    const copyFrom = document.getElementById('new-thread-copy-from').value;
-    const msgEl = document.getElementById('thread-create-msg');
-    
-    if (!newId) {
-        msgEl.innerHTML = '<div style="color: var(--danger);">请输入对话线ID</div>';
-        return;
-    }
-    
-    try {
-        const resp = await fetch('/api/partition/thread', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: newId, copy_summary_from: copyFrom })
-        });
-        const data = await resp.json();
-        if (data.error) {
-            msgEl.innerHTML = `<div style="color: var(--danger);">${data.error}</div>`;
-            return;
-        }
-        
-        const switchResp = await fetch('/api/partition/switch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: newId })
-        });
-        const switchData = await switchResp.json();
-        if (switchData.error) {
-            msgEl.innerHTML = `<div style="color: var(--danger);">创建成功，但切换失败: ${switchData.error}</div>`;
-            loadThreads();
-            return;
-        }
-
-        msgEl.innerHTML = `<div style="color: var(--success);">✅ 创建并切换成功${data.summary_length > 0 ? '（继承了' + data.summary_length + '字摘要）' : ''}</div>`;
-        document.getElementById('new-thread-id').value = '';
-        loadThreads();
-    } catch(e) {
-        msgEl.innerHTML = `<div style="color: var(--danger);">请求失败: ${e.message}</div>`;
-    }
-}
-
-async function renameThread(oldId) {
-    const newId = prompt(`请输入新的对话线ID（当前: ${oldId}）:`, oldId);
-    if (!newId || newId.trim() === '' || newId.trim() === oldId) return;
-    try {
-        const resp = await fetch('/api/partition/thread/rename', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ old_id: oldId, new_id: newId.trim() })
-        });
-        const data = await resp.json();
-        if (data.error) {
-            alert('改名失败: ' + data.error);
-            return;
-        }
-        loadThreads();
-    } catch(e) {
-        alert('请求失败: ' + e.message);
-    }
-}
-
-async function switchThread(sessionId) {
-    if (!confirm(`确定切换到对话线「${sessionId}」吗？\n\n切换后所有平台的新消息将存入此对话线。`)) return;
-    
-    try {
-        const resp = await fetch('/api/partition/switch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: sessionId })
-        });
-        const data = await resp.json();
-        if (data.error) {
-            alert('切换失败: ' + data.error);
-            return;
-        }
-        loadThreads();
-    } catch(e) {
-        alert('请求失败: ' + e.message);
-    }
-}
-
-async function deleteThread(sessionId, messageCount) {
-    let msg;
-    if (messageCount > 0) {
-        msg = `⚠️ 对话线「${sessionId}」包含 ${messageCount} 条消息。\n\n删除后对话线配置和摘要将被移除，消息本身不受影响但会失去对话线归属。\n\n确定删除？`;
-    } else {
-        msg = `确定删除对话线「${sessionId}」吗？\n\n这只会删除对话线配置和摘要。`;
-    }
-    if (!confirm(msg)) return;
-    
-    try {
-        const resp = await fetch('/api/partition/thread/' + encodeURIComponent(sessionId), { method: 'DELETE' });
-        const data = await resp.json();
-        if (data.error) {
-            alert('删除失败: ' + data.error);
-            return;
-        }
-        loadThreads();
-    } catch(e) {
-        alert('请求失败: ' + e.message);
-    }
-}
-
-async function openSummaryModal(sessionId) {
-    _summaryEditSid = sessionId;
-    document.getElementById('summary-modal-sid').textContent = sessionId;
-    
-    // 获取完整摘要
-    try {
-        const resp = await fetch('/api/partition/status');
-        const status = await resp.json();
-        
-        // 如果是活跃session就直接用status的摘要，否则单独获取
-        let summary = '';
-        if (sessionId === status.active_session_id) {
-            summary = status.summary || '';
-        } else {
-            // 找对应thread的摘要
-            const thread = _threadData.threads.find(t => t.session_id === sessionId);
-            if (thread) summary = thread.summary || '';
-        }
-        
-        document.getElementById('summary-editor').value = summary;
-        updateSummaryCharCount();
-        document.getElementById('summaryModal').style.display = 'flex';
-    } catch(e) {
-        alert('获取摘要失败: ' + e.message);
-    }
-}
-
-function closeSummaryModal() {
-    document.getElementById('summaryModal').style.display = 'none';
-    _summaryEditSid = '';
-}
-
-function updateSummaryCharCount() {
-    const text = document.getElementById('summary-editor').value;
-    document.getElementById('summary-char-count').textContent = `${text.length} 字`;
-}
-
-// 绑定输入事件
-document.addEventListener('DOMContentLoaded', () => {
-    const editor = document.getElementById('summary-editor');
-    if (editor) editor.addEventListener('input', updateSummaryCharCount);
-});
-
-async function saveSummary() {
-    const summary = document.getElementById('summary-editor').value;
-    
-    try {
-        const resp = await fetch('/api/partition/summary', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: _summaryEditSid, summary: summary })
-        });
-        const data = await resp.json();
-        if (data.error) {
-            alert('保存失败: ' + data.error);
-            return;
-        }
-        
-        closeSummaryModal();
-        loadThreads();
-    } catch(e) {
-        alert('请求失败: ' + e.message);
-    }
-}
-
-async function clearSummary() {
-    if (!confirm(`确定清空「${_summaryEditSid}」的摘要吗？此操作不可撤销。`)) return;
-    
-    try {
-        const resp = await fetch('/api/partition/summary', {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: _summaryEditSid })
-        });
-        const data = await resp.json();
-        if (data.error) {
-            alert('清空失败: ' + data.error);
-            return;
-        }
-        
-        closeSummaryModal();
-        loadThreads();
-    } catch(e) {
-        alert('请求失败: ' + e.message);
-    }
-}
-
-// ============================================
 // 记忆向量补算
 // ============================================
 let _backfillPollTimer = null;
@@ -2063,31 +1798,20 @@ function updateBackfillProgress(done, total) {
 // ============================================
 
 let _settingsLoaded = false;
-let _modelList = [];
-
 // 所有需要读写的字段 key（开源版：EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
 const _SETTINGS_FIELDS = {
-    str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_KEY', 'MEMORY_MODEL',
-          'CACHE_SUMMARY_MODEL', 'CACHE_TTL', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT'],
-    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
+    str: ['MEMORY_API_KEY', 'MEMORY_MODEL', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL'],
+    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
-    bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
+    bool: ['MEMORY_ENABLED', 'MEMORY_VECTOR_ENABLED'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
             'MEMORY_HW_RECENCY', 'MEMORY_SEMANTIC_THRESHOLD'],
-    text: ['systemPrompt'],
+    text: [],
 };
-
-const _MODEL_COMBOS = ['DEFAULT_MODEL', 'MEMORY_MODEL', 'CACHE_SUMMARY_MODEL'];
-
-// 触发模式联动：time模式才显示时间窗口字段
-function _togglePartitionWindow(trigger) {
-    const el = document.getElementById('field-CACHE_PARTITION_WINDOW');
-    if (el) el.style.display = trigger === 'time' ? '' : 'none';
-}
 
 async function loadSettings() {
     try {
-        const resp = await fetch('/api/settings');
+        const resp = await fetch('/api/memory-settings');
         const data = await resp.json();
         if (data.error) { showSettingsMsg('error', '加载失败: ' + data.error); return; }
         const s = data.settings;
@@ -2098,7 +1822,7 @@ async function loadSettings() {
             if (el) el.value = s[k] || '';
         });
         // 打码字段提示
-        ['API_KEY', 'MEMORY_API_KEY', 'EMBEDDING_API_KEY'].forEach(k => {
+        ['MEMORY_API_KEY', 'EMBEDDING_API_KEY'].forEach(k => {
             const hint = document.getElementById('set-' + k + '-hint');
             if (hint && s[k]) hint.textContent = '当前: ' + s[k];
         });
@@ -2122,26 +1846,6 @@ async function loadSettings() {
             const el = document.getElementById('set-' + k);
             if (el) { el.value = s[k]; updateSliderVal(k); }
         });
-        // 长文本
-        const promptEl = document.getElementById('set-systemPrompt');
-        if (promptEl) {
-            promptEl.value = s.systemPrompt || '';
-            updatePromptCount();
-        }
-        // REASONING_EFFORT 下拉
-        const reEl = document.getElementById('set-REASONING_EFFORT');
-        if (reEl) reEl.value = s.REASONING_EFFORT || '';
-
-        // CACHE_PARTITION_TRIGGER 下拉 + 联动时间窗口字段
-        const triggerEl = document.getElementById('set-CACHE_PARTITION_TRIGGER');
-        if (triggerEl) {
-            triggerEl.value = s.CACHE_PARTITION_TRIGGER || 'rounds';
-            _togglePartitionWindow(triggerEl.value);
-            triggerEl.onchange = () => _togglePartitionWindow(triggerEl.value);
-        }
-
-        // 加载模型列表（首次）
-        if (!_settingsLoaded) loadModelList();
         _settingsLoaded = true;
     } catch (e) {
         showSettingsMsg('error', '加载设置失败: ' + e.message);
@@ -2180,12 +1884,8 @@ async function saveSettings() {
         const el = document.getElementById('set-' + k);
         if (el) payload[k] = parseFloat(el.value) || 0;
     });
-    // 长文本
-    const promptEl = document.getElementById('set-systemPrompt');
-    if (promptEl) payload.systemPrompt = promptEl.value;
-
     try {
-        const resp = await fetch('/api/settings', {
+        const resp = await fetch('/api/memory-settings', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -2206,99 +1906,11 @@ async function saveSettings() {
     }
 }
 
-async function loadModelList() {
-    const hint = document.getElementById('model-count-hint');
-    if (hint) hint.textContent = '加载模型列表...';
-    try {
-        const resp = await fetch('/api/models');
-        const data = await resp.json();
-        _modelList = data.models || [];
-
-        _MODEL_COMBOS.forEach(fieldName => {
-            renderComboDropdown(fieldName, _modelList);
-        });
-
-        if (hint) {
-            hint.textContent = _modelList.length > 0
-                ? `共 ${_modelList.length} 个可用模型 (${data.provider || ''})`
-                : '无法获取模型列表，请手动输入';
-        }
-    } catch (e) {
-        if (hint) hint.textContent = '模型列表加载失败';
-    }
-}
-
-function renderComboDropdown(fieldName, models) {
-    const dropdown = document.getElementById('dropdown-' + fieldName);
-    if (!dropdown) return;
-    dropdown.innerHTML = '';
-    models.forEach(m => {
-        const div = document.createElement('div');
-        div.className = 'combo-option';
-        div.textContent = m.name || m.id;
-        div.dataset.value = m.id;
-        div.addEventListener('click', () => {
-            document.getElementById('set-' + fieldName).value = m.id;
-            dropdown.classList.remove('open');
-        });
-        dropdown.appendChild(div);
-    });
-}
-
-function filterCombo(fieldName) {
-    const input = document.getElementById('set-' + fieldName);
-    const dropdown = document.getElementById('dropdown-' + fieldName);
-    if (!input || !dropdown) return;
-    const q = input.value.toLowerCase();
-    let visible = 0;
-    dropdown.querySelectorAll('.combo-option').forEach(opt => {
-        const match = !q || opt.textContent.toLowerCase().includes(q) || (opt.dataset.value || '').toLowerCase().includes(q);
-        opt.style.display = match ? '' : 'none';
-        if (match) visible++;
-    });
-    if (visible > 0 && q) dropdown.classList.add('open');
-}
-
-// 初始化 combo-box 交互
-document.addEventListener('DOMContentLoaded', () => {
-    _MODEL_COMBOS.forEach(fieldName => {
-        const input = document.getElementById('set-' + fieldName);
-        const dropdown = document.getElementById('dropdown-' + fieldName);
-        if (!input || !dropdown) return;
-
-        input.addEventListener('focus', () => { dropdown.classList.add('open'); });
-        input.addEventListener('input', () => { filterCombo(fieldName); });
-    });
-
-    // 点击外部关闭所有 combo
-    document.addEventListener('click', (e) => {
-        _MODEL_COMBOS.forEach(fieldName => {
-            const box = document.getElementById('combo-' + fieldName);
-            const dropdown = document.getElementById('dropdown-' + fieldName);
-            if (box && dropdown && !box.contains(e.target)) {
-                dropdown.classList.remove('open');
-            }
-        });
-    });
-});
-
 function updateSliderVal(key) {
     const el = document.getElementById('set-' + key);
     const span = document.getElementById('val-' + key);
     if (el && span) span.textContent = parseFloat(el.value).toFixed(2);
 }
-
-function updatePromptCount() {
-    const el = document.getElementById('set-systemPrompt');
-    const hint = document.getElementById('prompt-char-count');
-    if (el && hint) hint.textContent = el.value.length + ' 字';
-}
-
-// 绑定 prompt 字数实时更新
-document.addEventListener('DOMContentLoaded', () => {
-    const p = document.getElementById('set-systemPrompt');
-    if (p) p.addEventListener('input', updatePromptCount);
-});
 
 function showSettingsMsg(type, text) {
     const el = document.getElementById('settings-msg');

@@ -54,6 +54,15 @@ class _GroupContext:
             "tool_schema_hash": "tools.v1",
         }
 
+    def build_stable_execution_components(self, actor_id, room_id):
+        return {
+            "static_system": ("runtime", f"actor:{actor_id}", f"room:{room_id}"),
+            "actor_prompt_version": "actor.v1",
+            "runtime_kernel_version": "runtime.v1",
+            "room_policy_version": "room.v1",
+            "tool_schema_hash": "tools.v1",
+        }
+
 
 class _BedroomRelay:
     def __init__(self):
@@ -84,6 +93,15 @@ class _BedroomContext:
         return {
             "static_system": ("runtime", "actor", "room"),
             "dynamic_tail": ("current",),
+            "actor_prompt_version": "actor.v1",
+            "runtime_kernel_version": "runtime.v1",
+            "room_policy_version": "bedroom.v1",
+            "tool_schema_hash": "tools.v1",
+        }
+
+    def build_stable_execution_components(self, actor_id, room_id):
+        return {
+            "static_system": ("runtime", f"actor:{actor_id}", f"room:{room_id}"),
             "actor_prompt_version": "actor.v1",
             "runtime_kernel_version": "runtime.v1",
             "room_policy_version": "bedroom.v1",
@@ -313,3 +331,36 @@ async def test_bedroom_build_uses_session_partition_and_prior_accepted_turns():
     assert '"event_id":1' in "".join(bundle.stable_history)
     assert '"event_id":2' not in "".join(bundle.stable_history)
     assert await store.count_facts("bedroom:bedroom-1") == 2
+
+
+@pytest.mark.anyio
+async def test_cache_keepalive_uses_all_persisted_facts_and_no_dynamic_context_pack():
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+
+    store = InMemoryConversationPartitionStore()
+    await store.append_accepted_facts(tuple(
+        ConversationFact.from_relay_event(_event(i)) for i in (1, 2)
+    ))
+    context = _GroupContext()
+    builder = GatewayExecutionContextBuilder(
+        group_context=context,
+        bedroom_context=_BedroomContext(),
+        conversation_store=store,
+    )
+
+    bundle = await builder.build_cache_keepalive(
+        actor_id="jiao",
+        room_id="room_weiwei_jiao",
+        conversation_id="conversation-1",
+        execution_mode="private",
+        bedroom_session_id=None,
+        cache_conversation_id="conversation-1",
+        profile=_profile(),
+    )
+
+    assert '"event_id":1' in "".join(bundle.stable_history)
+    assert '"event_id":2' in "".join(bundle.stable_history)
+    assert bundle.dynamic_tail == ("Cache continuity maintenance request.",)
+    assert bundle.static_system == (
+        "runtime", "actor:jiao", "room:room_weiwei_jiao"
+    )

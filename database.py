@@ -323,6 +323,35 @@ CREATE TABLE IF NOT EXISTS model_cache_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS conversation_cache_pins (
+    pin_id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('private','group','bedroom')),
+    bedroom_session_id TEXT,
+    bedroom_actor_id TEXT CHECK (bedroom_actor_id IS NULL OR bedroom_actor_id IN ('jiao','laoke')),
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS conversation_cache_pin_actor_state (
+    pin_id TEXT NOT NULL REFERENCES conversation_cache_pins(pin_id) ON DELETE CASCADE,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    status TEXT NOT NULL CHECK (status IN ('pending','active','paused')),
+    profile_id TEXT,
+    last_keepalive_at TIMESTAMPTZ,
+    next_keepalive_at TIMESTAMPTZ,
+    call_count BIGINT NOT NULL DEFAULT 0,
+    cache_read_input_tokens BIGINT,
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (pin_id, actor_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_cache_pins_enabled
+    ON conversation_cache_pins(enabled, updated_at);
+
 CREATE TABLE IF NOT EXISTS model_attachment_descriptions (
     attachment_identity TEXT NOT NULL,
     description_version TEXT NOT NULL,
