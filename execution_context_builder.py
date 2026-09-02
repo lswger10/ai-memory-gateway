@@ -187,11 +187,28 @@ class GatewayExecutionContextBuilder:
             after_event_id=max(0, request.current_event_id - 1),
             through_event_id=request.current_event_id,
         )
-        current_media_references = (
-            current_facts[-1].attachments
+        current_fact = (
+            current_facts[-1]
             if current_facts and current_facts[-1].source_event_id == request.current_event_id
-            else ()
+            else None
         )
+        generation_facts = (current_fact,) if current_fact is not None else ()
+        if current_fact is not None and current_fact.burst_id:
+            generation_facts = tuple(
+                fact
+                for fact in await self.conversation_store.list_facts(
+                    partition_id, through_event_id=request.current_event_id
+                )
+                if fact.burst_id == current_fact.burst_id
+            )
+        current_media_references = []
+        seen_attachment_ids: set[str] = set()
+        for fact in generation_facts:
+            for reference in fact.attachments:
+                attachment_id = reference["attachment_id"]
+                if attachment_id not in seen_attachment_ids:
+                    seen_attachment_ids.add(attachment_id)
+                    current_media_references.append(reference)
         return ContextBundle(
             static_system=components["static_system"],
             stable_summary=state.summary,
@@ -205,5 +222,5 @@ class GatewayExecutionContextBuilder:
             stable_prefix_hash=stable_prefix_hash,
             summary_version=state.state_revision,
             compressed_up_to_event_id=state.compressed_up_to_event_id,
-            current_media_references=current_media_references,
+            current_media_references=tuple(current_media_references),
         )

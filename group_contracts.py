@@ -126,7 +126,19 @@ def _validate_group_event(value: Any) -> None:
         "actor_id", "role", "event_type", "content", "reply_to_event_id", "mentions",
         "created_at", "request_id", "visibility", "provenance",
     }
-    event = _exact_object(value, required, "group event")
+    if not isinstance(value, dict):
+        raise ContractError("group event must be an object")
+    version = value.get("contract_version")
+    if version == "group-room.v1.1":
+        from group_contracts_v11 import validate_room_event
+
+        validate_room_event(value)
+        required = {*required, "message_kind", "attachments"}
+    elif version != CONTRACT_VERSION:
+        raise ContractError("contract_version mismatch")
+    if set(value) != required:
+        raise ContractError("group event has non-canonical fields")
+    event = value
     if event["room_id"] not in ROOM_IDS or event["visibility"] != "room":
         raise ContractError("invalid event room or visibility")
     _positive(event["event_id"], "event_id")

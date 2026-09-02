@@ -92,7 +92,7 @@ async def prepare_media_for_profile(
 
 
 def _fallback_text(reference: dict[str, Any]) -> str:
-    category = reference["category"]
+    category = "sticker" if reference.get("purpose") == "sticker" else reference["category"]
     name = reference["name"]
     detail = reference.get("derived_text") or reference.get("semantic_label")
     suffix = f" {detail}" if detail else " (no extracted description)"
@@ -108,6 +108,10 @@ def render_media_tail(
         reference = item.reference
         category = reference["category"]
         modality = "document" if category in {"text", "document", "file"} else category
+        semantic_emitted = False
+        if reference.get("purpose") == "sticker" and reference.get("semantic_label"):
+            parts.append({"kind": "text", "text": _fallback_text(reference)})
+            semantic_emitted = True
         if item.data is not None and modality in profile.capabilities.input_modalities:
             if modality == "image":
                 parts.append(
@@ -128,5 +132,6 @@ def render_media_tail(
                     }
                 )
                 continue
-        parts.append({"kind": "text", "text": _fallback_text(reference)})
+        if not semantic_emitted:
+            parts.append({"kind": "text", "text": _fallback_text(reference)})
     return tuple(parts)

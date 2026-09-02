@@ -128,3 +128,30 @@ def test_unverified_modality_uses_truthful_text_fallback_without_fetch_guessing(
     assert render_media_tail(profile, (prepared,)) == (
         {"kind": "text", "text": "[image: photo.png] 一张稳定描述的海边照片"},
     )
+
+
+def test_visual_sticker_preserves_semantic_label_alongside_image():
+    profile = media_enabled(
+        _profile(
+            "openai_chat_completions",
+            "openai_stable_prefix_v1",
+            ttl=None,
+            cache_ttls=[],
+        )
+    )
+    prepared = PreparedMedia(
+        {
+            **REFERENCE,
+            "purpose": "sticker",
+            "semantic_label": "老克表情包",
+        },
+        b"\x89PNG\r\n\x1a\nbody",
+    )
+
+    parts = render_media_tail(profile, (prepared,))
+
+    assert parts[0] == {
+        "kind": "text",
+        "text": "[sticker: photo.png] 老克表情包",
+    }
+    assert parts[1]["kind"] == "image"
