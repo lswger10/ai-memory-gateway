@@ -68,6 +68,7 @@ from bedroom_memory import (
 from model_execution import GatewayModelExecutionService
 from execution_context_builder import GatewayExecutionContextBuilder
 from gateway_provider_runner import GatewayProviderRunner
+from media_materialization import RelayMediaReader
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
 from anchored_history import InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
@@ -626,7 +627,15 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             _model_usage_store = PostgresModelUsageStore(get_pool)
             history_store = PostgresAnchoredHistoryStore(get_pool)
             conversation_store = PostgresConversationPartitionStore(get_pool)
-        _model_provider_runner = GatewayProviderRunner()
+        relay_url = os.environ.get("GROUP_RELAY_BASE_URL", "").strip()
+        relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
+        _model_provider_runner = GatewayProviderRunner(
+            media_reader=(
+                RelayMediaReader(relay_url, relay_key)
+                if relay_url and relay_key
+                else None
+            )
+        )
         _model_execution_service = GatewayModelExecutionService(
             profiles=_model_profile_store,
             context_builder=GatewayExecutionContextBuilder(

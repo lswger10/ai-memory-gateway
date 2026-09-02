@@ -81,6 +81,75 @@ def _text(segment: PromptSegment) -> str:
     )
 
 
+def _anthropic_media(parts: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    rendered = []
+    for part in parts:
+        if part["kind"] == "text":
+            rendered.append({"type": "text", "text": part["text"]})
+        elif part["kind"] in {"image", "document"}:
+            rendered.append(
+                {
+                    "type": part["kind"],
+                    "source": {
+                        "type": "base64",
+                        "media_type": part["media_type"],
+                        "data": part["data"],
+                    },
+                }
+            )
+    return rendered
+
+
+def _openai_chat_media(parts: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    rendered = []
+    for part in parts:
+        if part["kind"] == "text":
+            rendered.append({"type": "text", "text": part["text"]})
+        elif part["kind"] == "image":
+            rendered.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{part['media_type']};base64,{part['data']}"
+                    },
+                }
+            )
+        elif part["kind"] == "document":
+            rendered.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": part["name"],
+                        "file_data": f"data:{part['media_type']};base64,{part['data']}",
+                    },
+                }
+            )
+    return rendered
+
+
+def _openai_responses_media(parts: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    rendered = []
+    for part in parts:
+        if part["kind"] == "text":
+            rendered.append({"type": "input_text", "text": part["text"]})
+        elif part["kind"] == "image":
+            rendered.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{part['media_type']};base64,{part['data']}",
+                }
+            )
+        elif part["kind"] == "document":
+            rendered.append(
+                {
+                    "type": "input_file",
+                    "filename": part["name"],
+                    "file_data": f"data:{part['media_type']};base64,{part['data']}",
+                }
+            )
+    return rendered
+
+
 class AnthropicMessagesAdapter:
     protocol = "anthropic_messages"
 
@@ -91,6 +160,7 @@ class AnthropicMessagesAdapter:
         layout: AnthropicPromptLayout,
         max_output_tokens: int,
         apply_cache_control: bool = True,
+        media_parts: tuple[dict[str, Any], ...] = (),
     ) -> RenderedProviderRequest:
         if profile.protocol not in {"anthropic_messages", "anthropic_messages_compatible"}:
             raise ProviderAdapterError("Profile protocol is not Anthropic Messages")
@@ -135,6 +205,10 @@ class AnthropicMessagesAdapter:
                     ],
                 }
             )
+        if media_parts:
+            if not messages or not layout.dynamic_messages:
+                messages.append({"role": "user", "content": []})
+            messages[-1]["content"].extend(_anthropic_media(media_parts))
         body: dict[str, Any] = {
             "model": profile.model,
             "system": system,
@@ -169,6 +243,7 @@ class OpenAIResponsesAdapter:
         input_items: tuple[dict[str, Any], ...],
         prompt_cache_key: str | None,
         max_output_tokens: int,
+        media_parts: tuple[dict[str, Any], ...] = (),
     ) -> RenderedProviderRequest:
         if profile.protocol != self.protocol:
             raise ProviderAdapterError("Profile protocol is not OpenAI Responses")
@@ -180,6 +255,12 @@ class OpenAIResponsesAdapter:
             "stream": True,
             "store": False,
         }
+        if media_parts:
+            if not body["input"]:
+                body["input"].append({"role": "user", "content": []})
+            body["input"][-1]["content"].extend(
+                _openai_responses_media(media_parts)
+            )
         if prompt_cache_key is not None:
             if profile.cache_strategy != "openai_stable_prefix_v1":
                 raise ProviderAdapterError("prompt_cache_key requires OpenAI cache strategy")
@@ -207,6 +288,7 @@ class OpenAIChatCompletionsAdapter:
         messages: tuple[dict[str, Any], ...],
         prompt_cache_key: str | None,
         max_output_tokens: int,
+        media_parts: tuple[dict[str, Any], ...] = (),
     ) -> RenderedProviderRequest:
         if profile.protocol != self.protocol:
             raise ProviderAdapterError("Profile protocol is not Chat Completions")
@@ -220,6 +302,15 @@ class OpenAIChatCompletionsAdapter:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if media_parts:
+            if len(body["messages"]) == 1:
+                body["messages"].append({"role": "user", "content": []})
+            target = body["messages"][-1]
+            if isinstance(target["content"], str):
+                target["content"] = [
+                    {"type": "text", "text": target["content"]}
+                ]
+            target["content"].extend(_openai_chat_media(media_parts))
         if prompt_cache_key is not None:
             if profile.cache_strategy != "openai_stable_prefix_v1":
                 raise ProviderAdapterError("prompt_cache_key requires OpenAI cache strategy")

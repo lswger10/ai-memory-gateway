@@ -35,6 +35,7 @@ _CAPABILITY_FIELDS = {
     "cache_strategies",
     "cache_ttls",
     "usage_fields",
+    "input_modalities",
 }
 _TEST_STATUSES = {"unverified", "passed", "failed", "unsupported"}
 _CACHE_STRATEGIES = {
@@ -80,6 +81,7 @@ class ProfileCapabilities:
     cache_strategies: tuple[str, ...]
     cache_ttls: tuple[str, ...]
     usage_fields: tuple[str, ...]
+    input_modalities: tuple[str, ...]
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ProfileCapabilities":
@@ -110,6 +112,15 @@ class ProfileCapabilities:
         )
         if any(value not in {"5m", "1h"} for value in cache_ttls):
             raise ProfileContractError("cache TTL capability must be 5m or 1h")
+        input_modalities = _string_tuple(
+            payload.get("input_modalities", ["text"]),
+            "capabilities.input_modalities",
+        )
+        if "text" not in input_modalities or any(
+            value not in {"text", "image", "document", "audio"}
+            for value in input_modalities
+        ):
+            raise ProfileContractError("input modalities require text and known values")
         return cls(
             **booleans,
             cache_strategies=cache_strategies,
@@ -117,11 +128,14 @@ class ProfileCapabilities:
             usage_fields=_string_tuple(
                 payload.get("usage_fields"), "capabilities.usage_fields"
             ),
+            input_modalities=input_modalities,
         )
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        for field in ("cache_strategies", "cache_ttls", "usage_fields"):
+        for field in (
+            "cache_strategies", "cache_ttls", "usage_fields", "input_modalities"
+        ):
             value[field] = list(value[field])
         return value
 

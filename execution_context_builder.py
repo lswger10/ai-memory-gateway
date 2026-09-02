@@ -182,6 +182,16 @@ class GatewayExecutionContextBuilder:
             stable_summary=state.summary,
             stable_history=stable_history,
         )
+        current_facts = await self.conversation_store.list_facts(
+            partition_id,
+            after_event_id=max(0, request.current_event_id - 1),
+            through_event_id=request.current_event_id,
+        )
+        current_media_references = (
+            current_facts[-1].attachments
+            if current_facts and current_facts[-1].source_event_id == request.current_event_id
+            else ()
+        )
         return ContextBundle(
             static_system=components["static_system"],
             stable_summary=state.summary,
@@ -195,4 +205,5 @@ class GatewayExecutionContextBuilder:
             stable_prefix_hash=stable_prefix_hash,
             summary_version=state.state_revision,
             compressed_up_to_event_id=state.compressed_up_to_event_id,
+            current_media_references=current_media_references,
         )

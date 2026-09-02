@@ -32,6 +32,7 @@ class ContextBundle:
     stable_prefix_hash: str | None = None
     summary_version: int | None = None
     compressed_up_to_event_id: int | None = None
+    current_media_references: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

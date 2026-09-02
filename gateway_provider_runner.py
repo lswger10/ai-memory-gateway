@@ -12,6 +12,11 @@ from cache_strategies import (
 from model_execution import ContextBundle, ProviderChunk, ProviderRunUnavailable
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
 from model_profiles import ModelProfile
+from media_materialization import (
+    RelayMediaReader,
+    prepare_media_for_profile,
+    render_media_tail,
+)
 from provider_adapters import (
     AnthropicMessagesAdapter,
     OpenAIChatCompletionsAdapter,
@@ -36,9 +41,11 @@ class GatewayProviderRunner:
         *,
         transport: PooledHttpTransport | None = None,
         credential_resolver: EnvironmentCredentialResolver | None = None,
+        media_reader: RelayMediaReader | None = None,
     ) -> None:
         self.transport = transport or PooledHttpTransport()
         self.credentials = credential_resolver or EnvironmentCredentialResolver()
+        self.media_reader = media_reader
 
     def _render(
         self,
@@ -47,6 +54,7 @@ class GatewayProviderRunner:
         context: ContextBundle,
         cache_namespace: str,
         max_output_tokens: int | None = None,
+        media_parts: tuple[dict[str, Any], ...] = (),
     ):
         maximum = (
             max_output_tokens
@@ -93,6 +101,7 @@ class GatewayProviderRunner:
                 layout=layout,
                 max_output_tokens=maximum,
                 apply_cache_control=cache_enabled,
+                media_parts=media_parts,
             )
 
         instructions = "\n\n".join(context.static_system)
@@ -120,6 +129,7 @@ class GatewayProviderRunner:
                 input_items=input_items,
                 prompt_cache_key=cache_key,
                 max_output_tokens=maximum,
+                media_parts=media_parts,
             )
         if profile.protocol == "openai_chat_completions":
             return OpenAIChatCompletionsAdapter().render(
@@ -128,6 +138,7 @@ class GatewayProviderRunner:
                 messages=messages,
                 prompt_cache_key=cache_key,
                 max_output_tokens=maximum,
+                media_parts=media_parts,
             )
         raise ProviderRunUnavailable("unsupported provider protocol")
 
@@ -143,12 +154,21 @@ class GatewayProviderRunner:
         try:
             credential = self.credentials.resolve(profile.credential_ref)
             headers = resolve_profile_headers(profile, credential)
+            media_parts: tuple[dict[str, Any], ...] = ()
+            if context.current_media_references:
+                if self.media_reader is None:
+                    raise ProviderRunUnavailable("Relay media reader is not configured")
+                prepared = await prepare_media_for_profile(
+                    profile, context.current_media_references, self.media_reader
+                )
+                media_parts = render_media_tail(profile, prepared)
             rendered = self._render(
                 profile,
                 request,
                 context,
                 cache_namespace,
                 max_output_tokens=max_output_tokens,
+                media_parts=media_parts,
             )
             stream_context = await self.transport.open_stream(
                 pool_key=profile.route_id,
