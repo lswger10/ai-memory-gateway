@@ -1,0 +1,31 @@
+{
+  "contract_version": "group-room.v1.1",
+  "event_id": 303,
+  "room_id": "room_weiwei_laoke",
+  "conversation_id": "private-laoke-conversation",
+  "burst_id": "burst-media-303",
+  "actor_id": "weiwei",
+  "role": "human",
+  "event_type": "human_message",
+  "message_kind": "voice_message",
+  "content": "老克，听见了吗？",
+  "attachments": [
+    {
+      "attachment_id": "upload-voice-1",
+      "name": "voice.webm",
+      "media_type": "audio/webm",
+      "size": 91234,
+      "category": "audio",
+      "purpose": "voice_message",
+      "source": {"type": "relay", "path": "/uploads/upload-voice-1-voice.webm"},
+      "derived_text": "老克，听见了吗？",
+      "semantic_label": null
+    }
+  ],
+  "reply_to_event_id": null,
+  "mentions": ["laoke"],
+  "created_at": "2026-09-01T12:02:00Z",
+  "request_id": "request-media-303",
+  "visibility": "room",
+  "provenance": null
+}

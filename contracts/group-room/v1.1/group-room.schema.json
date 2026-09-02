@@ -1,0 +1,879 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tidal-echo.local/contracts/group-room.v1.1.schema.json",
+  "title": "Tidal Echo Group Room v1.1 media wire contract",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "const": "group-room.v1.1"
+    }
+  },
+  "required": [
+    "contract_version"
+  ],
+  "oneOf": [
+    { "$ref": "#/$defs/group_event" },
+    { "$ref": "#/$defs/factual_group_event_sse" },
+    { "$ref": "#/$defs/factual_group_reaction_sse" },
+    { "$ref": "#/$defs/group_history_response" },
+    { "$ref": "#/$defs/group_trigger" },
+    { "$ref": "#/$defs/group_trigger_ack" },
+    { "$ref": "#/$defs/trigger_admission_request" },
+    { "$ref": "#/$defs/trigger_admission_result" },
+    { "$ref": "#/$defs/ephemeral_draft_request" },
+    { "$ref": "#/$defs/ephemeral_status_request" },
+    { "$ref": "#/$defs/ephemeral_unavailable_request" },
+    { "$ref": "#/$defs/lease_acquire_request" },
+    { "$ref": "#/$defs/lease_renew_request" },
+    { "$ref": "#/$defs/lease_ack" },
+    { "$ref": "#/$defs/burst_close_request" },
+    { "$ref": "#/$defs/burst_close_ack" },
+    { "$ref": "#/$defs/context_facts_request" },
+    { "$ref": "#/$defs/public_context_facts" },
+    { "$ref": "#/$defs/context_pack_request" },
+    { "$ref": "#/$defs/opaque_context_pack" },
+    { "$ref": "#/$defs/group_publication" },
+    { "$ref": "#/$defs/publication_result" },
+    { "$ref": "#/$defs/memory_candidate_request" },
+    { "$ref": "#/$defs/memory_candidate_receipt" },
+    { "$ref": "#/$defs/closed_burst_extraction_request" },
+    { "$ref": "#/$defs/case_set" }
+  ],
+  "$defs": {
+    "version": {
+      "type": "string",
+      "const": "group-room.v1.1"
+    },
+    "room_id": {
+      "enum": [
+        "room_weiwei_jiao",
+        "room_weiwei_laoke",
+        "room_group_home"
+      ]
+    },
+    "actor_id": {
+      "enum": ["weiwei", "jiao", "laoke", "system"]
+    },
+    "agent_actor_id": {
+      "enum": ["jiao", "laoke"]
+    },
+    "close_reason": {
+      "enum": [
+        "budget_exhausted",
+        "all_pass",
+        "reaction_only",
+        "no_available_candidate",
+        "user_preempted",
+        "crash_terminated"
+      ]
+    },
+    "fence_token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "room_id",
+        "conversation_id",
+        "burst_id",
+        "trigger_event_id",
+        "fence_epoch",
+        "lease_epoch",
+        "orchestrator_instance"
+      ],
+      "properties": {
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "trigger_event_id": { "type": "integer", "minimum": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "lease_epoch": { "type": "integer", "minimum": 1 },
+        "orchestrator_instance": { "type": "string", "minLength": 1 }
+      }
+    },
+    "closed_fence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "room_id",
+        "conversation_id",
+        "trigger_event_id",
+        "burst_id",
+        "fence_epoch"
+      ],
+      "properties": {
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "trigger_event_id": { "type": "integer", "minimum": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "provider_family",
+        "protocol",
+        "route_id",
+        "model",
+        "model_snapshot",
+        "adapter_version",
+        "generation_request_id",
+        "fallback_used"
+      ],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "provider_family": { "enum": ["gpt", "claude"] },
+        "protocol": {
+          "enum": [
+            "openai_responses",
+            "openai_chat_completions",
+            "anthropic_messages",
+            "anthropic_messages_compatible"
+          ]
+        },
+        "route_id": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "model_snapshot": { "type": ["string", "null"] },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "fallback_used": { "type": "boolean" }
+      }
+    },
+    "media_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attachment_id",
+        "name",
+        "media_type",
+        "size",
+        "category",
+        "purpose",
+        "source",
+        "derived_text",
+        "semantic_label"
+      ],
+      "properties": {
+        "attachment_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
+        "media_type": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 1 },
+        "category": {
+          "enum": ["text", "document", "image", "audio", "video", "file"]
+        },
+        "purpose": { "enum": ["attachment", "sticker", "voice_message"] },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "path"],
+          "properties": {
+            "type": { "const": "relay" },
+            "path": { "type": "string", "pattern": "^/uploads/[^/\\\\]+$" }
+          }
+        },
+        "derived_text": { "type": ["string", "null"] },
+        "semantic_label": { "type": ["string", "null"], "maxLength": 200 }
+      }
+    },
+    "group_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "role": { "const": "agent" } } },
+          "then": {
+            "properties": {
+              "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+              "event_type": { "const": "agent_final" },
+              "provenance": { "$ref": "#/$defs/provenance" }
+            }
+          },
+          "else": { "properties": { "provenance": { "type": "null" } } }
+        }
+      ],
+      "required": [
+        "contract_version",
+        "event_id",
+        "room_id",
+        "conversation_id",
+        "burst_id",
+        "actor_id",
+        "role",
+        "event_type",
+        "message_kind",
+        "content",
+        "attachments",
+        "reply_to_event_id",
+        "mentions",
+        "created_at",
+        "request_id",
+        "visibility",
+        "provenance"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "event_id": { "type": "integer", "minimum": 1 },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "actor_id": { "$ref": "#/$defs/actor_id" },
+        "role": { "enum": ["human", "agent", "system"] },
+        "event_type": {
+          "enum": ["human_message", "agent_final", "synthetic_trigger"]
+        },
+        "message_kind": {
+          "enum": ["text", "attachment", "image", "sticker", "voice_message"]
+        },
+        "content": { "type": "string" },
+        "attachments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/media_reference" }
+        },
+        "reply_to_event_id": { "type": ["integer", "null"], "minimum": 1 },
+        "mentions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/actor_id" }
+        },
+        "created_at": { "type": "string", "minLength": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "visibility": { "const": "room" },
+        "provenance": {
+          "oneOf": [
+            { "$ref": "#/$defs/provenance" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "reaction_emoji_mutation": {
+      "type": "string",
+      "pattern": "^(?:$|.*\\S.*)$"
+    },
+    "factual_group_event_sse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "contract_version", "event"],
+      "properties": {
+        "type": { "const": "group_event" },
+        "contract_version": { "$ref": "#/$defs/version" },
+        "event": { "$ref": "#/$defs/group_event" }
+      }
+    },
+    "factual_group_reaction_sse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "contract_version",
+        "room_id",
+        "conversation_id",
+        "event_id",
+        "actor_id",
+        "emoji",
+        "request_id"
+      ],
+      "properties": {
+        "type": { "const": "group_reaction" },
+        "contract_version": { "$ref": "#/$defs/version" },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "event_id": { "type": "integer", "minimum": 1 },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "emoji": { "$ref": "#/$defs/reaction_emoji_mutation" },
+        "request_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "reaction_snapshot": {
+      "type": "object",
+      "propertyNames": { "enum": ["jiao", "laoke"] },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "reactions_by_event": {
+      "type": "object",
+      "patternProperties": {
+        "^[1-9][0-9]*$": { "$ref": "#/$defs/reaction_snapshot" }
+      },
+      "additionalProperties": false
+    },
+    "group_history_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "room_id",
+        "conversation_id",
+        "events",
+        "reactions_by_event"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/group_event" }
+        },
+        "reactions_by_event": { "$ref": "#/$defs/reactions_by_event" }
+      }
+    },
+    "group_trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "request_id", "trigger_event_id", "fence"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "request_id": { "type": "string", "minLength": 1 },
+        "trigger_event_id": { "type": "integer", "minimum": 1 },
+        "fence": { "$ref": "#/$defs/fence_token" }
+      }
+    },
+    "group_trigger_ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "accepted", "burst_id", "fence_epoch"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "accepted": { "const": true },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "trigger_admission_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "fence"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "fence": { "$ref": "#/$defs/fence_token" }
+      }
+    },
+    "trigger_admission_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "admission", "close_reason", "fence"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "admission": { "enum": ["active", "closed"] },
+        "close_reason": {
+          "oneOf": [
+            { "$ref": "#/$defs/close_reason" },
+            { "type": "null" }
+          ]
+        },
+        "fence": { "$ref": "#/$defs/fence_token" }
+      }
+    },
+    "ephemeral_draft_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "actor_id",
+        "generation_request_id",
+        "fence",
+        "sequence",
+        "text"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "fence": { "$ref": "#/$defs/fence_token" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string" }
+      }
+    },
+    "ephemeral_status_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "actor_id",
+        "generation_request_id",
+        "fence",
+        "status"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "fence": { "$ref": "#/$defs/fence_token" },
+        "status": { "enum": ["idle", "thinking", "typing"] }
+      }
+    },
+    "ephemeral_unavailable_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "actor_id",
+        "generation_request_id",
+        "fence",
+        "reason_code"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "fence": { "$ref": "#/$defs/fence_token" },
+        "reason_code": { "const": "generation_unavailable" }
+      }
+    },
+    "lease_acquire_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "orchestrator_instance", "ttl_seconds"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "orchestrator_instance": { "type": "string", "minLength": 1 },
+        "ttl_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "lease_renew_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "orchestrator_instance",
+        "lease_epoch",
+        "ttl_seconds"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "orchestrator_instance": { "type": "string", "minLength": 1 },
+        "lease_epoch": { "type": "integer", "minimum": 1 },
+        "ttl_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "lease_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["orchestrator_instance", "lease_epoch", "expires_at"],
+      "properties": {
+        "orchestrator_instance": { "type": "string", "minLength": 1 },
+        "lease_epoch": { "type": "integer", "minimum": 1 },
+        "expires_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "lease_ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "accepted", "lease"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "accepted": { "const": true },
+        "lease": { "$ref": "#/$defs/lease_record" }
+      }
+    },
+    "burst_close_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "fence", "close_reason"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "fence": { "$ref": "#/$defs/fence_token" },
+        "close_reason": { "$ref": "#/$defs/close_reason" }
+      }
+    },
+    "burst_close_ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "accepted",
+        "burst_id",
+        "fence_epoch",
+        "status",
+        "close_reason",
+        "closed_at"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "accepted": { "const": true },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "status": { "const": "closed" },
+        "close_reason": { "$ref": "#/$defs/close_reason" },
+        "closed_at": { "type": "string", "minLength": 1 }
+      }
+    },
+    "context_facts_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "room_id",
+        "conversation_id",
+        "current_event_id",
+        "burst_id",
+        "fence_epoch",
+        "recent_limit",
+        "require_closed"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "current_event_id": { "type": "integer", "minimum": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "recent_limit": { "type": "integer", "minimum": 1 },
+        "require_closed": { "type": "boolean" }
+      }
+    },
+    "public_context_facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "room_id",
+        "conversation_id",
+        "current_event_id",
+        "burst_id",
+        "fence_epoch",
+        "fence_status",
+        "close_reason",
+        "trigger_event",
+        "accepted_burst_public_events",
+        "recent_public_events",
+        "reactions_by_event",
+        "accepted_event_range"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "current_event_id": { "type": "integer", "minimum": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "fence_status": { "enum": ["active", "closed"] },
+        "close_reason": {
+          "oneOf": [
+            { "$ref": "#/$defs/close_reason" },
+            { "type": "null" }
+          ]
+        },
+        "trigger_event": { "$ref": "#/$defs/group_event" },
+        "accepted_burst_public_events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/group_event" }
+        },
+        "recent_public_events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/group_event" }
+        },
+        "reactions_by_event": { "type": "object" },
+        "accepted_event_range": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["first_event_id", "last_event_id"],
+              "properties": {
+                "first_event_id": { "type": "integer", "minimum": 1 },
+                "last_event_id": { "type": "integer", "minimum": 1 }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "context_pack_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "actor_id",
+        "room_id",
+        "conversation_id",
+        "current_event_id",
+        "burst_id",
+        "fence_epoch",
+        "actor_private_stance"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "current_event_id": { "type": "integer", "minimum": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "actor_private_stance": { "type": ["string", "null"] }
+      }
+    },
+    "provider_neutral_message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "enum": ["system", "user", "assistant"] },
+        "content": { "type": "string" }
+      }
+    },
+    "opaque_context_pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "pack_id",
+        "pack_kind",
+        "actor_id",
+        "room_id",
+        "conversation_id",
+        "current_event_id",
+        "burst_id",
+        "fence_epoch",
+        "provider_neutral_messages",
+        "token_budget"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "pack_id": { "type": "string", "minLength": 1 },
+        "pack_kind": { "enum": ["probe", "full"] },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "room_id": { "$ref": "#/$defs/room_id" },
+        "conversation_id": { "type": "string", "minLength": 1 },
+        "current_event_id": { "type": "integer", "minimum": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "provider_neutral_messages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/provider_neutral_message" }
+        },
+        "token_budget": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "reaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_event_id", "emoji"],
+      "properties": {
+        "target_event_id": { "type": "integer", "minimum": 1 },
+        "emoji": { "$ref": "#/$defs/reaction_emoji_mutation" }
+      }
+    },
+    "group_publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "publication_kind": { "const": "reaction" } }
+          },
+          "then": {
+            "properties": {
+              "final_text": { "type": "null" },
+              "reply_to_event_id": { "type": "null" },
+              "reaction": { "$ref": "#/$defs/reaction" },
+              "provenance": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "publication_kind": { "const": "final" } } },
+          "then": {
+            "properties": {
+              "final_text": { "type": "string", "minLength": 1 },
+              "reaction": { "type": "null" },
+              "provenance": { "$ref": "#/$defs/provenance" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "publication_kind": { "const": "react+reply" } }
+          },
+          "then": {
+            "properties": {
+              "final_text": { "type": "string", "minLength": 1 },
+              "reaction": { "$ref": "#/$defs/reaction" },
+              "provenance": { "$ref": "#/$defs/provenance" }
+            }
+          }
+        }
+      ],
+      "required": [
+        "contract_version",
+        "publication_kind",
+        "actor_id",
+        "generation_request_id",
+        "fence",
+        "final_text",
+        "reply_to_event_id",
+        "reaction",
+        "provenance"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "publication_kind": { "enum": ["reaction", "final", "react+reply"] },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "fence": { "$ref": "#/$defs/fence_token" },
+        "final_text": { "type": ["string", "null"] },
+        "reply_to_event_id": { "type": ["integer", "null"], "minimum": 1 },
+        "reaction": {
+          "oneOf": [
+            { "$ref": "#/$defs/reaction" },
+            { "type": "null" }
+          ]
+        },
+        "provenance": {
+          "oneOf": [
+            { "$ref": "#/$defs/provenance" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "publication_reaction_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_event_id", "actor_id", "emoji"],
+      "properties": {
+        "target_event_id": { "type": "integer", "minimum": 1 },
+        "actor_id": { "$ref": "#/$defs/agent_actor_id" },
+        "emoji": { "$ref": "#/$defs/reaction_emoji_mutation" }
+      }
+    },
+    "publication_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "publication_kind": { "const": "final" } } },
+          "then": {
+            "properties": {
+              "event": { "$ref": "#/$defs/group_event" },
+              "reaction": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "publication_kind": { "const": "reaction" } } },
+          "then": {
+            "properties": {
+              "event": { "type": "null" },
+              "reaction": { "$ref": "#/$defs/publication_reaction_result" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "publication_kind": { "const": "react+reply" } } },
+          "then": {
+            "properties": {
+              "event": { "$ref": "#/$defs/group_event" },
+              "reaction": { "$ref": "#/$defs/publication_reaction_result" }
+            }
+          }
+        }
+      ],
+      "required": [
+        "contract_version",
+        "accepted",
+        "publication_kind",
+        "generation_request_id",
+        "burst_id",
+        "fence_epoch",
+        "event",
+        "reaction"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "accepted": { "const": true },
+        "publication_kind": { "enum": ["reaction", "final", "react+reply"] },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "burst_id": { "type": "string", "minLength": 1 },
+        "fence_epoch": { "type": "integer", "minimum": 1 },
+        "event": {
+          "oneOf": [
+            { "$ref": "#/$defs/group_event" },
+            { "type": "null" }
+          ]
+        },
+        "reaction": {
+          "oneOf": [
+            { "$ref": "#/$defs/publication_reaction_result" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "memory_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content",
+        "memory_type",
+        "perspective",
+        "confidence",
+        "evidence_event_ids",
+        "sensitivity_hint"
+      ],
+      "properties": {
+        "content": { "type": "string", "minLength": 1 },
+        "memory_type": { "enum": ["fact", "inference"] },
+        "perspective": { "enum": ["shared", "weiwei", "jiao", "laoke"] },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "evidence_event_ids": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "uniqueItems": true
+        },
+        "sensitivity_hint": { "type": "boolean" }
+      }
+    },
+    "memory_candidate_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "source_event_id",
+        "fence",
+        "generation_request_id",
+        "candidate_index",
+        "candidate"
+      ],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "source_event_id": { "type": "integer", "minimum": 1 },
+        "fence": { "$ref": "#/$defs/fence_token" },
+        "generation_request_id": { "type": "string", "minLength": 1 },
+        "candidate_index": { "const": 0 },
+        "candidate": { "$ref": "#/$defs/memory_candidate" }
+      }
+    },
+    "memory_candidate_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "accepted", "memory_id", "source_event_id"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "accepted": { "const": true },
+        "memory_id": { "type": "string", "minLength": 1 },
+        "source_event_id": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "closed_burst_extraction_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "closed_fence"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "closed_fence": { "$ref": "#/$defs/closed_fence_ref" }
+      }
+    },
+    "case_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "cases"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/version" },
+        "cases": { "type": "array", "minItems": 1 }
+      }
+    }
+  }
+}

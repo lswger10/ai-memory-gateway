@@ -23,6 +23,7 @@ async def test_conversation_partition_schema_is_additive_and_idempotent():
     assert "ALTER TABLE conversations" in sql
     assert "ADD COLUMN IF NOT EXISTS fact_identity" in sql
     assert "ADD COLUMN IF NOT EXISTS request_id" in sql
+    assert "ADD COLUMN IF NOT EXISTS message_kind" in sql
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_fact_identity" in sql
     assert "DROP TABLE" not in sql
     assert "DELETE FROM conversations" not in sql
@@ -67,8 +68,9 @@ class PartitionConnection:
                 "fact_identity": row[6], "fact_hash": row[7],
                 "content": row[8], "request_id": row[9], "created_at": row[10],
                 "source_kind": row[11], "provenance_json": row[12],
-                "attachments_json": row[13], "bedroom_session_id": row[14],
-                "retention_policy": row[15],
+                "attachments_json": row[13], "message_kind": row[14],
+                "bedroom_session_id": row[15],
+                "retention_policy": row[16],
             }
             for row in sorted(values, key=lambda item: item[3])
         ]

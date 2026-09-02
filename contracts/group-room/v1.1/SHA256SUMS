@@ -1,0 +1,5 @@
+2229a920515d08b73d242b51ec03cbeaff9b5ac050ba50fe7dbddc8a40bd56c0  fixtures/group-event-human-image.json
+5a22804de58fa69f1e182303b8ac2656e7d37efb23ced7f91540493a59126609  fixtures/group-event-human-sticker.json
+32a8e9c474c2fd0d088f33e3ddde2d524cd0fa7c1c3b3a735eac2df38ef94076  fixtures/group-event-human-voice.json
+545adc5f5cc0801a0d176e801a2f9a950ba99cc18d796f09f2948f07ead51c0f  fixtures/group-history-media-response.json
+dd692ba696e2e1cee2a2cddd7cb783bb2f6ddc4523f07763b530b9069d9f43ce  group-room.schema.json

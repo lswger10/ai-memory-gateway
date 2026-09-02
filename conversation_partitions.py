@@ -8,6 +8,13 @@ import inspect
 import json
 from typing import Any, Iterable
 
+from group_contracts_v11 import (
+    CONTRACT_VERSION as MEDIA_CONTRACT_VERSION,
+    ContractError as MediaContractError,
+    MediaReference,
+    validate_room_event,
+)
+
 
 class ConversationPartitionError(ValueError):
     pass
@@ -30,7 +37,11 @@ def _bounded_mapping(value: Any, field: str) -> dict[str, Any] | None:
     return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
-def _attachment_references(value: Any) -> tuple[dict[str, Any], ...]:
+def _attachment_references(
+    value: Any,
+    *,
+    contract_version: str | None = None,
+) -> tuple[dict[str, Any], ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
@@ -39,6 +50,11 @@ def _attachment_references(value: Any) -> tuple[dict[str, Any], ...]:
     for item in value:
         if not isinstance(item, dict) or _FORBIDDEN_ATTACHMENT_FIELDS.intersection(item):
             raise ConversationPartitionError("conversation history accepts attachment references only")
+        if contract_version == MEDIA_CONTRACT_VERSION:
+            try:
+                item = MediaReference.from_dict(item).to_dict()
+            except MediaContractError as exc:
+                raise ConversationPartitionError(str(exc)) from exc
         result.append(json.loads(json.dumps(item, ensure_ascii=False, sort_keys=True)))
     return tuple(result)
 
@@ -64,6 +80,7 @@ class ConversationFact:
     event_type: str | None = None
     reply_to_event_id: int | None = None
     mentions: tuple[str, ...] = ()
+    message_kind: str = "text"
 
     def __post_init__(self) -> None:
         strings = (
@@ -84,6 +101,12 @@ class ConversationFact:
     def from_relay_event(cls, event: dict[str, Any]) -> "ConversationFact":
         if not isinstance(event, dict) or event.get("visibility") not in {"room", "public"}:
             raise ConversationPartitionError("Relay event is not an accepted public fact")
+        contract_version = event.get("contract_version")
+        if contract_version == MEDIA_CONTRACT_VERSION:
+            try:
+                validate_room_event(event)
+            except MediaContractError as exc:
+                raise ConversationPartitionError(str(exc)) from exc
         room_id = str(event.get("room_id") or "")
         conversation_id = str(event.get("conversation_id") or "")
         event_id = event.get("event_id")
@@ -102,11 +125,14 @@ class ConversationFact:
             created_at=str(event.get("created_at") or ""),
             source_kind="relay_event",
             provenance=_bounded_mapping(event.get("provenance"), "provenance"),
-            attachments=_attachment_references(event.get("attachments")),
+            attachments=_attachment_references(
+                event.get("attachments"), contract_version=contract_version
+            ),
             burst_id=event.get("burst_id"),
             event_type=event.get("event_type"),
             reply_to_event_id=event.get("reply_to_event_id"),
             mentions=tuple(event.get("mentions") or ()),
+            message_kind=str(event.get("message_kind") or "text"),
         )
 
     @classmethod
@@ -156,6 +182,7 @@ class ConversationFact:
             "event_type": self.event_type,
             "reply_to_event_id": self.reply_to_event_id,
             "mentions": self.mentions,
+            "message_kind": self.message_kind,
         }
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -177,6 +204,7 @@ class ConversationFact:
             "visibility": "room",
             "provenance": self.provenance,
             "attachments": list(self.attachments),
+            "message_kind": self.message_kind,
         }
 
 
@@ -291,14 +319,14 @@ class PostgresConversationPartitionStore:
                             source_event_id, actor_id, event_role,
                             fact_identity, fact_hash, content, request_id,
                             created_at, source_kind, provenance_json,
-                            attachments_json, bedroom_session_id,
+                            attachments_json, message_kind, bedroom_session_id,
                             retention_policy, role, accepted_at, burst_id,
                             event_type, reply_to_event_id, mentions_json
                         ) VALUES (
                             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                            $11::timestamptz,$12,$13::jsonb,$14::jsonb,$15,$16,
+                            $11::timestamptz,$12,$13::jsonb,$14::jsonb,$15,$16,$17,
                             CASE WHEN $6 = 'human' THEN 'user' ELSE 'assistant' END,
-                            NOW(),$17,$18,$19,$20::jsonb
+                            NOW(),$18,$19,$20,$21::jsonb
                         )
                         ON CONFLICT (fact_identity) WHERE fact_identity IS NOT NULL
                         DO UPDATE SET fact_identity = EXCLUDED.fact_identity
@@ -318,6 +346,7 @@ class PostgresConversationPartitionStore:
                         fact.source_kind,
                         json.dumps(fact.provenance, ensure_ascii=False),
                         json.dumps(fact.attachments, ensure_ascii=False),
+                        fact.message_kind,
                         fact.bedroom_session_id,
                         fact.retention_policy,
                         fact.burst_id,
@@ -347,7 +376,7 @@ class PostgresConversationPartitionStore:
                 SELECT session_id, room_id, canonical_conversation_id,
                        source_event_id, actor_id, event_role, fact_identity,
                        fact_hash, content, request_id, created_at, source_kind,
-                       provenance_json, attachments_json, bedroom_session_id,
+                       provenance_json, attachments_json, message_kind, bedroom_session_id,
                        retention_policy, burst_id, event_type,
                        reply_to_event_id, mentions_json
                 FROM conversations
@@ -431,6 +460,7 @@ class PostgresConversationPartitionStore:
             source_kind=row["source_kind"],
             provenance=_json_value(row["provenance_json"], None),
             attachments=tuple(_json_value(row["attachments_json"], [])),
+            message_kind=row.get("message_kind") or "text",
             bedroom_session_id=row["bedroom_session_id"],
             retention_policy=row["retention_policy"],
             burst_id=row.get("burst_id"),
