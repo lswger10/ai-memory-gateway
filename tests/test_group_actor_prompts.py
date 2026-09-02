@@ -122,6 +122,9 @@ class GroupActorPromptTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(field, messages[0]["content"])
         self.assertIn("Your entire response must be raw JSON", messages[0]["content"])
+        self.assertIn("trigger_event_id is not a reply target", messages[0]["content"])
+        self.assertIn("normal continuous reply", messages[0]["content"])
+        self.assertIn("reply_to_event_id must be null", messages[0]["content"])
         for reason_code in (
             "direct_address",
             "disagreement",

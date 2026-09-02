@@ -905,8 +905,11 @@ _PROBE_RESPONSE_CONTRACT = (
     "or react+reply; urge must be strong, normal, weak, or pass. "
     "reason_code must be exactly one of direct_address, disagreement, "
     "add_context, social_reaction, silence_is_weird, or other_bounded. "
-    "Use null when no reaction or target applies. If action is pass, "
-    "urge must be pass. Keep burst_stance to at most two short lines."
+    "Use null when no reaction or target applies. trigger_event_id is not a reply target. "
+    "For a normal continuous reply, reply_to_event_id must be null. Set it only when "
+    "pointing to an earlier specific message, person, or topic removes real ambiguity, "
+    "or when the user explicitly quoted that event. If action is pass, urge must be pass. "
+    "Keep burst_stance to at most two short lines."
 )
 
 
