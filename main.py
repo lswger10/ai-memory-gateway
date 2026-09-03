@@ -764,6 +764,7 @@ async def model_usage_summary():
                 "summary_version": row.summary_version,
                 "compressed_up_to_event_id": row.compressed_up_to_event_id,
                 "provider_usage_received": row.provider_usage_received,
+                "execution_purpose": row.execution_purpose,
                 "usage": {
                     "input_tokens": row.usage.input_tokens,
                     "output_tokens": row.usage.output_tokens,

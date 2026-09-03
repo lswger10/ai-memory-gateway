@@ -220,7 +220,7 @@ class PostgresModelUsageStore:
             draft.runtime_kernel_version, draft.persona_version,
             draft.room_policy_version, draft.tool_schema_hash,
             draft.summary_version, draft.compressed_up_to_event_id,
-            draft.provider_usage_received,
+            draft.provider_usage_received, draft.execution_purpose,
         )
         async with pool.acquire() as conn:
             existing = await conn.fetchrow("SELECT * FROM model_execution_receipts WHERE generation_request_id=$1", draft.generation_request_id)
@@ -235,10 +235,11 @@ class PostgresModelUsageStore:
                     cache_read_input_tokens,cached_tokens,status,stable_prefix_hash,
                     prompt_cache_key,runtime_kernel_version,persona_version,
                     room_policy_version,tool_schema_hash,summary_version,
-                    compressed_up_to_event_id,provider_usage_received,created_at
+                    compressed_up_to_event_id,provider_usage_received,
+                    execution_purpose,created_at
                     ) VALUES(
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                    $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,NOW())""",
+                    $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,NOW())""",
                     *values,
                 )
             else:
@@ -254,7 +255,7 @@ class PostgresModelUsageStore:
             draft.runtime_kernel_version, draft.persona_version,
             draft.room_policy_version, draft.tool_schema_hash,
             draft.summary_version, draft.compressed_up_to_event_id,
-            draft.provider_usage_received,
+            draft.provider_usage_received, draft.execution_purpose,
         )
 
     async def list_receipts(self, *, limit: int = 200) -> tuple[ExecutionReceipt, ...]:
@@ -277,5 +278,6 @@ class PostgresModelUsageStore:
                 row["persona_version"], row["room_policy_version"],
                 row["tool_schema_hash"], row["summary_version"],
                 row["compressed_up_to_event_id"], row["provider_usage_received"],
+                row["execution_purpose"],
             ) for row in rows
         )

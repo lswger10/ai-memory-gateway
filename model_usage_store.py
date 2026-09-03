@@ -42,6 +42,7 @@ class ExecutionReceiptDraft:
     summary_version: int | None = None
     compressed_up_to_event_id: int | None = None
     provider_usage_received: bool = False
+    execution_purpose: str = "generation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +75,7 @@ class ExecutionReceipt:
     summary_version: int | None = None
     compressed_up_to_event_id: int | None = None
     provider_usage_received: bool = False
+    execution_purpose: str = "generation"
 
 
 class InMemoryModelUsageStore:
@@ -122,6 +124,7 @@ class InMemoryModelUsageStore:
                 summary_version=draft.summary_version,
                 compressed_up_to_event_id=draft.compressed_up_to_event_id,
                 provider_usage_received=draft.provider_usage_received,
+                execution_purpose=draft.execution_purpose,
             )
             self._receipts[draft.generation_request_id] = (draft, receipt)
             return receipt

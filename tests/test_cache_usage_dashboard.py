@@ -71,6 +71,7 @@ def test_dashboard_distinguishes_hit_observed_miss_and_unobservable():
     assert values[3]["cache_read_input_tokens"] is None
     assert values[3]["cached_tokens"] is None
     assert values[0]["stable_prefix_hash"] == "stable-prefix"
+    assert values[0]["execution_purpose"] == "generation"
     assert values[0]["persona_version"] == "jiao.v2"
     assert values[0]["compressed_up_to_event_id"] == 90
 

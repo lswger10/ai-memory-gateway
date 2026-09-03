@@ -77,6 +77,7 @@ def build_cache_usage_view(
                 "summary_version": receipt.summary_version,
                 "compressed_up_to_event_id": receipt.compressed_up_to_event_id,
                 "provider_usage_received": receipt.provider_usage_received,
+                "execution_purpose": receipt.execution_purpose,
             }
         )
     return tuple(result)

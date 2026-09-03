@@ -244,7 +244,8 @@ async def test_keepalive_never_publishes_or_mutates_conversation_history():
     assert request.generation_request_id.startswith("cache-pin:")
     assert not hasattr(request, "fence")
     receipts = await service.usage_store.list_receipts()
-    assert receipts[0].status == "cache_keepalive"
+    assert receipts[0].status == "succeeded"
+    assert receipts[0].execution_purpose == "cache_keepalive"
     assert receipts[0].usage.cache_read_input_tokens == 118
 
 

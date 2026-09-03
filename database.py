@@ -393,6 +393,7 @@ CREATE TABLE IF NOT EXISTS model_execution_receipts (
     summary_version BIGINT,
     compressed_up_to_event_id BIGINT,
     provider_usage_received BOOLEAN NOT NULL DEFAULT FALSE,
+    execution_purpose TEXT NOT NULL DEFAULT 'generation',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -405,7 +406,8 @@ ALTER TABLE model_execution_receipts
     ADD COLUMN IF NOT EXISTS tool_schema_hash TEXT,
     ADD COLUMN IF NOT EXISTS summary_version BIGINT,
     ADD COLUMN IF NOT EXISTS compressed_up_to_event_id BIGINT,
-    ADD COLUMN IF NOT EXISTS provider_usage_received BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS provider_usage_received BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS execution_purpose TEXT NOT NULL DEFAULT 'generation';
 
 CREATE INDEX IF NOT EXISTS idx_model_execution_receipts_context
     ON model_execution_receipts(actor_id, room_id, conversation_id, created_at);

@@ -208,7 +208,7 @@ function _renderModelUsage(cacheView, observability) {
     if (!body) return;
     const n = value => value === null || value === undefined ? '—' : String(value);
     body.innerHTML = cacheView.length ? cacheView.map(item => `<tr>
-        <td>${escapeHtml(item.actor_id)}</td><td>${escapeHtml(item.profile_id)}<br><small>${escapeHtml(item.model)}</small></td>
+        <td>${escapeHtml(item.actor_id)}<br><small>${escapeHtml(item.execution_purpose || 'generation')}</small></td><td>${escapeHtml(item.profile_id)}<br><small>${escapeHtml(item.model)}</small></td>
         <td>${escapeHtml(_cacheOutcomeLabel(item.cache_outcome))}</td>
         <td>${n(item.input_tokens)}</td><td>${n(item.output_tokens)}</td>
         <td>${n(item.cache_creation_input_tokens)}</td><td>${n(item.cache_read_input_tokens)}</td><td>${n(item.cached_tokens)}</td>

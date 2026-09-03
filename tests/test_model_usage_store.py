@@ -44,6 +44,7 @@ def _draft(**overrides):
         "summary_version": 4,
         "compressed_up_to_event_id": 88,
         "provider_usage_received": True,
+        "execution_purpose": "generation",
     }
     values.update(overrides)
     return ExecutionReceiptDraft(**values)
@@ -87,6 +88,19 @@ async def test_provider_usage_round_trips_exact_values_and_nulls():
     assert receipt.summary_version == 4
     assert receipt.compressed_up_to_event_id == 88
     assert receipt.provider_usage_received is True
+    assert receipt.execution_purpose == "generation"
+
+
+@pytest.mark.anyio
+async def test_execution_purpose_distinguishes_cache_keepalive_from_result_status():
+    store = InMemoryModelUsageStore()
+
+    receipt = await store.record(
+        _draft(status="succeeded", execution_purpose="cache_keepalive")
+    )
+
+    assert receipt.status == "succeeded"
+    assert receipt.execution_purpose == "cache_keepalive"
 
 
 def test_cache_namespace_includes_actor_conversation_profile_and_versions():

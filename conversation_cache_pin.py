@@ -419,7 +419,7 @@ class CachePinService:
                                 fallback_used=False,
                                 fallback_from_profile_id=None,
                                 usage=usage,
-                                status="cache_keepalive",
+                                status="succeeded",
                                 stable_prefix_hash=(
                                     context.stable_prefix_hash
                                     or build_stable_prefix_hash(
@@ -438,6 +438,7 @@ class CachePinService:
                                     context.compressed_up_to_event_id or 0
                                 ),
                                 provider_usage_received=provider_usage_received,
+                                execution_purpose="cache_keepalive",
                             )
                         )
                     calls += 1
