@@ -98,7 +98,7 @@ async def test_double_send_probe_freezes_every_input_and_promotes_verified_cache
 
 
 @pytest.mark.anyio
-async def test_cache_write_only_probe_stays_unverified_and_unselectable():
+async def test_cache_write_only_probe_verifies_route_without_claiming_cache_hit():
     store = InMemoryModelProfileStore()
     await store.put_profile(_profile())
     runner = _Runner(
@@ -118,8 +118,8 @@ async def test_cache_write_only_probe_stays_unverified_and_unselectable():
 
     assert result.status == "unverified"
     profile = await store.get_profile("profile-1")
-    assert profile.test_status == "unverified"
-    assert profile.selectable is False
+    assert profile.test_status == "passed"
+    assert profile.selectable is True
 
 
 @pytest.mark.anyio

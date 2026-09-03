@@ -192,10 +192,9 @@ class GatewayCacheProbeService:
                 )
 
         result = await CacheAcceptanceProbe().run(frozen, _FrozenRunner())
-        if profile.cache_strategy == "no_prompt_cache_v1" and result.status != "failed":
-            result = ProbeResult("not_applicable", result.first, result.second)
-            await self.profiles.set_test_status(profile_id, "passed")
-        elif result.status == "verified":
+        if result.status != "failed":
+            if profile.cache_strategy == "no_prompt_cache_v1":
+                result = ProbeResult("not_applicable", result.first, result.second)
             await self.profiles.set_test_status(profile_id, "passed")
         elif profile.test_status != "passed":
             await self.profiles.set_test_status(profile_id, "unverified")
