@@ -123,6 +123,29 @@ async def test_cache_write_only_probe_stays_unverified_and_unselectable():
 
 
 @pytest.mark.anyio
+async def test_cache_miss_does_not_unverify_an_already_verified_route():
+    store = InMemoryModelProfileStore()
+    await store.put_profile(replace(_profile(), test_status="passed"))
+    runner = _Runner(
+        [
+            ProviderUsage.from_provider_values(input_tokens=100, cached_tokens=0),
+            ProviderUsage.from_provider_values(input_tokens=100, cached_tokens=0),
+        ]
+    )
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+
+    result = await service.run(
+        profile_id="profile-1",
+        actor_id="jiao",
+        room_id="room_weiwei_jiao",
+        conversation_id="canonical-conversation-1",
+    )
+
+    assert result.status == "unverified"
+    assert (await store.get_profile("profile-1")).test_status == "passed"
+
+
+@pytest.mark.anyio
 async def test_no_cache_profile_can_pass_route_probe_without_fabricated_cache_support():
     store = InMemoryModelProfileStore()
     await store.put_profile(_profile(strategy="no_prompt_cache_v1", ttl=None))

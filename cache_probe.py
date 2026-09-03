@@ -197,7 +197,7 @@ class GatewayCacheProbeService:
             await self.profiles.set_test_status(profile_id, "passed")
         elif result.status == "verified":
             await self.profiles.set_test_status(profile_id, "passed")
-        else:
+        elif profile.test_status != "passed":
             await self.profiles.set_test_status(profile_id, "unverified")
         recorder = getattr(self.profiles, "record_probe_result", None)
         if recorder is not None:
