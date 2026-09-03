@@ -48,6 +48,7 @@ class InMemoryModelProfileStore:
         self._profiles: dict[str, ModelProfile] = {}
         self._bindings: dict[str, StoredBinding] = {}
         self._overrides: dict[tuple[str, str], RoomOverride] = {}
+        self._probe_results: dict[tuple[str, int, str], str] = {}
         self._lock = asyncio.Lock()
 
     async def put_profile(self, profile: ModelProfile) -> ModelProfile:
@@ -73,6 +74,29 @@ class InMemoryModelProfileStore:
             updated = replace(profile, test_status=status)
             self._profiles[profile_id] = updated
             return updated
+
+    async def record_probe_result(
+        self,
+        *,
+        profile_id: str,
+        profile_revision: int,
+        probe_kind: str,
+        status: str,
+        observed_capabilities: dict,
+        sanitized_detail: str | None = None,
+    ) -> None:
+        del observed_capabilities, sanitized_detail
+        async with self._lock:
+            self._probe_results[(profile_id, profile_revision, probe_kind)] = status
+
+    async def has_verified_probe(
+        self, profile_id: str, profile_revision: int, probe_kind: str
+    ) -> bool:
+        async with self._lock:
+            return (
+                self._probe_results.get((profile_id, profile_revision, probe_kind))
+                == "verified"
+            )
 
     def _selectable(self, profile_id: str) -> ModelProfile:
         profile = self._profiles.get(profile_id)

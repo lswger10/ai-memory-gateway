@@ -330,7 +330,14 @@ class CachePinService:
                 state = pin.actors.get(actor_id, CachePinActorState(actor_id))
                 resolved = await self.profiles.resolve(actor_id, pin.room_id)
                 profile = resolved.primary
-                if not _supports_verified_one_hour_cache(profile):
+                cache_verified = _supports_verified_one_hour_cache(profile) and (
+                    await self.profiles.has_verified_probe(
+                        profile.profile_id,
+                        profile.revision,
+                        "frozen_double_send_cache",
+                    )
+                )
+                if not cache_verified:
                     await self.store.save_actor_state(
                         pin.pin_id,
                         replace(

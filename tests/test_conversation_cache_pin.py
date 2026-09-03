@@ -102,6 +102,13 @@ async def _service():
     profiles = InMemoryModelProfileStore()
     await profiles.put_profile(_profile("jiao-natural", ttl=None))
     await profiles.put_profile(_profile("laoke-1h"))
+    await profiles.record_probe_result(
+        profile_id="laoke-1h",
+        profile_revision=1,
+        probe_kind="frozen_double_send_cache",
+        status="verified",
+        observed_capabilities={"requested_cache_ttl": "1h"},
+    )
     await profiles.set_actor_default("jiao", "jiao-natural")
     await profiles.set_actor_default("laoke", "laoke-1h")
     store = InMemoryConversationCachePinStore()
@@ -189,6 +196,39 @@ async def test_profile_without_verified_1h_keeps_pin_enabled_but_paused():
     assert view.enabled is True
     assert view.status == "paused"
     assert view.actors["jiao"].status == "paused"
+    assert builder.calls == []
+    assert runner.calls == []
+
+
+@pytest.mark.anyio
+async def test_declared_one_hour_cache_without_verified_probe_stays_paused():
+    profiles = InMemoryModelProfileStore()
+    await profiles.put_profile(_profile("declared-only-1h"))
+    await profiles.set_actor_default("laoke", "declared-only-1h")
+    store = InMemoryConversationCachePinStore()
+    builder = _ContextBuilder()
+    runner = _Runner()
+    service = CachePinService(
+        store=store,
+        profiles=profiles,
+        context_builder=builder,
+        provider_runner=runner,
+        now=lambda: NOW,
+    )
+    await service.set_pin(
+        room_id="room_weiwei_laoke",
+        conversation_id="conversation-laoke",
+        execution_mode="private",
+        enabled=True,
+    )
+
+    result = await service.run_due_once()
+    view = await service.get_pin("private:conversation-laoke")
+
+    assert result.calls == 0
+    assert view.enabled is True
+    assert view.actors["laoke"].status == "paused"
+    assert view.actors["laoke"].last_error == "profile_has_no_verified_1h_cache"
     assert builder.calls == []
     assert runner.calls == []
 

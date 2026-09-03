@@ -113,6 +113,21 @@ class PostgresModelProfileStore:
                 sanitized_detail,
             )
 
+    async def has_verified_probe(
+        self, profile_id: str, profile_revision: int, probe_kind: str
+    ) -> bool:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT 1 FROM model_profile_probe_results
+                   WHERE profile_id=$1 AND profile_revision=$2
+                     AND probe_kind=$3 AND status='verified'""",
+                profile_id,
+                profile_revision,
+                probe_kind,
+            )
+        return row is not None
+
     async def _profile(self, conn, profile_id: str) -> ModelProfile:
         row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", profile_id)
         if row is None:

@@ -143,3 +143,21 @@ async def test_postgres_profile_resolution_decodes_asyncpg_jsonb_fallback_ids():
     assert [profile.profile_id for profile in resolved.fallbacks] == [
         "ofox-claude-no-cache"
     ]
+
+
+class _ProbeConnection:
+    async def fetchrow(self, sql, *args):
+        assert "status='verified'" in sql
+        assert args == ("ofox-claude-cache-5m", 1, "frozen_double_send_cache")
+        return {"?column?": 1}
+
+
+@pytest.mark.anyio
+async def test_postgres_profile_store_requires_verified_probe_for_cache_capability():
+    pool = _Pool(None)
+    pool.connection = _ProbeConnection()
+    store = PostgresModelProfileStore(lambda: _pool(pool))
+
+    assert await store.has_verified_probe(
+        "ofox-claude-cache-5m", 1, "frozen_double_send_cache"
+    )
