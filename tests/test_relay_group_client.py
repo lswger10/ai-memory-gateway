@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import unittest
 
+from relay_group_client import RelayFactsMismatch, RelayGroupClient
+
 
 FIXTURE_ROOT = (
     Path(__file__).resolve().parents[1] / "contracts" / "group-room" / "v1" / "fixtures"
@@ -28,6 +30,75 @@ class RecordingHttpClient:
 
 
 class RelayGroupClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verify_accepted_bedroom_final_uses_persisted_turn(self):
+        response = type("Response", (), {
+            "status_code": 200,
+            "json": lambda self: {
+                "contract_version": "bedroom-room.v1.0",
+                "session": {"session_id": "bedroom-1"},
+                "turns": [{
+                    "turn_id": 8, "actor_id": "laoke", "role": "agent",
+                    "provenance_json": json.dumps({"generation_request_id": "bedroom:bedroom-1:3:laoke"}),
+                }],
+            },
+        })()
+        client = RelayGroupClient("http://relay", "key", http_client=RecordingHttpClient(response))
+
+        turn = await client.verify_accepted_execution_final(
+            actor_id="laoke", room_id="room_weiwei_laoke",
+            conversation_id="private-conversation", accepted_event_id=8,
+            generation_request_id="bedroom:bedroom-1:3:laoke",
+            execution_mode="bedroom", bedroom_session_id="bedroom-1",
+        )
+
+        self.assertEqual(8, turn["turn_id"])
+
+    async def test_verify_accepted_execution_final_uses_factual_history(self):
+        response = type("Response", (), {
+            "status_code": 200,
+            "json": lambda self: {
+                "events": [{
+                    "event_id": 77, "actor_id": "jiao", "role": "agent",
+                    "event_type": "agent_final", "room_id": "room_weiwei_jiao",
+                    "conversation_id": "conversation-1",
+                    "provenance": {"generation_request_id": "gen-1"},
+                }],
+                "next_after_event_id": 77, "has_more": False,
+            },
+        })()
+        http = RecordingHttpClient(response)
+        client = RelayGroupClient("http://relay", "key", http_client=http)
+
+        event = await client.verify_accepted_execution_final(
+            actor_id="jiao", room_id="room_weiwei_jiao",
+            conversation_id="conversation-1", accepted_event_id=77,
+            generation_request_id="gen-1", execution_mode="private",
+        )
+
+        self.assertEqual(77, event["event_id"])
+        self.assertEqual(77, http.calls[0]["json"]["through_event_id"])
+
+    async def test_verify_accepted_execution_final_rejects_wrong_generation(self):
+        response = type("Response", (), {
+            "status_code": 200,
+            "json": lambda self: {
+                "events": [{
+                    "event_id": 77, "actor_id": "jiao", "role": "agent",
+                    "event_type": "agent_final", "room_id": "room_weiwei_jiao",
+                    "conversation_id": "conversation-1",
+                    "provenance": {"generation_request_id": "other"},
+                }],
+                "next_after_event_id": 77, "has_more": False,
+            },
+        })()
+        client = RelayGroupClient("http://relay", "key", http_client=RecordingHttpClient(response))
+        with self.assertRaises(RelayFactsMismatch):
+            await client.verify_accepted_execution_final(
+                actor_id="jiao", room_id="room_weiwei_jiao",
+                conversation_id="conversation-1", accepted_event_id=77,
+                generation_request_id="gen-1", execution_mode="private",
+            )
+
     async def test_fetch_context_facts_uses_versioned_gateway_principal_contract(self):
         from group_contracts import ContextPackRequest
         from relay_group_client import RelayGroupClient

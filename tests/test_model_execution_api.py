@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 import main
 from model_execution import ExecutionStreamEvent
+from actor_memory_tools import ActorMemoryToolLibrary, InMemoryActorMemoryToolStore
 
 
 def _payload():
@@ -77,3 +78,54 @@ def test_model_execution_endpoint_streams_normalized_events(monkeypatch):
     assert response.status_code == 200
     assert "event: delta" in response.text
     assert '"execution_receipt_id": "receipt-1"' in response.text
+
+
+def test_memory_mutations_commit_only_after_relay_accepted_final(monkeypatch):
+    class Relay:
+        async def verify_accepted_execution_final(self, **coordinates):
+            assert coordinates["accepted_event_id"] == 202
+            assert coordinates["generation_request_id"] == "generation-1"
+            return {"event_id": 202}
+
+    store = InMemoryActorMemoryToolStore()
+    tools = ActorMemoryToolLibrary(store)
+    context = main.ActorMemoryExecutionContext(
+        actor_id="jiao", room_id="room_group_home", conversation_id="conversation-1",
+        generation_request_id="generation-1", source_event_id=101,
+        execution_mode="group", profile_id="profile-1",
+    )
+    import asyncio
+    asyncio.run(tools.call(context, "tool-1", "write_memory", {
+        "content": "accepted only", "scope": "group", "memory_type": "fact",
+        "perspective": "jiao", "confidential": False, "importance": 7,
+        "evidence_event_ids": [101],
+    }))
+    monkeypatch.setenv("MODEL_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("GROUP_ORCHESTRATOR_SERVICE_KEY", "service-key")
+    monkeypatch.setattr(main, "_actor_memory_tools", tools)
+    monkeypatch.setattr(main, "_actor_memory_relay", Relay())
+
+    response = TestClient(main.app).post(
+        "/internal/model-execution/memory/accepted",
+        json={"execution": _payload(), "accepted_event_id": 202}, headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "committed"
+    assert len(asyncio.run(store.list_active())) == 1
+
+
+def test_memory_mutations_can_be_discarded_without_relay_lookup(monkeypatch):
+    class Tools:
+        async def discard(self, context):
+            return {"status": "discarded", "generation_request_id": context.generation_request_id}
+
+    monkeypatch.setenv("MODEL_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("GROUP_ORCHESTRATOR_SERVICE_KEY", "service-key")
+    monkeypatch.setattr(main, "_actor_memory_tools", Tools())
+    response = TestClient(main.app).post(
+        "/internal/model-execution/memory/discarded",
+        json={"execution": _payload()}, headers=_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "discarded"

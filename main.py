@@ -100,6 +100,12 @@ from conversation_cache_pin import (
     InMemoryConversationCachePinStore,
     PostgresConversationCachePinStore,
 )
+from actor_memory_tools import (
+    ActorMemoryExecutionContext,
+    ActorMemoryToolLibrary,
+    InMemoryActorMemoryToolStore,
+    PostgresActorMemoryToolStore,
+)
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -280,6 +286,8 @@ _model_profile_store = None
 _model_usage_store = None
 _model_provider_runner: GatewayProviderRunner | None = None
 _model_context_builder: GatewayExecutionContextBuilder | None = None
+_actor_memory_tools: ActorMemoryToolLibrary | None = None
+_actor_memory_relay: RelayGroupClient | None = None
 _cache_probe_service: GatewayCacheProbeService | None = None
 _cache_pin_service: CachePinService | None = None
 _actor_prompt_store = None
@@ -452,6 +460,7 @@ async def _stream_gateway_execution(request: Request, expected_kind: str):
 async def _get_model_execution_service() -> GatewayModelExecutionService:
     global _model_execution_service, _model_profile_store, _model_usage_store
     global _model_provider_runner, _model_context_builder
+    global _actor_memory_tools, _actor_memory_relay
     if _model_execution_service is not None:
         return _model_execution_service
     async with _model_runtime_lock:
@@ -475,12 +484,18 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             conversation_store = PostgresConversationPartitionStore(get_pool)
         relay_url = os.environ.get("GROUP_RELAY_BASE_URL", "").strip()
         relay_key = os.environ.get("GROUP_RELAY_SERVICE_KEY", "").strip()
+        _actor_memory_tools = ActorMemoryToolLibrary(
+            InMemoryActorMemoryToolStore() if ephemeral_fixture
+            else PostgresActorMemoryToolStore(get_pool)
+        )
+        _actor_memory_relay = RelayGroupClient(relay_url, relay_key)
         _model_provider_runner = GatewayProviderRunner(
             media_reader=(
                 RelayMediaReader(relay_url, relay_key)
                 if relay_url and relay_key
                 else None
-            )
+            ),
+            memory_tools=_actor_memory_tools,
         )
         _model_context_builder = GatewayExecutionContextBuilder(
             group_context=_get_group_context_service(),
@@ -536,6 +551,76 @@ async def model_execution_probe(request: Request):
 @app.post("/internal/model-execution/stream")
 async def model_execution_stream(request: Request):
     return await _stream_gateway_execution(request, "full")
+
+
+def _execution_principal_error(request: Request):
+    if not resolve_feature_flags()["model_execution"]:
+        return _model_execution_error(404, "model_execution_disabled")
+    if request.headers.get("X-Gateway-Execution-Version") != MODEL_EXECUTION_CONTRACT_VERSION:
+        return _model_execution_error(409, "contract_version_mismatch")
+    expected_key = os.environ.get("GROUP_ORCHESTRATOR_SERVICE_KEY", "")
+    if not expected_key or not secrets.compare_digest(_group_bearer(request), expected_key):
+        return _model_execution_error(403, "principal_not_allowed")
+    return None
+
+
+async def _actor_memory_lifecycle_context(execution: GatewayExecutionRequest):
+    if execution.room_id is not None and execution.conversation_id is not None:
+        room_id, conversation_id = execution.room_id, execution.conversation_id
+    else:
+        await _get_model_execution_service()
+        assert _model_context_builder is not None
+        room_id, conversation_id = await _model_context_builder.resolve_coordinates(execution)
+    return ActorMemoryExecutionContext(
+        actor_id=execution.actor_id, room_id=room_id, conversation_id=conversation_id,
+        generation_request_id=execution.generation_request_id,
+        source_event_id=execution.current_event_id, execution_mode=execution.execution_mode,
+        profile_id="accepted-final",
+    )
+
+
+@app.post("/internal/model-execution/memory/accepted")
+async def model_execution_memory_accepted(request: Request):
+    if error := _execution_principal_error(request):
+        return error
+    try:
+        payload = await request.json()
+        execution = GatewayExecutionRequest.from_dict(payload["execution"])
+        accepted_event_id = payload["accepted_event_id"]
+        if isinstance(accepted_event_id, bool) or not isinstance(accepted_event_id, int) or accepted_event_id < 1:
+            raise ValueError("invalid accepted event")
+        context = await _actor_memory_lifecycle_context(execution)
+        if _actor_memory_tools is None or _actor_memory_relay is None:
+            await _get_model_execution_service()
+        assert _actor_memory_tools is not None and _actor_memory_relay is not None
+        await _actor_memory_relay.verify_accepted_execution_final(
+            actor_id=context.actor_id, room_id=context.room_id,
+            conversation_id=context.conversation_id, accepted_event_id=accepted_event_id,
+            generation_request_id=context.generation_request_id,
+            execution_mode=context.execution_mode,
+            bedroom_session_id=execution.bedroom_session_id,
+        )
+        return await _actor_memory_tools.commit_accepted(context, accepted_event_id=accepted_event_id)
+    except (ExecutionContractError, KeyError, TypeError, ValueError):
+        return _model_execution_error(422, "invalid_execution_payload")
+    except RelayGroupError as exc:
+        return _model_execution_error(exc.status_code, exc.code)
+
+
+@app.post("/internal/model-execution/memory/discarded")
+async def model_execution_memory_discarded(request: Request):
+    if error := _execution_principal_error(request):
+        return error
+    try:
+        payload = await request.json()
+        execution = GatewayExecutionRequest.from_dict(payload["execution"])
+        context = await _actor_memory_lifecycle_context(execution)
+        if _actor_memory_tools is None:
+            await _get_model_execution_service()
+        assert _actor_memory_tools is not None
+        return await _actor_memory_tools.discard(context)
+    except (ExecutionContractError, KeyError, TypeError, ValueError):
+        return _model_execution_error(422, "invalid_execution_payload")
 
 
 def _safe_profile(profile: ModelProfile) -> dict:
@@ -776,6 +861,14 @@ async def model_usage_summary():
             for row in receipts
         ]
     }
+
+
+@app.get("/api/actor-memory-tools/audit")
+async def actor_memory_tools_audit(limit: int = 100):
+    _require_model_management()
+    await _get_model_execution_service()
+    assert _actor_memory_tools is not None
+    return {"items": await _actor_memory_tools.store.audit(limit)}
 
 
 def _usage_dict(usage) -> dict:

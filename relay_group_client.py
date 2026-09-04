@@ -164,6 +164,57 @@ class RelayGroupClient:
                 raise RelayGroupError(502, "model_history_cursor_stalled")
             cursor = next_cursor
 
+    async def verify_accepted_execution_final(
+        self,
+        *,
+        actor_id: str,
+        room_id: str,
+        conversation_id: str,
+        accepted_event_id: int,
+        generation_request_id: str,
+        execution_mode: str,
+        bedroom_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        if execution_mode == "bedroom":
+            if not bedroom_session_id:
+                raise RelayFactsMismatch()
+            facts = await self.fetch_bedroom_facts(bedroom_session_id)
+            events = facts.get("turns", ())
+            id_field = "turn_id"
+            provenance_field = "provenance_json"
+        else:
+            events = await self.fetch_model_history_facts(
+                actor_id=actor_id,
+                room_id=room_id,
+                conversation_id=conversation_id,
+                current_event_id=accepted_event_id,
+                after_event_id=max(0, accepted_event_id - 1),
+                through_event_id=accepted_event_id,
+                include_current_event=True,
+            )
+            id_field = "event_id"
+            provenance_field = "provenance"
+        event = next(
+            (item for item in events if item.get(id_field) == accepted_event_id), None
+        )
+        provenance = event.get(provenance_field) if isinstance(event, dict) else None
+        if isinstance(provenance, str):
+            import json
+            provenance = json.loads(provenance)
+        if (
+            not isinstance(event, dict)
+            or event.get("actor_id") != actor_id
+            or event.get("role") != "agent"
+            or event.get("room_id", room_id) != room_id
+            or event.get("conversation_id", conversation_id) != conversation_id
+            or not isinstance(provenance, dict)
+            or provenance.get("generation_request_id") != generation_request_id
+        ):
+            raise RelayFactsMismatch()
+        if execution_mode != "bedroom" and event.get("event_type") != "agent_final":
+            raise RelayFactsMismatch()
+        return event
+
     async def _post_context_facts(
         self, facts_request: ContextFactsRequest
     ) -> PublicContextFacts:
