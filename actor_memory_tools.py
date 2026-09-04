@@ -76,7 +76,17 @@ def actor_memory_tool_definitions() -> tuple[dict[str, Any], ...]:
         "merge_memories": _schema({"memory_ids": {"type": "array", "items": integer, "minItems": 2, "uniqueItems": True}, "content": {"type": "string"}, "importance": {"type": "integer", "minimum": 1, "maximum": 10}}, ("memory_ids", "content", "importance")),
         "supersede_memory": _schema({**memory_id, "content": {"type": "string"}, "memory_type": {"enum": ["fact", "inference"]}, "importance": {"type": "integer", "minimum": 1, "maximum": 10}}, ("memory_id", "content", "memory_type", "importance")),
     }
-    definitions["propose_memory_candidate"] = definitions["write_memory"]
+    definitions["propose_memory_candidate"] = _schema(
+        {
+            "content": {"type": "string"},
+            "memory_type": {"enum": ["fact", "inference"]},
+            "perspective": {"enum": ["weiwei", "jiao", "laoke", "shared"]},
+            "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "evidence_event_ids": {"type": "array", "items": integer, "uniqueItems": True},
+            "sensitivity_hint": {"type": "boolean"},
+        },
+        ("content", "memory_type", "perspective", "confidence", "evidence_event_ids", "sensitivity_hint"),
+    )
     return tuple(
         {"name": name, "description": f"Gateway actor memory operation: {name}", "input_schema": definitions[name]}
         for name in sorted(definitions)
@@ -154,7 +164,28 @@ class ActorMemoryToolLibrary:
         return await self.store.stage(context, tool_call_id, name, args)
 
     async def _validate_mutation(self, context, name: str, args: dict[str, Any]) -> None:
-        if name in {"write_memory", "propose_memory_candidate"}:
+        if name == "propose_memory_candidate":
+            _bounded_text(args.get("content"), "content")
+            if args.get("memory_type") not in {"fact", "inference"}:
+                raise ValueError("invalid memory_type")
+            if args.get("perspective") not in {"weiwei", "jiao", "laoke", "shared"}:
+                raise ValueError("invalid perspective")
+            confidence = args.get("confidence")
+            if confidence is not None and (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not 0 <= confidence <= 1
+            ):
+                raise ValueError("invalid confidence")
+            self._validate_evidence(args.get("evidence_event_ids"))
+            if len(args["evidence_event_ids"]) != len(set(args["evidence_event_ids"])):
+                raise ValueError("evidence_event_ids are invalid")
+            if any(event_id != context.source_event_id for event_id in args["evidence_event_ids"]):
+                raise PermissionError("candidate evidence is outside the current execution facts")
+            if args.get("sensitivity_hint") is not False:
+                raise PermissionError("sensitive candidates require explicit memory tools")
+            return
+        if name == "write_memory":
             _bounded_text(args.get("content"), "content")
             self._validate_scope(context, args.get("scope"))
             self._validate_perspective(context, args.get("perspective"))
@@ -314,13 +345,28 @@ class InMemoryActorMemoryToolStore:
         return {"status": "discarded", "actor_id": context.actor_id, "generation_request_id": context.generation_request_id}
 
     def _apply(self, context, name: str, args: dict[str, Any], accepted_event_id: int) -> list[int]:
-        if name in {"write_memory", "propose_memory_candidate"}:
+        if name == "propose_memory_candidate":
+            scope = _PAIRWISE_SCOPE[context.actor_id]
+            evidence = sorted(set(args["evidence_event_ids"]) | {accepted_event_id})
+            normalized = " ".join(args["content"].split()).casefold()
+            for row in self.records.values():
+                if row["status"] == "active" and row["scope"] == scope and row["perspective"] == context.actor_id and " ".join(row["content"].split()).casefold() == normalized:
+                    row["evidence"] = sorted(set(row["evidence"]) | set(evidence))
+                    return [row["id"]]
+            memory_id = self.seed(content=args["content"], scope=scope, perspective=context.actor_id, source_kind="agent_candidate")
+            self.records[memory_id].update(
+                memory_type=args["memory_type"], confidence=args["confidence"],
+                evidence=evidence,
+                provenance={"actor_id": context.actor_id, "generation_request_id": context.generation_request_id, "source_event_id": accepted_event_id, "tool_action": name},
+            )
+            return [memory_id]
+        if name == "write_memory":
             normalized = " ".join(args["content"].split()).casefold()
             for row in self.records.values():
                 if row["status"] == "active" and row["scope"] == args["scope"] and row["perspective"] == args["perspective"] and " ".join(row["content"].split()).casefold() == normalized:
                     row["evidence"] = sorted(set(row["evidence"]) | set(args["evidence_event_ids"]))
                     return [row["id"]]
-            memory_id = self.seed(content=args["content"], scope=args["scope"], perspective=args["perspective"], confidential=args["confidential"], source_kind="agent_candidate" if name == "propose_memory_candidate" else "actor_tool")
+            memory_id = self.seed(content=args["content"], scope=args["scope"], perspective=args["perspective"], confidential=args["confidential"], source_kind="actor_tool")
             row = self.records[memory_id]
             row.update(memory_type=args["memory_type"], importance=args["importance"], evidence=sorted(set(args["evidence_event_ids"])), provenance={"actor_id": context.actor_id, "generation_request_id": context.generation_request_id, "source_event_id": accepted_event_id, "tool_action": name})
             return [memory_id]
@@ -563,6 +609,7 @@ class PostgresActorMemoryToolStore:
             perspective=Perspective(args.get("perspective", template["perspective"] if template else context.actor_id)),
             confidential=bool(args.get("confidential", template["confidential"] if template else False)),
             source_kind=source_kind,
+            confidence=args.get("confidence"),
             status=MemoryStatus.ACTIVE,
             evidence_count=len(evidence),
             provenance={
@@ -577,10 +624,23 @@ class PostgresActorMemoryToolStore:
         )
 
     async def _apply(self, conn, context, name: str, args: dict[str, Any], accepted_event_id: int) -> list[int]:
-        if name in {"write_memory", "propose_memory_candidate"}:
+        if name == "propose_memory_candidate":
+            candidate = {
+                **args,
+                "scope": _PAIRWISE_SCOPE[context.actor_id],
+                "perspective": context.actor_id,
+                "confidential": False,
+                "evidence_event_ids": sorted(set(args["evidence_event_ids"]) | {accepted_event_id}),
+            }
+            write = self._write(
+                context, candidate, accepted_event_id,
+                source_kind=SourceKind.AGENT_CANDIDATE,
+            )
+            return [await _persist_or_merge_group_memory(conn, write)]
+        if name == "write_memory":
             write = self._write(
                 context, args, accepted_event_id,
-                source_kind=SourceKind.AGENT_CANDIDATE if name == "propose_memory_candidate" else SourceKind.ACTOR_TOOL,
+                source_kind=SourceKind.ACTOR_TOOL,
             )
             memory_id = await _persist_or_merge_group_memory(conn, write)
             await conn.execute(

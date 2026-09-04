@@ -58,6 +58,34 @@ def test_actor_mutation_cannot_claim_unconfirmed_perspective(perspective):
     asyncio.run(run())
 
 
+def test_candidate_tool_reuses_bounded_candidate_semantics_not_direct_write_fields():
+    definitions = {item["name"]: item for item in actor_memory_tool_definitions()}
+    properties = definitions["propose_memory_candidate"]["input_schema"]["properties"]
+    assert set(properties) == {
+        "content", "memory_type", "perspective", "confidence",
+        "evidence_event_ids", "sensitivity_hint",
+    }
+    assert not ({"scope", "confidential", "importance"} & set(properties))
+
+    async def run():
+        store = InMemoryActorMemoryToolStore()
+        tools = ActorMemoryToolLibrary(store)
+        ctx = context(room="room_group_home", generation="candidate-pipeline")
+        await tools.call(ctx, "candidate-0", "propose_memory_candidate", {
+            "content": "可能值得记住", "memory_type": "inference",
+            "perspective": "shared", "confidence": 0.7,
+            "evidence_event_ids": [101], "sensitivity_hint": False,
+        })
+        await tools.commit_accepted(ctx, accepted_event_id=202)
+        row = (await store.list_active())[0]
+        assert row["source_kind"] == "agent_candidate"
+        assert row["scope"] == "weiwei-jiao"
+        assert row["perspective"] == "jiao"
+        assert row["evidence"] == [101, 202]
+
+    asyncio.run(run())
+
+
 def test_write_is_staged_until_accepted_final_and_discard_never_persists():
     async def run():
         store = InMemoryActorMemoryToolStore()
@@ -168,19 +196,19 @@ def test_both_actors_can_commit_direct_memory_and_candidate(actor, room, scope):
         tools = ActorMemoryToolLibrary(store)
         ctx = context(actor=actor, room=room, generation=f"gen-{actor}")
         for index, name in enumerate(("write_memory", "propose_memory_candidate")):
+            arguments = {
+                "content": f"{actor}-{name}", "memory_type": "fact",
+                "perspective": actor, "evidence_event_ids": [101],
+            }
+            if name == "write_memory":
+                arguments.update(scope=scope, confidential=False, importance=6)
+            else:
+                arguments.update(confidence=0.8, sensitivity_hint=False)
             await tools.call(
             ctx,
             f"{actor}-{index}",
             name,
-            {
-                "content": f"{actor}-{name}",
-                "scope": scope,
-                "memory_type": "fact",
-                "perspective": actor,
-                "confidential": False,
-                "importance": 6,
-                "evidence_event_ids": [101],
-            },
+            arguments,
             )
         await tools.commit_accepted(ctx, accepted_event_id=104)
         rows = await store.all_records()
@@ -202,7 +230,7 @@ def test_complete_memory_tool_library_is_callable_for_each_bound_actor(actor, sc
             "get_memory": {"memory_id": first},
             "list_memories": {"status": "active", "limit": 20},
             "write_memory": {"content": f"{actor} write", "scope": scope, "memory_type": "fact", "perspective": actor, "confidential": False, "importance": 5, "evidence_event_ids": [101]},
-            "propose_memory_candidate": {"content": f"{actor} candidate", "scope": scope, "memory_type": "inference", "perspective": actor, "confidential": False, "importance": 6, "evidence_event_ids": [101]},
+            "propose_memory_candidate": {"content": f"{actor} candidate", "memory_type": "inference", "perspective": actor, "confidence": 0.8, "evidence_event_ids": [101], "sensitivity_hint": False},
             "update_memory": {"memory_id": first, "content": "updated"},
             "delete_memory": {"memory_id": first},
             "restore_memory": {"memory_id": first},
@@ -259,6 +287,55 @@ def test_duplicate_tool_call_and_acceptance_are_idempotent():
         second = await tools.commit_accepted(ctx, accepted_event_id=105)
         assert first == second
         assert len(await store.all_records()) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("actor", "room", "scope"), [("jiao", "room_weiwei_jiao", "weiwei-jiao"), ("laoke", "room_weiwei_laoke", "weiwei-laoke")])
+def test_actor_write_delete_restore_and_profile_switch_change_authorized_retrieval(actor, room, scope):
+    async def run():
+        store = InMemoryActorMemoryToolStore()
+        tools = ActorMemoryToolLibrary(store)
+        write_context = context(actor=actor, room=room, generation=f"write-{actor}", profile="profile-a")
+        await tools.call(write_context, "write", "write_memory", {
+            "content": f"{actor} durable fact", "scope": scope,
+            "memory_type": "fact", "perspective": actor,
+            "confidential": False, "importance": 7, "evidence_event_ids": [101],
+        })
+        created = (await tools.commit_accepted(write_context, accepted_event_id=201))["resulting_memory_ids"][0]
+        switched = context(actor=actor, room=room, generation=f"delete-{actor}", profile="profile-b")
+        assert len((await tools.call(switched, "search", "search_memory", {"query": "durable", "limit": 10}))["memories"]) == 1
+
+        await tools.call(switched, "delete", "delete_memory", {"memory_id": created})
+        await tools.commit_accepted(switched, accepted_event_id=202)
+        assert (await tools.call(context(actor=actor, room=room, generation=f"read-stale-{actor}"), "search-stale", "search_memory", {"query": "durable", "limit": 10}))["memories"] == []
+
+        restore_context = context(actor=actor, room=room, generation=f"restore-{actor}")
+        await tools.call(restore_context, "restore", "restore_memory", {"memory_id": created})
+        await tools.commit_accepted(restore_context, accepted_event_id=203)
+        assert len((await tools.call(restore_context, "search-restored", "search_memory", {"query": "durable", "limit": 10}))["memories"]) == 1
+
+    asyncio.run(run())
+
+
+def test_merge_and_supersede_leave_only_current_active_understanding():
+    async def run():
+        store = InMemoryActorMemoryToolStore()
+        first = store.seed(content="duplicate one", scope="weiwei-jiao", perspective="jiao")
+        second = store.seed(content="duplicate two", scope="weiwei-jiao", perspective="jiao")
+        old = store.seed(content="old inference", scope="weiwei-jiao", perspective="jiao")
+        tools = ActorMemoryToolLibrary(store)
+        merge_context = context(generation="merge")
+        await tools.call(merge_context, "merge", "merge_memories", {"memory_ids": [first, second], "content": "merged current", "importance": 8})
+        await tools.commit_accepted(merge_context, accepted_event_id=204)
+        supersede_context = context(generation="supersede")
+        await tools.call(supersede_context, "supersede", "supersede_memory", {"memory_id": old, "content": "new understanding", "memory_type": "fact", "importance": 9})
+        await tools.commit_accepted(supersede_context, accepted_event_id=205)
+
+        active = await store.list_active()
+        assert {row["content"] for row in active} == {"merged current", "new understanding"}
+        rows = {row["id"]: row for row in await store.all_records()}
+        assert rows[first]["status"] == rows[second]["status"] == rows[old]["status"] == "superseded"
+
     asyncio.run(run())
 
 
