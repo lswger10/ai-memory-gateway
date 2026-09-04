@@ -32,6 +32,7 @@ class SourceKind(str, Enum):
     CHAT_EXTRACTION = "chat_extraction"
     EXPLICIT_USER_MEMORY = "explicit_user_memory"
     AGENT_CANDIDATE = "agent_candidate"
+    ACTOR_TOOL = "actor_tool"
     USER_ATTESTED_MEMORY = "user_attested_memory"
     SYNTHETIC_TEST = "synthetic_test"
 

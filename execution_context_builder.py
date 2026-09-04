@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from actor_memory_tools import ACTOR_MEMORY_TOOL_SCHEMA_HASH, ActorMemoryExecutionContext
 from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
 from bedroom_memory import BedroomContextPackService, BedroomPackRequest
 from conversation_partitions import InMemoryConversationPartitionStore
@@ -88,6 +89,8 @@ class GatewayExecutionContextBuilder:
                 components=components,
                 cache_conversation_id=receipt.partition_id,
                 partition_id=receipt.partition_id,
+                room_id=resolved_room_id,
+                conversation_id=resolved_conversation_id,
                 through_stable_event_id=max(0, request.current_event_id - 1),
             )
 
@@ -119,6 +122,8 @@ class GatewayExecutionContextBuilder:
             components=components,
             cache_conversation_id=resolved_conversation_id,
             partition_id=resolved_conversation_id,
+            room_id=resolved_room_id,
+            conversation_id=resolved_conversation_id,
             through_stable_event_id=max(0, request.current_event_id - 1),
         )
 
@@ -152,6 +157,10 @@ class GatewayExecutionContextBuilder:
             )
             partition_id = conversation_id
 
+        tool_schema_hash = (
+            ACTOR_MEMORY_TOOL_SCHEMA_HASH
+            if profile.capabilities.tools else components["tool_schema_hash"]
+        )
         namespace = build_cache_namespace(
             actor_id=actor_id,
             conversation_id=cache_conversation_id,
@@ -161,7 +170,7 @@ class GatewayExecutionContextBuilder:
             actor_prompt_version=components["actor_prompt_version"],
             runtime_kernel_version=components["runtime_kernel_version"],
             room_policy_version=components["room_policy_version"],
-            tool_schema_hash=components["tool_schema_hash"],
+            tool_schema_hash=tool_schema_hash,
             cache_strategy_version=profile.cache_strategy,
         )
         state = await self.history_store.get_or_create(
@@ -175,7 +184,7 @@ class GatewayExecutionContextBuilder:
                 "actor_prompt_version": components["actor_prompt_version"],
                 "runtime_kernel_version": components["runtime_kernel_version"],
                 "room_policy_version": components["room_policy_version"],
-                "tool_schema_hash": components["tool_schema_hash"],
+                "tool_schema_hash": tool_schema_hash,
                 "cache_strategy_version": profile.cache_strategy,
             },
         )
@@ -204,7 +213,7 @@ class GatewayExecutionContextBuilder:
             actor_prompt_version=components["actor_prompt_version"],
             runtime_kernel_version=components["runtime_kernel_version"],
             room_policy_version=components["room_policy_version"],
-            tool_schema_hash=components["tool_schema_hash"],
+            tool_schema_hash=tool_schema_hash,
             cache_conversation_id=cache_conversation_id,
             stable_prefix_hash=build_stable_prefix_hash(
                 static_system=components["static_system"],
@@ -223,8 +232,15 @@ class GatewayExecutionContextBuilder:
         components: dict,
         cache_conversation_id: str,
         partition_id: str,
+        room_id: str,
+        conversation_id: str,
         through_stable_event_id: int,
     ) -> ContextBundle:
+        tool_schema_hash = (
+            ACTOR_MEMORY_TOOL_SCHEMA_HASH
+            if request.execution_kind == "full" and profile.capabilities.tools
+            else components["tool_schema_hash"]
+        )
         namespace = build_cache_namespace(
             actor_id=request.actor_id,
             conversation_id=cache_conversation_id,
@@ -234,7 +250,7 @@ class GatewayExecutionContextBuilder:
             actor_prompt_version=components["actor_prompt_version"],
             runtime_kernel_version=components["runtime_kernel_version"],
             room_policy_version=components["room_policy_version"],
-            tool_schema_hash=components["tool_schema_hash"],
+            tool_schema_hash=tool_schema_hash,
             cache_strategy_version=profile.cache_strategy,
         )
         state = await self.history_store.get_or_create(
@@ -248,7 +264,7 @@ class GatewayExecutionContextBuilder:
                 "actor_prompt_version": components["actor_prompt_version"],
                 "runtime_kernel_version": components["runtime_kernel_version"],
                 "room_policy_version": components["room_policy_version"],
-                "tool_schema_hash": components["tool_schema_hash"],
+                "tool_schema_hash": tool_schema_hash,
                 "cache_strategy_version": profile.cache_strategy,
             },
         )
@@ -310,10 +326,23 @@ class GatewayExecutionContextBuilder:
             actor_prompt_version=components["actor_prompt_version"],
             runtime_kernel_version=components["runtime_kernel_version"],
             room_policy_version=components["room_policy_version"],
-            tool_schema_hash=components["tool_schema_hash"],
+            tool_schema_hash=tool_schema_hash,
             cache_conversation_id=cache_conversation_id,
             stable_prefix_hash=stable_prefix_hash,
             summary_version=state.state_revision,
             compressed_up_to_event_id=state.compressed_up_to_event_id,
             current_media_references=tuple(current_media_references),
+            actor_memory_context=(
+                ActorMemoryExecutionContext(
+                    actor_id=request.actor_id,
+                    room_id=room_id,
+                    conversation_id=conversation_id,
+                    generation_request_id=request.generation_request_id,
+                    source_event_id=request.current_event_id,
+                    execution_mode=request.execution_mode,
+                    profile_id=profile.profile_id,
+                )
+                if request.execution_kind == "full" and profile.capabilities.tools
+                else None
+            ),
         )

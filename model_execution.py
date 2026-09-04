@@ -33,6 +33,7 @@ class ContextBundle:
     summary_version: int | None = None
     compressed_up_to_event_id: int | None = None
     current_media_references: tuple[dict[str, Any], ...] = ()
+    actor_memory_context: Any | None = None
 
 
 @dataclass(frozen=True, slots=True)

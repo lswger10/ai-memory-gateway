@@ -125,10 +125,20 @@ DO $$ BEGIN
             (scope <> 'legacy_unscoped'
              AND memory_type IN ('fact', 'inference')
              AND perspective IN ('shared', 'weiwei', 'jiao', 'laoke')
-             AND source_kind IN ('chat_extraction', 'explicit_user_memory', 'agent_candidate', 'user_attested_memory', 'synthetic_test'))
+             AND source_kind IN ('chat_extraction', 'explicit_user_memory', 'agent_candidate', 'actor_tool', 'user_attested_memory', 'synthetic_test'))
         );
     END IF;
 END $$;
+
+ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_scoped_dimensions_check;
+ALTER TABLE memories ADD CONSTRAINT memories_scoped_dimensions_check CHECK (
+    (scope = 'legacy_unscoped' AND memory_type IS NULL AND perspective IS NULL AND source_kind IS NULL)
+    OR
+    (scope <> 'legacy_unscoped'
+     AND memory_type IN ('fact', 'inference')
+     AND perspective IN ('shared', 'weiwei', 'jiao', 'laoke')
+     AND source_kind IN ('chat_extraction', 'explicit_user_memory', 'agent_candidate', 'actor_tool', 'user_attested_memory', 'synthetic_test'))
+);
 
 CREATE INDEX IF NOT EXISTS idx_memories_scope_status
     ON memories(scope, status, confidential);
@@ -411,6 +421,30 @@ ALTER TABLE model_execution_receipts
 
 CREATE INDEX IF NOT EXISTS idx_model_execution_receipts_context
     ON model_execution_receipts(actor_id, room_id, conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS actor_memory_tool_stages (
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    generation_request_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    source_event_id BIGINT NOT NULL,
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('private','group','bedroom')),
+    profile_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    arguments_json JSONB NOT NULL,
+    payload_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('staged','committed','discarded')),
+    accepted_event_id BIGINT,
+    resulting_memory_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    committed_at TIMESTAMPTZ,
+    discarded_at TIMESTAMPTZ,
+    PRIMARY KEY (actor_id,generation_request_id,tool_call_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_actor_memory_tool_audit
+    ON actor_memory_tool_stages(actor_id,created_at DESC);
 """
 
 

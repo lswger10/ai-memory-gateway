@@ -211,6 +211,26 @@ async def test_context_builder_persists_complete_cache_identity_before_history_r
 
 
 @pytest.mark.anyio
+async def test_full_tool_capable_execution_gets_actor_bound_memory_context():
+    payload = _profile().to_dict()
+    payload["capabilities"]["tools"] = True
+    profile = ModelProfile.from_dict(payload)
+    builder = GatewayExecutionContextBuilder(
+        group_context=_GroupContext(), bedroom_context=object(),
+    )
+
+    bundle = await builder.build(
+        _request(), profile, resolved_room_id="room_weiwei_jiao",
+        resolved_conversation_id="conversation-1",
+    )
+
+    assert bundle.tool_schema_hash == "actor-memory-tools.v1"
+    assert bundle.actor_memory_context.actor_id == "jiao"
+    assert bundle.actor_memory_context.room_id == "room_weiwei_jiao"
+    assert bundle.actor_memory_context.writable_scopes == {"weiwei-jiao"}
+
+
+@pytest.mark.anyio
 async def test_group_cognitive_transcript_is_shared_while_actor_cache_identity_is_separate():
     from conversation_partitions import InMemoryConversationPartitionStore
 

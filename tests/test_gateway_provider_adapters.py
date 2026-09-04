@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from cache_strategies import AnthropicPrefixAnchoredV1, PromptSegment
+from actor_memory_tools import actor_memory_tool_definitions
 from model_profiles import ModelProfile
 from provider_adapters import (
     AnthropicMessagesAdapter,
@@ -121,10 +122,13 @@ def test_openai_strategy_never_receives_anthropic_cache_control():
         messages=({"role": "user", "content": "hello"},),
         prompt_cache_key="namespace-hash",
         max_output_tokens=100,
+        tools=actor_memory_tool_definitions(),
     )
     assert "cache_control" not in str(request.json_body)
     assert request.json_body["prompt_cache_key"] == "namespace-hash"
     assert request.json_body["stream_options"] == {"include_usage": True}
+    assert request.json_body["tools"][0]["type"] == "function"
+    assert "actor_id" not in request.json_body["tools"][0]["function"]["parameters"].get("properties", {})
 
 
 def test_openai_responses_renders_profile_model_and_cache_key():
@@ -137,10 +141,13 @@ def test_openai_responses_renders_profile_model_and_cache_key():
         input_items=({"role": "user", "content": "hello"},),
         prompt_cache_key="namespace-hash",
         max_output_tokens=100,
+        tools=actor_memory_tool_definitions(),
     )
     assert request.path == "/v1/responses"
     assert request.json_body["model"] == profile.model
     assert request.json_body["prompt_cache_key"] == "namespace-hash"
+    assert request.json_body["tools"][0]["type"] == "function"
+    assert "function" not in request.json_body["tools"][0]
 
 
 def test_secrets_are_absent_from_provenance():

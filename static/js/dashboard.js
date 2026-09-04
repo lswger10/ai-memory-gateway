@@ -246,13 +246,25 @@ function _renderConversationCachePins() {
     }).join('');
 }
 
+function _renderActorMemoryAudit(items) {
+    const body = _modelField('actor-memory-audit-body');
+    if (!body) return;
+    body.innerHTML = items.length ? items.map(item => `<tr>
+        <td>${escapeHtml(item.actor_id)}</td><td>${escapeHtml(item.room_id)}</td>
+        <td>${escapeHtml(item.action)}</td><td>${escapeHtml(item.status)}</td>
+        <td>${escapeHtml(item.generation_request_id)}</td>
+        <td>${escapeHtml((item.resulting_memory_ids || []).join(', ') || '—')}</td>
+    </tr>`).join('') : '<tr><td colspan="6">暂无 Actor Memory 操作。</td></tr>';
+}
+
 async function loadModelProfilesAndUsage() {
     try {
-        const [profiles, bindings, usage, pins] = await Promise.all([
+        const [profiles, bindings, usage, pins, memoryAudit] = await Promise.all([
             fetch('/api/model-profiles').then(r => r.ok ? r.json() : Promise.reject(new Error('Model Profile 管理未启用'))),
             fetch('/api/model-bindings').then(r => r.json()),
             fetch('/api/model-usage/summary').then(r => r.json()),
-            fetch('/api/cache-pins').then(r => r.json())
+            fetch('/api/cache-pins').then(r => r.json()),
+            fetch('/api/actor-memory-tools/audit').then(r => r.json())
         ]);
         _gatewayModelProfiles = profiles.profiles || [];
         _gatewayModelBindings = bindings.bindings || {};
@@ -260,6 +272,7 @@ async function loadModelProfilesAndUsage() {
         _renderModelUsage(usage.cache_view || [], usage.cache_observability || {});
         _conversationCachePins = pins.pins || [];
         _renderConversationCachePins();
+        _renderActorMemoryAudit(memoryAudit.items || []);
     } catch (error) {
         _modelMessage(error.message, true);
     }

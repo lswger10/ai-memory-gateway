@@ -461,6 +461,11 @@
                     <p class="form-hint">Pin 属于 conversation。只有当前已验证且明确支持 1h cache 的 Profile 会产生约 50 分钟一次的保活调用；不支持的 actor 保持 paused。</p>
                     <div id="conversation-cache-pin-list"><p class="form-hint">尚无 pin。</p></div>
                 </div>
+
+                <div class="card table-card">
+                    <h3 class="settings-group-title" style="padding:16px;">Actor Memory 操作记录</h3>
+                    <div style="overflow:auto;"><table class="data-table"><thead><tr><th>Actor</th><th>Room</th><th>Action</th><th>Status</th><th>Generation</th><th>Memory IDs</th></tr></thead><tbody id="actor-memory-audit-body"></tbody></table></div>
+                </div>
             </section>
 
             <section id="section-settings" class="section">

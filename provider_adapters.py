@@ -244,6 +244,7 @@ class OpenAIResponsesAdapter:
         prompt_cache_key: str | None,
         max_output_tokens: int,
         media_parts: tuple[dict[str, Any], ...] = (),
+        tools: tuple[dict[str, Any], ...] = (),
     ) -> RenderedProviderRequest:
         if profile.protocol != self.protocol:
             raise ProviderAdapterError("Profile protocol is not OpenAI Responses")
@@ -261,6 +262,17 @@ class OpenAIResponsesAdapter:
             body["input"][-1]["content"].extend(
                 _openai_responses_media(media_parts)
             )
+        if tools:
+            if not profile.capabilities.tools:
+                raise ProviderAdapterError("Profile does not support tools")
+            body["tools"] = [
+                {
+                    "type": "function", "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["input_schema"],
+                }
+                for tool in tools
+            ]
         if prompt_cache_key is not None:
             if profile.cache_strategy != "openai_stable_prefix_v1":
                 raise ProviderAdapterError("prompt_cache_key requires OpenAI cache strategy")
@@ -289,6 +301,7 @@ class OpenAIChatCompletionsAdapter:
         prompt_cache_key: str | None,
         max_output_tokens: int,
         media_parts: tuple[dict[str, Any], ...] = (),
+        tools: tuple[dict[str, Any], ...] = (),
     ) -> RenderedProviderRequest:
         if profile.protocol != self.protocol:
             raise ProviderAdapterError("Profile protocol is not Chat Completions")
@@ -311,6 +324,19 @@ class OpenAIChatCompletionsAdapter:
                     {"type": "text", "text": target["content"]}
                 ]
             target["content"].extend(_openai_chat_media(media_parts))
+        if tools:
+            if not profile.capabilities.tools:
+                raise ProviderAdapterError("Profile does not support tools")
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"], "description": tool["description"],
+                        "parameters": tool["input_schema"],
+                    },
+                }
+                for tool in tools
+            ]
         if prompt_cache_key is not None:
             if profile.cache_strategy != "openai_stable_prefix_v1":
                 raise ProviderAdapterError("prompt_cache_key requires OpenAI cache strategy")
