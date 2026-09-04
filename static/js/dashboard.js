@@ -159,7 +159,12 @@ function _profilePayload() {
             reasoning_controls: _modelField('model-cap-reasoning').checked,
             cache_strategies: [strategy],
             cache_ttls: ttl ? [ttl] : [],
-            usage_fields: ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'cached_tokens']
+            usage_fields: ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'cached_tokens'],
+            input_modalities: [
+                'text',
+                ...(_modelField('model-cap-image').checked ? ['image'] : []),
+                ...(_modelField('model-cap-document').checked ? ['document'] : [])
+            ]
         },
         cache_strategy: strategy,
         requested_cache_ttl: ttl,

@@ -95,7 +95,11 @@ def _fallback_text(reference: dict[str, Any]) -> str:
     category = "sticker" if reference.get("purpose") == "sticker" else reference["category"]
     name = reference["name"]
     detail = reference.get("derived_text") or reference.get("semantic_label")
-    suffix = f" {detail}" if detail else " (no extracted description)"
+    suffix = (
+        f" {detail}"
+        if detail
+        else " (raw content was not supplied to this text-only Model Profile)"
+    )
     return f"[{category}: {name}]{suffix}"
 
 

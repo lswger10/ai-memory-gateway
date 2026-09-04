@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from model_profiles import ModelProfile, ProfileContractError
@@ -47,3 +49,14 @@ def test_profile_rejects_unknown_or_missing_text_modality():
         ModelProfile.from_dict(payload(["image"]))
     with pytest.raises(ProfileContractError):
         ModelProfile.from_dict(payload(["text", "vision-by-model-name"]))
+
+
+def test_dashboard_can_persist_explicit_image_and_document_capabilities():
+    template = Path("templates/dashboard.html").read_text(encoding="utf-8")
+    script = Path("static/js/dashboard.js").read_text(encoding="utf-8")
+
+    assert 'id="model-cap-image"' in template
+    assert 'id="model-cap-document"' in template
+    assert "input_modalities:" in script
+    assert "model-cap-image" in script
+    assert "model-cap-document" in script
