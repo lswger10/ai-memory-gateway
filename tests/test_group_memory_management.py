@@ -206,11 +206,15 @@ def test_dashboard_exposes_typed_create_and_real_delete_action():
     assert "?soft=" not in script
 
 
-def test_dashboard_delete_confirmation_does_not_depend_on_browser_dialogs():
+def test_dashboard_delete_uses_the_existing_in_page_modal_pattern():
     root = Path(__file__).resolve().parents[1]
+    template = (root / "templates" / "dashboard.html").read_text(encoding="utf-8")
     script = (root / "static" / "js" / "dashboard.js").read_text(encoding="utf-8")
 
-    assert "function armMemoryDelete(button, id)" in script
-    assert "async function batchDelete(button)" in script
+    assert 'id="memoryDeleteModal" class="modal"' in template
+    assert "function openMemoryDeleteModal(ids)" in script
+    assert "async function confirmMemoryDelete()" in script
+    assert "armMemoryDelete" not in script
+    assert "deleteArmed" not in script
     assert "confirm('确定删除 #" not in script
     assert "confirm('确定删除选中的" not in script

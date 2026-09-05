@@ -54,6 +54,7 @@ if (_gatewayKey) {
 // 全局状态
 // ============================================
 let allMemories = [];
+let pendingMemoryDeleteIds = [];
 let pendingJsonData = null;
 let currentLayer = 'all';
 let memCurrentPage = 1;
@@ -456,7 +457,7 @@ function renderTable(mems, startIndex) {
         
         // 历史归档仍可恢复；删除始终是真实删除。
         let restoreBtn = '';
-        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="armMemoryDelete(this, ' + m.id + ')">删除</button>';
+        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="openMemoryDeleteModal(' + m.id + ')">删除</button>';
         if (isInactive) {
             restoreBtn = '<button class="btn btn-success btn-sm" onclick="restoreMem(' + m.id + ')">恢复</button>';
         }
@@ -675,19 +676,25 @@ async function saveMem(id) {
     }
 }
 
-function armMemoryDelete(button, id) {
-    if (button.dataset.deleteArmed === 'true') {
-        delMem(id);
-        return;
-    }
-    button.dataset.deleteArmed = 'true';
-    button.textContent = '再点一次永久删除';
-    setTimeout(() => {
-        if (button.isConnected && button.dataset.deleteArmed === 'true') {
-            delete button.dataset.deleteArmed;
-            button.textContent = '删除';
-        }
-    }, 8000);
+function openMemoryDeleteModal(ids) {
+    pendingMemoryDeleteIds = (Array.isArray(ids) ? ids : [ids]).map(Number);
+    const message = pendingMemoryDeleteIds.length === 1
+        ? '确定永久删除记忆 #' + pendingMemoryDeleteIds[0] + '？'
+        : '确定永久删除选中的 ' + pendingMemoryDeleteIds.length + ' 条记忆？';
+    document.getElementById('memoryDeleteMessage').textContent = message + ' 此操作不可撤销。';
+    document.getElementById('memoryDeleteModal').style.display = 'flex';
+}
+
+function closeMemoryDeleteModal() {
+    document.getElementById('memoryDeleteModal').style.display = 'none';
+    pendingMemoryDeleteIds = [];
+}
+
+async function confirmMemoryDelete() {
+    const ids = pendingMemoryDeleteIds.slice();
+    closeMemoryDeleteModal();
+    if (ids.length === 1) await delMem(ids[0]);
+    else await deleteMemoriesBatch(ids);
 }
 
 async function delMem(id) {
@@ -761,28 +768,18 @@ async function batchSave() {
     }
 }
 
-async function batchDelete(button) {
+function batchDelete() {
     const checked = [...document.querySelectorAll('.mem-check:checked')].map(c => parseInt(c.value));
     if (checked.length === 0) { showManageMsg('error', '请先勾选要删除的记忆'); return; }
-    const selection = checked.join(',');
-    if (button.dataset.deleteIds !== selection) {
-        button.dataset.deleteIds = selection;
-        button.textContent = '再点一次永久删除 ' + checked.length + ' 条';
-        setTimeout(() => {
-            if (button.isConnected && button.dataset.deleteIds === selection) {
-                delete button.dataset.deleteIds;
-                button.textContent = '删除选中';
-            }
-        }, 8000);
-        return;
-    }
-    delete button.dataset.deleteIds;
-    button.textContent = '删除选中';
+    openMemoryDeleteModal(checked);
+}
+
+async function deleteMemoriesBatch(ids) {
     try {
         const resp = await fetch('/api/memories/batch-delete', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ids: checked})
+            body: JSON.stringify({ids})
         });
         const data = await resp.json();
         if (data.error) {

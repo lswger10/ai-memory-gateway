@@ -186,6 +186,18 @@
                 </div>
             </section>
 
+            <!-- 删除确认弹窗 -->
+            <div id="memoryDeleteModal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="memoryDeleteTitle">
+                <div class="modal-content">
+                    <h3 id="memoryDeleteTitle">删除记忆</h3>
+                    <p id="memoryDeleteMessage"></p>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" onclick="closeMemoryDeleteModal()">取消</button>
+                        <button class="btn btn-danger" onclick="confirmMemoryDelete()">确认永久删除</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- 合并弹窗 -->
             <div id="mergeModal" class="modal" style="display:none;">
                 <div class="modal-content">
@@ -253,7 +265,7 @@
                 <div class="floating-actions">
                     <button class="btn btn-primary" onclick="batchSave()">保存选中</button>
                     <button class="btn btn-secondary" onclick="openMergeModal()">合并选中</button>
-                    <button class="btn btn-danger" onclick="batchDelete(this)">删除选中</button>
+                    <button class="btn btn-danger" onclick="batchDelete()">删除选中</button>
                     <button class="btn btn-icon" onclick="clearSelection()" title="取消选择">✕</button>
                 </div>
             </div>
@@ -596,6 +608,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.9-inline-memory-delete"></script>
+    <script src="/static/js/dashboard.js?v=3.10-memory-delete-modal"></script>
 </body>
 </html>
