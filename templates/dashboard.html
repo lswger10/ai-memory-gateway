@@ -253,7 +253,7 @@
                 <div class="floating-actions">
                     <button class="btn btn-primary" onclick="batchSave()">保存选中</button>
                     <button class="btn btn-secondary" onclick="openMergeModal()">合并选中</button>
-                    <button class="btn btn-danger" onclick="batchDelete()">删除选中</button>
+                    <button class="btn btn-danger" onclick="batchDelete(this)">删除选中</button>
                     <button class="btn btn-icon" onclick="clearSelection()" title="取消选择">✕</button>
                 </div>
             </div>
@@ -596,6 +596,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.8-memory-delete"></script>
+    <script src="/static/js/dashboard.js?v=3.9-inline-memory-delete"></script>
 </body>
 </html>

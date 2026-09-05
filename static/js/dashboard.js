@@ -456,7 +456,7 @@ function renderTable(mems, startIndex) {
         
         // 历史归档仍可恢复；删除始终是真实删除。
         let restoreBtn = '';
-        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ')">删除</button>';
+        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="armMemoryDelete(this, ' + m.id + ')">删除</button>';
         if (isInactive) {
             restoreBtn = '<button class="btn btn-success btn-sm" onclick="restoreMem(' + m.id + ')">恢复</button>';
         }
@@ -675,8 +675,22 @@ async function saveMem(id) {
     }
 }
 
+function armMemoryDelete(button, id) {
+    if (button.dataset.deleteArmed === 'true') {
+        delMem(id);
+        return;
+    }
+    button.dataset.deleteArmed = 'true';
+    button.textContent = '再点一次永久删除';
+    setTimeout(() => {
+        if (button.isConnected && button.dataset.deleteArmed === 'true') {
+            delete button.dataset.deleteArmed;
+            button.textContent = '删除';
+        }
+    }, 8000);
+}
+
 async function delMem(id) {
-    if (!confirm('确定删除 #' + id + '？此操作不可撤销！')) return;
     try {
         const resp = await fetch('/api/memories/' + id, { method: 'DELETE' });
         const data = await resp.json();
@@ -747,10 +761,23 @@ async function batchSave() {
     }
 }
 
-async function batchDelete() {
+async function batchDelete(button) {
     const checked = [...document.querySelectorAll('.mem-check:checked')].map(c => parseInt(c.value));
     if (checked.length === 0) { showManageMsg('error', '请先勾选要删除的记忆'); return; }
-    if (!confirm('确定删除选中的 ' + checked.length + ' 条记忆？此操作不可撤销。')) return;
+    const selection = checked.join(',');
+    if (button.dataset.deleteIds !== selection) {
+        button.dataset.deleteIds = selection;
+        button.textContent = '再点一次永久删除 ' + checked.length + ' 条';
+        setTimeout(() => {
+            if (button.isConnected && button.dataset.deleteIds === selection) {
+                delete button.dataset.deleteIds;
+                button.textContent = '删除选中';
+            }
+        }, 8000);
+        return;
+    }
+    delete button.dataset.deleteIds;
+    button.textContent = '删除选中';
     try {
         const resp = await fetch('/api/memories/batch-delete', {
             method: 'POST',

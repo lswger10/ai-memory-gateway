@@ -204,3 +204,13 @@ def test_dashboard_exposes_typed_create_and_real_delete_action():
     assert ">删除</button>" in script
     assert "'/api/memories/' + id, { method: 'DELETE' }" in script
     assert "?soft=" not in script
+
+
+def test_dashboard_delete_confirmation_does_not_depend_on_browser_dialogs():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "static" / "js" / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "function armMemoryDelete(button, id)" in script
+    assert "async function batchDelete(button)" in script
+    assert "confirm('确定删除 #" not in script
+    assert "confirm('确定删除选中的" not in script
