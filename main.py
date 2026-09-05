@@ -30,7 +30,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Res
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
+from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, create_typed_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
 import database as _db_module  # 用于 memory settings 热更新 database.py 全局变量
 from group_contracts import (
     CONTRACT_VERSION,
@@ -53,7 +53,14 @@ from memory_extractor import (
     extract_group_memories,
     score_memories,
 )
-from memory_policy import group_memory_features_from_env
+from memory_policy import (
+    MemoryScope,
+    MemoryType,
+    MemoryWrite,
+    Perspective,
+    SourceKind,
+    group_memory_features_from_env,
+)
 from relay_group_client import RelayGroupClient, RelayGroupError
 from bedroom_memory import (
     BEDROOM_CONTRACT_VERSION,
@@ -1402,6 +1409,41 @@ async def dashboard_page(request: Request):
 # 管理 API
 # ============================================================
 
+@app.post("/api/memories")
+async def api_create_memory(request: Request):
+    """Create one user-attested typed memory from the management page."""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    data = await request.json()
+    expected = {
+        "content", "scope", "memory_type", "perspective", "confidential", "importance"
+    }
+    if not isinstance(data, dict) or set(data) != expected:
+        raise HTTPException(status_code=422, detail="invalid typed memory payload")
+    if not isinstance(data["content"], str) or not data["content"].strip():
+        raise HTTPException(status_code=422, detail="invalid memory content")
+    importance = data["importance"]
+    if isinstance(importance, bool) or not isinstance(importance, int) or not 1 <= importance <= 10:
+        raise HTTPException(status_code=422, detail="invalid memory importance")
+    if not isinstance(data["confidential"], bool):
+        raise HTTPException(status_code=422, detail="invalid confidential flag")
+    try:
+        write = MemoryWrite(
+            content=data["content"],
+            scope=MemoryScope(data["scope"]),
+            memory_type=MemoryType(data["memory_type"]),
+            perspective=Perspective(data["perspective"]),
+            confidential=data["confidential"],
+            source_kind=SourceKind.USER_ATTESTED_MEMORY,
+            provenance={"source": "gateway_dashboard"},
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid typed memory payload") from exc
+    if write.scope is MemoryScope.GROUP and write.confidential:
+        raise HTTPException(status_code=422, detail="group memory cannot be confidential")
+    memory_id = await create_typed_memory(write, importance=importance)
+    return {"status": "ok", "id": memory_id}
+
 @app.get("/api/memories")
 async def api_get_memories(
     layer: int = None,
@@ -1537,7 +1579,7 @@ async def api_delete_memory(memory_id: int, soft: bool = False):
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
     if soft:
-        await update_memory_with_layer(memory_id, is_active=False)
+        await update_memory_with_layer(memory_id, is_active=False, status="stale")
     else:
         await delete_memory(memory_id)
     return {"status": "ok", "id": memory_id}
@@ -1909,12 +1951,12 @@ async def api_revert_merge(memory_id: int):
 
 @app.post("/api/memories/{memory_id}/restore")
 async def api_restore_memory(memory_id: int):
-    """恢复已归档的记忆（将 is_active 设为 TRUE）"""
+    """恢复已归档的记忆。"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
     
     try:
-        await update_memory_with_layer(memory_id, is_active=True)
+        await update_memory_with_layer(memory_id, is_active=True, status="active")
         return {"status": "ok", "id": memory_id}
     except Exception as e:
         return {"error": str(e)}

@@ -112,3 +112,93 @@ def test_archive_annotation_rejects_unbounded_type():
             json={"annotation_type": "rewrite_raw", "payload": {}},
         )
     assert response.status_code == 422
+
+
+def test_admin_can_create_typed_scoped_memory():
+    import main
+
+    create_fn = AsyncMock(return_value=88)
+    with patch.object(main, "MEMORY_ENABLED", True), patch.object(
+        main, "create_typed_memory", create_fn
+    ):
+        response = TestClient(main.app).post(
+            "/api/memories",
+            json={
+                "content": "薇薇喜欢红色的小辣椒",
+                "scope": "weiwei-jiao",
+                "memory_type": "fact",
+                "perspective": "weiwei",
+                "confidential": True,
+                "importance": 8,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "id": 88}
+    write = create_fn.await_args.args[0]
+    assert write.content == "薇薇喜欢红色的小辣椒"
+    assert write.scope.value == "weiwei-jiao"
+    assert write.memory_type.value == "fact"
+    assert write.perspective.value == "weiwei"
+    assert write.confidential is True
+    assert write.source_kind.value == "user_attested_memory"
+    create_fn.assert_awaited_once_with(write, importance=8)
+
+
+def test_admin_typed_memory_rejects_legacy_unscoped_and_group_confidential():
+    import main
+
+    client = TestClient(main.app)
+    base = {
+        "content": "explicit memory",
+        "memory_type": "fact",
+        "perspective": "weiwei",
+        "confidential": False,
+        "importance": 5,
+    }
+    with patch.object(main, "MEMORY_ENABLED", True):
+        legacy = client.post(
+            "/api/memories", json={**base, "scope": "legacy_unscoped"}
+        )
+        group_secret = client.post(
+            "/api/memories",
+            json={**base, "scope": "group", "confidential": True},
+        )
+
+    assert legacy.status_code == 422
+    assert group_secret.status_code == 422
+
+
+def test_dashboard_archive_and_restore_keep_memory_status_consistent():
+    import main
+
+    update_fn = AsyncMock()
+    client = TestClient(main.app)
+    with patch.object(main, "MEMORY_ENABLED", True), patch.object(
+        main, "update_memory_with_layer", update_fn
+    ):
+        archived = client.delete("/api/memories/9?soft=true")
+        restored = client.post("/api/memories/9/restore")
+
+    assert archived.status_code == 200
+    assert restored.status_code == 200
+    assert update_fn.await_args_list[0].kwargs == {
+        "is_active": False,
+        "status": "stale",
+    }
+    assert update_fn.await_args_list[1].kwargs == {
+        "is_active": True,
+        "status": "active",
+    }
+
+
+def test_dashboard_exposes_typed_create_and_calls_archive_by_name():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "templates" / "dashboard.html").read_text(encoding="utf-8")
+    script = (root / "static" / "js" / "dashboard.js").read_text(encoding="utf-8")
+
+    assert 'id="newMemoryContent"' in template
+    assert 'id="newMemoryScope"' in template
+    assert "async function createMemory()" in script
+    assert "method: 'POST'" in script
+    assert ">归档</button>" in script

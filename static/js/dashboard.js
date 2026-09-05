@@ -394,6 +394,36 @@ async function loadMemories() {
     }
 }
 
+async function createMemory() {
+    const content = document.getElementById('newMemoryContent').value.trim();
+    if (!content) { showManageMsg('error', '记忆内容不能为空'); return; }
+    const body = {
+        content,
+        scope: document.getElementById('newMemoryScope').value,
+        memory_type: document.getElementById('newMemoryType').value,
+        perspective: document.getElementById('newMemoryPerspective').value,
+        confidential: document.getElementById('newMemoryConfidential').checked,
+        importance: parseInt(document.getElementById('newMemoryImportance').value),
+    };
+    try {
+        const resp = await fetch('/api/memories', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error || data.detail) {
+            showManageMsg('error', '保存失败：' + (data.error || data.detail || resp.status));
+            return;
+        }
+        document.getElementById('newMemoryContent').value = '';
+        showManageMsg('success', '✅ 新记忆已保存');
+        loadMemories();
+    } catch(e) {
+        showManageMsg('error', '保存失败：' + e.message);
+    }
+}
+
 function renderTable(mems, startIndex) {
     startIndex = startIndex || 0;
     const tbody = document.getElementById('tbody');
@@ -426,7 +456,7 @@ function renderTable(mems, startIndex) {
         
         // 恢复按钮（只有已归档的记忆显示）
         let restoreBtn = '';
-        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ')">删除</button>';
+        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ')">归档</button>';
         if (isInactive) {
             restoreBtn = '<button class="btn btn-success btn-sm" onclick="restoreMem(' + m.id + ')">恢复</button>';
             deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ', true)">永久删除</button>';
@@ -649,14 +679,14 @@ async function saveMem(id) {
 async function delMem(id, hard = false) {
     const confirmMsg = hard 
         ? '确定永久删除 #' + id + '？此操作不可撤销！'
-        : '确定删除 #' + id + '？（软删除，可恢复）';
+        : '确定归档 #' + id + '？归档后可恢复。';
     if (!confirm(confirmMsg)) return;
     try {
         const soft = !hard;
         const resp = await fetch('/api/memories/' + id + '?soft=' + soft, { method: 'DELETE' });
         const data = await resp.json();
-        if (data.error) {
-            showManageMsg('error', '❌ ' + data.error);
+        if (!resp.ok || data.error || data.detail) {
+            showManageMsg('error', '❌ ' + (data.error || data.detail || resp.status));
         } else {
             const action = hard ? '永久删除' : '已归档';
             showManageMsg('success', '✅ ' + action + ' #' + id);
@@ -671,8 +701,8 @@ async function restoreMem(id) {
     try {
         const resp = await fetch('/api/memories/' + id + '/restore', { method: 'POST' });
         const data = await resp.json();
-        if (data.error) {
-            showManageMsg('error', '❌ ' + data.error);
+        if (!resp.ok || data.error || data.detail) {
+            showManageMsg('error', '❌ ' + (data.error || data.detail || resp.status));
         } else {
             showManageMsg('success', '✅ 已恢复 #' + id);
             loadMemories();

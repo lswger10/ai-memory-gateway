@@ -54,7 +54,35 @@
             <section id="section-manage" class="section active">
                 <div class="section-header">
                     <h1>记忆管理</h1>
-                    <p class="section-desc">查看、编辑、删除已存储的记忆</p>
+                    <p class="section-desc">新增、查看、编辑和归档已存储的记忆</p>
+                </div>
+
+                <div class="card toolbar-card">
+                    <div class="toolbar" style="align-items:flex-start;">
+                        <textarea id="newMemoryContent" class="search-input" rows="3" placeholder="写下一条明确想保留的记忆"></textarea>
+                        <select id="newMemoryScope" class="select-input" title="这条记忆属于哪段关系">
+                            <option value="weiwei-jiao">薇薇—椒椒</option>
+                            <option value="weiwei-laoke">薇薇—老克</option>
+                            <option value="jiao-laoke">椒椒—老克</option>
+                            <option value="group">小家共享</option>
+                        </select>
+                        <select id="newMemoryPerspective" class="select-input" title="记忆的叙述视角">
+                            <option value="weiwei">薇薇视角</option>
+                            <option value="jiao">椒椒视角</option>
+                            <option value="laoke">老克视角</option>
+                            <option value="shared">共同事实</option>
+                        </select>
+                        <select id="newMemoryType" class="select-input">
+                            <option value="fact">事实</option>
+                            <option value="inference">推断</option>
+                        </select>
+                        <input id="newMemoryImportance" class="importance-input" type="number" min="1" max="10" value="5" title="权重 1-10">
+                        <label class="checkbox-label">
+                            <input id="newMemoryConfidential" type="checkbox">
+                            <span>私密</span>
+                        </label>
+                        <button class="btn btn-primary" onclick="createMemory()">保存新记忆</button>
+                    </div>
                 </div>
 
                 <!-- 分层 Tab -->

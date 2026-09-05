@@ -1209,6 +1209,20 @@ async def _persist_or_merge_group_memory(conn, write) -> int:
     return int(memory_id)
 
 
+async def create_typed_memory(write, *, importance: int = 5) -> int:
+    """Persist one explicit typed memory through the canonical dedupe path."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            memory_id = await _persist_or_merge_group_memory(conn, write)
+            await conn.execute(
+                "UPDATE memories SET importance=$1,updated_at=NOW() WHERE id=$2",
+                importance,
+                memory_id,
+            )
+    return memory_id
+
+
 async def persist_group_memory_candidate(
     *,
     identity: tuple[str, str, int],
@@ -2797,7 +2811,8 @@ async def check_duplicate_memory(new_content: str, threshold: float = 0.7) -> di
 
 async def update_memory_with_layer(memory_id: int, content: str = None, 
                                     importance: int = None, title: str = None,
-                                    layer: int = None, is_active: bool = None):
+                                    layer: int = None, is_active: bool = None,
+                                    status: str = None):
     """更新记忆（支持三层架构新字段）"""
     updates = []
     params = []
@@ -2826,6 +2841,11 @@ async def update_memory_with_layer(memory_id: int, content: str = None,
     if is_active is not None:
         updates.append(f"is_active = ${param_idx}")
         params.append(is_active)
+        param_idx += 1
+
+    if status is not None:
+        updates.append(f"status = ${param_idx}")
+        params.append(status)
         param_idx += 1
     
     if not updates:
