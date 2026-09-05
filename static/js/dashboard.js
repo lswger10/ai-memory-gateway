@@ -454,12 +454,11 @@ function renderTable(mems, startIndex) {
             revertBtn = '<button class="btn btn-warning btn-sm" onclick="revertMerge(' + m.id + ')">撤回</button>';
         }
         
-        // 恢复按钮（只有已归档的记忆显示）
+        // 历史归档仍可恢复；删除始终是真实删除。
         let restoreBtn = '';
-        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ')">归档</button>';
+        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ')">删除</button>';
         if (isInactive) {
             restoreBtn = '<button class="btn btn-success btn-sm" onclick="restoreMem(' + m.id + ')">恢复</button>';
-            deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ', true)">永久删除</button>';
         }
         
         return '<tr data-id="' + m.id + '" class="' + rowClass + '">' +
@@ -676,20 +675,15 @@ async function saveMem(id) {
     }
 }
 
-async function delMem(id, hard = false) {
-    const confirmMsg = hard 
-        ? '确定永久删除 #' + id + '？此操作不可撤销！'
-        : '确定归档 #' + id + '？归档后可恢复。';
-    if (!confirm(confirmMsg)) return;
+async function delMem(id) {
+    if (!confirm('确定删除 #' + id + '？此操作不可撤销！')) return;
     try {
-        const soft = !hard;
-        const resp = await fetch('/api/memories/' + id + '?soft=' + soft, { method: 'DELETE' });
+        const resp = await fetch('/api/memories/' + id, { method: 'DELETE' });
         const data = await resp.json();
         if (!resp.ok || data.error || data.detail) {
             showManageMsg('error', '❌ ' + (data.error || data.detail || resp.status));
         } else {
-            const action = hard ? '永久删除' : '已归档';
-            showManageMsg('success', '✅ ' + action + ' #' + id);
+            showManageMsg('success', '✅ 已删除 #' + id);
             loadMemories();
         }
     } catch(e) {

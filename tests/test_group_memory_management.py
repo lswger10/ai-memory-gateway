@@ -169,30 +169,30 @@ def test_admin_typed_memory_rejects_legacy_unscoped_and_group_confidential():
     assert group_secret.status_code == 422
 
 
-def test_dashboard_archive_and_restore_keep_memory_status_consistent():
+def test_dashboard_delete_hard_deletes_and_restore_reactivates_archived_memory():
     import main
 
     update_fn = AsyncMock()
+    delete_fn = AsyncMock()
     client = TestClient(main.app)
     with patch.object(main, "MEMORY_ENABLED", True), patch.object(
         main, "update_memory_with_layer", update_fn
+    ), patch.object(
+        main, "delete_memory", delete_fn
     ):
-        archived = client.delete("/api/memories/9?soft=true")
+        deleted = client.delete("/api/memories/9")
         restored = client.post("/api/memories/9/restore")
 
-    assert archived.status_code == 200
+    assert deleted.status_code == 200
     assert restored.status_code == 200
+    delete_fn.assert_awaited_once_with(9)
     assert update_fn.await_args_list[0].kwargs == {
-        "is_active": False,
-        "status": "stale",
-    }
-    assert update_fn.await_args_list[1].kwargs == {
         "is_active": True,
         "status": "active",
     }
 
 
-def test_dashboard_exposes_typed_create_and_calls_archive_by_name():
+def test_dashboard_exposes_typed_create_and_real_delete_action():
     root = Path(__file__).resolve().parents[1]
     template = (root / "templates" / "dashboard.html").read_text(encoding="utf-8")
     script = (root / "static" / "js" / "dashboard.js").read_text(encoding="utf-8")
@@ -201,4 +201,6 @@ def test_dashboard_exposes_typed_create_and_calls_archive_by_name():
     assert 'id="newMemoryScope"' in template
     assert "async function createMemory()" in script
     assert "method: 'POST'" in script
-    assert ">归档</button>" in script
+    assert ">删除</button>" in script
+    assert "'/api/memories/' + id, { method: 'DELETE' }" in script
+    assert "?soft=" not in script

@@ -28,7 +28,7 @@ Gateway 不直接发布 final；Orchestrator 消费 Gateway stream 后仍需通�
 - 椒椒/老克身份提示：actor Persona version。
 - conversation context：Relay accepted facts 同步形成的 cognitive partition。
 - 长期记忆：scoped memory schema + pre-retrieval ACL。
-- Dashboard 的显式新增记忆直接写入 scoped memory；可恢复删除统一标记为 `stale` 归档。
+- Dashboard 的显式新增记忆直接写入 scoped memory；删除使用数据库硬删除，历史整理产生的归档仍可恢复。
 - cache/compression：actor + canonical conversation + Profile + prompt/runtime/room/tool versions 隔离。
 - 记忆整理模型：独立的 `MEMORY_API_KEY`、`MEMORY_API_BASE_URL`、`MEMORY_MODEL`。
 
