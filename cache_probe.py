@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from model_execution import ContextBundle
 from model_execution_contracts import CONTRACT_VERSION, GatewayExecutionRequest
 from model_execution_contracts import ProviderUsage
 from model_usage_store import build_cache_namespace
+from model_profile_store import ProfileStoreError
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +25,8 @@ class ProbeResult:
     status: str
     first: ProviderUsage
     second: ProviderUsage
+    profile_id: str | None = None
+    profile_revision: int | None = None
 
 
 class ProbeRunner(Protocol):
@@ -147,10 +150,13 @@ class GatewayCacheProbeService:
         actor_id: str,
         room_id: str,
         conversation_id: str,
+        profile_revision: int | None = None,
     ) -> ProbeResult:
         if actor_id not in {"jiao", "laoke"}:
             raise ValueError("cache probe actor is invalid")
         profile = await self.profiles.get_profile(profile_id)
+        if profile_revision is not None and profile.revision != profile_revision:
+            raise ProfileStoreError("Profile revision conflict before probe")
         request = self._request(
             actor_id=actor_id,
             room_id=room_id,
@@ -195,9 +201,9 @@ class GatewayCacheProbeService:
         if result.status != "failed":
             if profile.cache_strategy == "no_prompt_cache_v1":
                 result = ProbeResult("not_applicable", result.first, result.second)
-            await self.profiles.set_test_status(profile_id, "passed")
+            await self.profiles.set_test_status(profile_id, "passed", expected_revision=profile.revision)
         elif profile.test_status != "passed":
-            await self.profiles.set_test_status(profile_id, "unverified")
+            await self.profiles.set_test_status(profile_id, "unverified", expected_revision=profile.revision)
         recorder = getattr(self.profiles, "record_probe_result", None)
         if recorder is not None:
             stored_status = "verified" if result.status == "not_applicable" else result.status
@@ -217,4 +223,4 @@ class GatewayCacheProbeService:
                     "cached_tokens": result.second.cached_tokens,
                 },
             )
-        return result
+        return replace(result, profile_id=profile.profile_id, profile_revision=profile.revision)

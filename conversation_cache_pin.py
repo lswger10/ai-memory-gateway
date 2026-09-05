@@ -9,6 +9,7 @@ from typing import Any, Mapping, Protocol
 
 from model_execution import ContextBundle, ProviderRunUnavailable
 from model_execution_contracts import ProviderUsage
+from model_profile_store import ProfileStoreError
 from model_usage_store import (
     ExecutionReceiptDraft,
     build_cache_namespace,
@@ -328,7 +329,14 @@ class CachePinService:
                 continue
             for actor_id in _pin_actors(pin):
                 state = pin.actors.get(actor_id, CachePinActorState(actor_id))
-                resolved = await self.profiles.resolve(actor_id, pin.room_id)
+                try:
+                    resolved = await self.profiles.resolve(actor_id, pin.room_id)
+                except ProfileStoreError:
+                    await self.store.save_actor_state(pin.pin_id, replace(
+                        state, status="paused", next_keepalive_at=None,
+                        last_error="model_binding_unavailable",
+                    ))
+                    continue
                 profile = resolved.primary
                 cache_verified = _supports_verified_one_hour_cache(profile) and (
                     await self.profiles.has_verified_probe(

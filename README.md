@@ -60,6 +60,11 @@ Profile 明确声明：
 
 actor identity 与 Profile 解耦。Profile 切换不会改变 `actor_id`、Persona、Memory ACL 或历史。
 
+Dashboard 编辑读取已保存 Profile；空白 key/header 编辑字段表示保留既有引用，不回显密钥。
+修改配置必须提交下一 revision，并重新进入 unverified；旧页面写入返回 409，旧 revision 的探针不能认证新配置。
+Actor 默认与 ordered fallback 使用一次带 revision 的原子保存；任一 Profile 无效或并发冲突时全部不变。
+房间实际生效的 override 与 actor default 分开展示。读取失败必须显示错误，不能伪装成空配置。
+
 ## Conversation Cache Pin
 
 用户可为椒椒私聊、老克私聊、Living Room 或 active Bedroom session 开启“保持这段对话的长上下文”。
@@ -70,6 +75,8 @@ actor identity 与 Profile 解耦。Profile 切换不会改变 `actor_id`、Pers
 - keepalive 不写公开 timeline，不产生 Relay final，不触发 Memory extraction。
 - Bedroom session 正式结束后停止其 Pin。
 - usage receipt 的 `status=cache_keepalive`，Dashboard 显示 last/next/call count/cache read。
+- `active/paused` 只描述保活运行状态，最近供应商回执另分 HIT / OBSERVED_MISS / UNOBSERVABLE；缺字段不是未命中，也不能以 active 宣称命中。编辑后未验证的 Profile 会暂停保活。
+- Dashboard 诊断展示真实 receipt 的时间、Profile revision、conversation 和 prefix/version/cursor；不估算缺失的 usage。
 
 这是一项会产生 provider 费用的用户显式设置；默认没有 Pin，也没有空闲保活。
 
@@ -134,3 +141,7 @@ git diff --check
 ```
 
 真实 provider/cache probe 会产生费用，只能在用户明确授权后运行。普通单元、契约和 fake-provider tests 不访问生产、不调用付费 API。
+
+模型配置浏览器回归在独立 Edge/Chromium 中使用真实 DOM，所有网络均拦截为测试响应。
+`tests/test_postgres_model_profile_store.py` 的并发/重连验收需显式设置 `GATEWAY_MODEL_SETTINGS_TEST_DSN` 与
+`GATEWAY_TEST_POSTGRES_APPROVED=true`，只允许已授权 test PostgreSQL；测试自建并清理临时 `group_e2e_<hex>` schema，不访问业务表。

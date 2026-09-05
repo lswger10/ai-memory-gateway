@@ -47,9 +47,12 @@ def build_cache_usage_view(
         result.append(
             {
                 "generation_request_id": receipt.generation_request_id,
+                "created_at": receipt.created_at,
                 "actor_id": receipt.actor_id,
                 "room_id": receipt.room_id,
+                "conversation_id": receipt.conversation_id,
                 "profile_id": receipt.profile_id,
+                "profile_revision": receipt.profile_revision,
                 "provider": receipt.provider,
                 "protocol": receipt.protocol,
                 "route_id": receipt.route_id,

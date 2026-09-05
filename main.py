@@ -674,15 +674,30 @@ async def list_model_profiles():
 async def put_model_profile(request: Request):
     _require_model_management()
     try:
-        profile = ModelProfile.from_dict(await request.json())
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError
+        await _get_model_execution_service()
+        assert _model_profile_store is not None
+        # Editing does not require exposing or retyping stored secret references.
+        if body.get("revision", 1) != 1 and ("credential_ref" not in body or "headers" not in body):
+            current = await _model_profile_store.get_profile(str(body.get("profile_id", "")))
+            body.setdefault("credential_ref", current.credential_ref)
+            body.setdefault("headers", dict(current.headers))
+        invalid_fields = [field for field in (
+            "profile_id", "display_name", "provider", "protocol", "base_url", "route_id", "model", "credential_ref"
+        ) if not isinstance(body.get(field), str) or not body[field].strip()]
+        if invalid_fields:
+            return JSONResponse(status_code=422, content={"detail": "invalid_model_profile", "invalid_fields": invalid_fields})
+        profile = ModelProfile.from_dict(body)
         # A management write declares a route; it is not evidence that the
         # route or its cache semantics were actually observed.  Only the
         # explicit bounded probe may promote test_status later.
         profile = replace(profile, test_status="unverified")
-        await _get_model_execution_service()
-        assert _model_profile_store is not None
         stored = await _model_profile_store.put_profile(profile)
-    except (ProfileContractError, ProfileStoreError, TypeError, ValueError) as exc:
+    except ProfileStoreError as exc:
+        raise HTTPException(status_code=409, detail="model_profile_revision_conflict") from exc
+    except (ProfileContractError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="invalid_model_profile") from exc
     return _safe_profile(stored)
 
@@ -693,7 +708,14 @@ async def list_model_bindings():
     await _get_model_execution_service()
     assert _model_profile_store is not None
     result = {}
+    defaults = {}
     for actor_id in ("jiao", "laoke"):
+        binding = await _model_profile_store.get_actor_binding(actor_id)
+        defaults[actor_id] = {
+            "profile_id": binding.default_profile_id,
+            "approved_fallback_profile_ids": list(binding.approved_fallback_profile_ids),
+            "revision": binding.revision,
+        } if binding else {"profile_id": None, "approved_fallback_profile_ids": [], "revision": 0}
         actor_rooms = [
             room_id for room_id in (
                 "room_weiwei_jiao", "room_weiwei_laoke", "room_group_home"
@@ -704,6 +726,7 @@ async def list_model_bindings():
             try:
                 item = await _model_profile_store.resolve(actor_id, room_id)
             except ProfileStoreError:
+                resolved[room_id] = {"error": "model_binding_unavailable"}
                 continue
             resolved[room_id] = {
                 "profile_id": item.primary.profile_id,
@@ -712,12 +735,18 @@ async def list_model_bindings():
                 "approved_fallback_profile_ids": [p.profile_id for p in item.fallbacks],
             }
         result[actor_id] = resolved
-    return {"bindings": result}
+    return {"bindings": result, "actor_defaults": defaults}
 
 
-def _cache_pin_public(pin) -> dict:
+def _cache_pin_public(pin, cache_view=()) -> dict:
     def timestamp(value):
         return value.isoformat() if value is not None else None
+
+    def last_result(actor_id, state):
+        return next((item["cache_outcome"] for item in cache_view
+            if item["execution_purpose"] == "cache_keepalive"
+            and item["profile_id"] == state.profile_id
+            and item["generation_request_id"].startswith(f"cache-pin:{pin.pin_id}:{actor_id}:")), "UNOBSERVABLE")
 
     return {
         "pin_id": pin.pin_id,
@@ -736,6 +765,7 @@ def _cache_pin_public(pin) -> dict:
                 "call_count": state.call_count,
                 "cache_read_input_tokens": state.cache_read_input_tokens,
                 "last_error": state.last_error,
+                "cache_outcome": last_result(actor_id, state),
             }
             for actor_id, state in sorted(pin.actors.items())
         },
@@ -748,7 +778,9 @@ async def list_conversation_cache_pins():
     if not MEMORY_ENABLED:
         raise HTTPException(status_code=503, detail="memory_storage_required")
     pins = await (await _get_cache_pin_service()).list_pins()
-    return {"pins": [_cache_pin_public(pin) for pin in pins]}
+    receipts = await _model_usage_store.list_receipts(limit=200) if _model_usage_store is not None else ()
+    cache_view = build_cache_usage_view(receipts)
+    return {"pins": [_cache_pin_public(pin, cache_view) for pin in pins]}
 
 
 @app.put("/api/cache-pins")
@@ -798,7 +830,15 @@ async def update_model_binding(request: Request):
         if actor_id not in {"jiao", "laoke"}:
             raise ValueError
         expected = body.get("expected_revision")
-        if action == "set_actor_default":
+        if action == "save_actor_binding":
+            values = body.get("profile_ids")
+            if (not isinstance(values, list) or not all(isinstance(item, str) for item in values)
+                or type(expected) is not int or expected < 0):
+                raise ValueError
+            result = await _model_profile_store.save_actor_binding(
+                actor_id, str(body["profile_id"]), tuple(values), expected_revision=expected
+            )
+        elif action == "set_actor_default":
             result = await _model_profile_store.set_actor_default(
                 actor_id, str(body["profile_id"]), expected_revision=expected
             )
@@ -1079,6 +1119,10 @@ async def run_cache_probe(request: Request):
             "room_id": room_id,
             "conversation_id": str(body["conversation_id"]),
         }
+        if "profile_revision" in body:
+            if type(body["profile_revision"]) is not int or body["profile_revision"] < 1:
+                raise ValueError
+            values["profile_revision"] = body["profile_revision"]
         if _cache_probe_service is None:
             await _get_model_execution_service()
             assert _model_profile_store is not None
@@ -1090,10 +1134,14 @@ async def run_cache_probe(request: Request):
         result = await _cache_probe_service.run(**values)
     except HTTPException:
         raise
-    except (KeyError, TypeError, ValueError, ProfileStoreError) as exc:
+    except ProfileStoreError as exc:
+        raise HTTPException(status_code=409, detail="model_profile_revision_conflict") from exc
+    except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="invalid_cache_probe") from exc
     return {
         "status": result.status,
+        "profile_id": result.profile_id,
+        "profile_revision": result.profile_revision,
         "first": _usage_dict(result.first),
         "second": _usage_dict(result.second),
     }

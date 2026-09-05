@@ -4,6 +4,8 @@ import main
 from model_profiles import ModelProfile
 from cache_probe import ProbeResult
 from model_execution_contracts import ProviderUsage
+import asyncio
+from model_profile_store import InMemoryModelProfileStore
 
 
 def _profile_payload(**overrides):
@@ -123,3 +125,63 @@ def test_cache_probe_requires_explicit_charge_confirmation(monkeypatch):
     assert accepted.status_code == 200
     assert accepted.json()["status"] == "verified"
     assert accepted.json()["second"]["cache_read_input_tokens"] == 80
+
+
+def _client_with_store(monkeypatch, store):
+    async def runtime():
+        return object()
+    monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
+    monkeypatch.setattr(main, "_model_profile_store", store)
+    monkeypatch.setattr(main, "_get_model_execution_service", runtime)
+    return TestClient(main.app)
+
+
+def test_profile_edit_preserves_hidden_credentials_and_rejects_stale_save(monkeypatch):
+    store = InMemoryModelProfileStore()
+    original = ModelProfile.from_dict(_profile_payload())
+    asyncio.run(store.put_profile(original))
+    client = _client_with_store(monkeypatch, store)
+    edit = _profile_payload(display_name="Edited", revision=2)
+    del edit["credential_ref"]
+    del edit["headers"]
+    saved = client.put("/api/model-profiles", json=edit)
+    assert saved.status_code == 200
+    current = asyncio.run(store.get_profile(original.profile_id))
+    assert current.credential_ref == original.credential_ref
+    assert current.headers == original.headers
+    assert current.test_status == "unverified"
+    stale = client.put("/api/model-profiles", json={**edit, "model": "stale-model"})
+    assert stale.status_code == 409
+    assert asyncio.run(store.get_profile(original.profile_id)) == current
+
+
+def test_binding_save_is_one_atomic_request_and_reads_actual_actor_default(monkeypatch):
+    store = InMemoryModelProfileStore()
+    async def seed():
+        for name in ("first", "second"):
+            await store.put_profile(ModelProfile.from_dict(_profile_payload(profile_id=name)))
+        await store.set_actor_default("jiao", "first")
+        await store.set_room_override("room_weiwei_jiao", "jiao", "second")
+        await store.set_room_override("room_weiwei_jiao", "jiao", "second", expected_revision=1)
+    asyncio.run(seed())
+    client = _client_with_store(monkeypatch, store)
+    snapshot = client.get("/api/model-bindings").json()
+    assert snapshot["actor_defaults"]["jiao"] == {
+        "profile_id": "first", "approved_fallback_profile_ids": [], "revision": 1}
+    failed = client.put("/api/model-bindings", json={
+        "action": "save_actor_binding", "actor_id": "jiao", "profile_id": "second",
+        "profile_ids": ["missing"], "expected_revision": 1})
+    assert failed.status_code == 409
+    assert client.get("/api/model-bindings").json()["actor_defaults"] == snapshot["actor_defaults"]
+    accepted = client.put("/api/model-bindings", json={
+        "action": "save_actor_binding", "actor_id": "jiao", "profile_id": "second",
+        "profile_ids": ["first"], "expected_revision": 1})
+    assert accepted.status_code == 200
+    assert accepted.json()["revision"] == 2
+
+
+def test_invalid_profile_returns_safe_field_errors_before_any_provider_call(monkeypatch):
+    client = _client_with_store(monkeypatch, InMemoryModelProfileStore())
+    response = client.put("/api/model-profiles", json=_profile_payload(base_url="", model=""))
+    assert response.status_code == 422
+    assert response.json()["invalid_fields"] == ["base_url", "model"]

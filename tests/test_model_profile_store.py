@@ -1,4 +1,5 @@
 import pytest
+from dataclasses import replace
 
 from database import MODEL_EXECUTION_MIGRATION_SQL, apply_model_execution_schema
 from model_profile_store import InMemoryModelProfileStore, ProfileStoreError
@@ -136,3 +137,46 @@ async def test_unverified_fallback_is_rejected_before_resolution():
     await store.set_actor_default("jiao", "default")
     with pytest.raises(ProfileStoreError, match="selectable"):
         await store.set_approved_fallbacks("jiao", ("unverified",))
+
+
+@pytest.mark.anyio
+async def test_changed_profile_requires_next_revision_and_invalidates_certification():
+    store = InMemoryModelProfileStore()
+    original = _profile("default")
+    await store.put_profile(original)
+    await store.record_probe_result(profile_id="default", profile_revision=1,
+        probe_kind="frozen_double_send_cache", status="verified", observed_capabilities={})
+    with pytest.raises(ProfileStoreError, match="revision"):
+        await store.put_profile(replace(original, model="changed"))
+    assert await store.get_profile("default") == original
+    updated = await store.put_profile(replace(original, model="changed", revision=2))
+    assert updated.test_status == "unverified"
+    assert not await store.has_verified_probe("default", 2, "frozen_double_send_cache")
+
+
+@pytest.mark.anyio
+async def test_probe_status_cannot_certify_a_different_revision():
+    store = InMemoryModelProfileStore()
+    await store.put_profile(_profile("default", status="unverified"))
+    await store.put_profile(replace(_profile("default", status="unverified"), revision=2))
+    with pytest.raises(ProfileStoreError, match="revision"):
+        await store.set_test_status("default", "passed", expected_revision=1)
+    assert (await store.get_profile("default")).test_status == "unverified"
+
+
+@pytest.mark.anyio
+async def test_save_binding_is_atomic_and_rejects_stale_revision():
+    store = InMemoryModelProfileStore()
+    for name in ("first", "next", "backup"):
+        await store.put_profile(_profile(name))
+    original = await store.set_actor_default("jiao", "first")
+    with pytest.raises(ProfileStoreError):
+        await store.save_actor_binding("jiao", "next", ("missing",), expected_revision=original.revision)
+    assert (await store.resolve("jiao", "room_weiwei_jiao")).primary.profile_id == "first"
+    saved = await store.save_actor_binding("jiao", "next", ("backup",), expected_revision=original.revision)
+    assert saved.revision == original.revision + 1
+    with pytest.raises(ProfileStoreError, match="revision"):
+        await store.save_actor_binding("jiao", "first", (), expected_revision=original.revision)
+    resolved = await store.resolve("jiao", "room_weiwei_jiao")
+    assert resolved.primary.profile_id == "next"
+    assert [p.profile_id for p in resolved.fallbacks] == ["backup"]

@@ -125,6 +125,8 @@ function switchSection(name) {
 // ============================================
 let _gatewayModelProfiles = [];
 let _gatewayModelBindings = {};
+let _gatewayActorDefaults = {};
+let _editingModelProfile = null;
 let _conversationCachePins = [];
 
 function _modelField(id) {
@@ -140,19 +142,17 @@ function _modelMessage(text, error = false) {
 function _profilePayload() {
     const strategy = _modelField('model-profile-cache-strategy').value;
     const ttl = _modelField('model-profile-cache-ttl').value || null;
-    return {
+    const payload = {
         profile_id: _modelField('model-profile-id').value.trim(),
         display_name: _modelField('model-profile-name').value.trim(),
-        enabled: true,
+        enabled: _modelField('model-profile-enabled').checked,
         test_status: 'unverified',
         provider: _modelField('model-profile-provider').value.trim(),
         protocol: _modelField('model-profile-protocol').value,
         base_url: _modelField('model-profile-base-url').value.trim(),
         route_id: _modelField('model-profile-route-id').value.trim(),
         model: _modelField('model-profile-model').value.trim(),
-        adapter_version: 'gateway-profile.v1',
-        credential_ref: 'env:' + _modelField('model-profile-key-env').value.trim(),
-        headers: JSON.parse(_modelField('model-profile-headers').value || '{}'),
+        adapter_version: _editingModelProfile?.adapter_version || 'gateway-profile.v1',
         capabilities: {
             streaming: _modelField('model-cap-streaming').checked,
             structured_output: _modelField('model-cap-structured').checked,
@@ -160,31 +160,67 @@ function _profilePayload() {
             reasoning_controls: _modelField('model-cap-reasoning').checked,
             cache_strategies: [strategy],
             cache_ttls: ttl ? [ttl] : [],
-            usage_fields: ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'cached_tokens'],
+            usage_fields: _editingModelProfile?.capabilities.usage_fields || [],
             input_modalities: [
                 'text',
                 ...(_modelField('model-cap-image').checked ? ['image'] : []),
-                ...(_modelField('model-cap-document').checked ? ['document'] : [])
+                ...(_modelField('model-cap-document').checked ? ['document'] : []),
+                ...(_editingModelProfile?.capabilities.input_modalities || []).filter(v => !['text', 'image', 'document'].includes(v))
             ]
         },
         cache_strategy: strategy,
         requested_cache_ttl: ttl,
-        revision: 1
+        revision: (_editingModelProfile?.revision || 0) + 1
     };
+    const key = _modelField('model-profile-key-env').value.trim();
+    const headers = _modelField('model-profile-headers').value.trim();
+    if (key || !_editingModelProfile) payload.credential_ref = 'env:' + key;
+    if (headers || !_editingModelProfile) payload.headers = JSON.parse(headers || '{}');
+    return payload;
 }
 
 async function saveModelProfile() {
+    if (!_modelField('model-profile-form').reportValidity()) return;
+    const button = _modelField('model-profile-save');
+    if (button.disabled) return;
+    button.disabled = true;
     try {
         const response = await fetch('/api/model-profiles', {
             method: 'PUT', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(_profilePayload())
         });
-        if (!response.ok) throw new Error((await response.json()).detail || '保存失败');
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(`${response.status}: ${error.detail || '保存失败'}${error.invalid_fields ? ' [' + error.invalid_fields.join(', ') + ']' : ''}`);
+        }
         _modelMessage('Profile 已保存为“未验证”。请按需运行人工探针。');
         await loadModelProfilesAndUsage();
+        editModelProfile(_editingModelProfile?.profile_id || _modelField('model-profile-id').value);
     } catch (error) {
         _modelMessage(error.message, true);
+    } finally {
+        button.disabled = false;
     }
+}
+
+function editModelProfile(profileId = '') {
+    _editingModelProfile = _gatewayModelProfiles.find(p => p.profile_id === profileId) || null;
+    const p = _editingModelProfile;
+    const fields = {id: 'profile_id', name: 'display_name', provider: 'provider', protocol: 'protocol',
+        'base-url': 'base_url', 'route-id': 'route_id', model: 'model', 'cache-strategy': 'cache_strategy', 'cache-ttl': 'requested_cache_ttl'};
+    for (const [id, field] of Object.entries(fields)) {
+        _modelField('model-profile-' + id).value = p?.[field] || (id === 'protocol' ? 'anthropic_messages' : id === 'cache-strategy' ? 'no_prompt_cache_v1' : '');
+    }
+    _modelField('model-profile-id').readOnly = !!p;
+    _modelField('model-profile-enabled').checked = p ? p.enabled : true;
+    _modelField('model-profile-key-env').value = '';
+    _modelField('model-profile-key-env').required = !p;
+    _modelField('model-profile-headers').value = '';
+    _modelField('model-profile-revision').textContent = p ? `revision ${p.revision}` : '新建 Profile';
+    for (const [id, key] of Object.entries({streaming: 'streaming', structured: 'structured_output', tools: 'tools', reasoning: 'reasoning_controls'})) {
+        _modelField('model-cap-' + id).checked = !!p?.capabilities[key];
+    }
+    for (const kind of ['image', 'document']) _modelField('model-cap-' + kind).checked = !!p?.capabilities.input_modalities.includes(kind);
 }
 
 function _cacheOutcomeLabel(value) {
@@ -200,13 +236,31 @@ function _renderModelProfiles() {
                 <span class="badge">${escapeHtml(profile.test_status)}</span>
                 <div class="form-hint">${escapeHtml(profile.provider)} · ${escapeHtml(profile.protocol)} · ${escapeHtml(profile.model)}</div>
                 <div class="form-hint">${escapeHtml(profile.cache_strategy)} · TTL ${escapeHtml(profile.requested_cache_ttl || 'none')} · key ${profile.credential_configured ? 'configured' : 'missing'}</div>
+                <button class="btn btn-secondary" data-profile-id="${escapeHtml(profile.profile_id)}" onclick="editModelProfile(this.dataset.profileId)">编辑</button>
             </div>`).join('') : '<p class="form-hint">尚无 Model Profile。</p>';
     }
     const options = _gatewayModelProfiles.map(profile => `<option value="${escapeHtml(profile.profile_id)}">${escapeHtml(profile.display_name)} · ${escapeHtml(profile.test_status)}</option>`).join('');
-    ['probe-profile', 'binding-default-profile'].forEach(id => {
-        const select = _modelField(id);
-        if (select) select.innerHTML = options;
-    });
+    const probe = _modelField('probe-profile');
+    const previous = probe.value;
+    probe.innerHTML = options;
+    if (_gatewayModelProfiles.some(p => p.profile_id === previous)) probe.value = previous;
+    renderActorBinding();
+}
+
+function renderActorBinding() {
+    const actorId = _modelField('binding-actor').value;
+    const binding = _gatewayActorDefaults[actorId];
+    const select = _modelField('binding-default-profile');
+    const profiles = _gatewayModelProfiles.filter(p => p.enabled && p.test_status === 'passed');
+    select.innerHTML = '<option value="">—</option>' + profiles.map(p => `<option value="${escapeHtml(p.profile_id)}">${escapeHtml(p.display_name)}</option>`).join('');
+    if (binding?.profile_id && !profiles.some(p => p.profile_id === binding.profile_id)) {
+        select.innerHTML += `<option disabled value="${escapeHtml(binding.profile_id)}">${escapeHtml(binding.profile_id)} · unavailable</option>`;
+    }
+    select.value = binding?.profile_id || '';
+    _modelField('binding-fallbacks').value = (binding?.approved_fallback_profile_ids || []).join(', ');
+    _modelField('binding-save').disabled = !binding;
+    _modelField('binding-effective').textContent = Object.entries(_gatewayModelBindings[actorId] || {}).map(([room, value]) =>
+        `${room}: ${value.error || value.profile_id} · ${value.source || 'unavailable'}`).join('\n');
 }
 
 function _renderModelUsage(cacheView, observability) {
@@ -214,7 +268,15 @@ function _renderModelUsage(cacheView, observability) {
     if (!body) return;
     const n = value => value === null || value === undefined ? '—' : String(value);
     body.innerHTML = cacheView.length ? cacheView.map(item => `<tr>
-        <td>${escapeHtml(item.actor_id)}<br><small>${escapeHtml(item.execution_purpose || 'generation')}</small></td><td>${escapeHtml(item.profile_id)}<br><small>${escapeHtml(item.model)}</small></td>
+        <td>${escapeHtml(item.actor_id)}<br><small>${escapeHtml(item.execution_purpose || 'generation')}</small><br><small>${escapeHtml(item.created_at || '—')}</small></td><td>${escapeHtml(item.profile_id)} · r${item.profile_revision ?? '—'}<br><small>${escapeHtml(item.model)}</small>
+        <details><summary>诊断字段</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;">${escapeHtml(JSON.stringify({room_id: item.room_id, conversation_id: item.conversation_id,
+            generation_request_id: item.generation_request_id, provider: item.provider, protocol: item.protocol, route_id: item.route_id,
+            cache_strategy: item.cache_strategy, requested_cache_ttl: item.requested_cache_ttl,
+            stable_prefix_hash: item.stable_prefix_hash, prompt_cache_key: item.prompt_cache_key,
+            persona_version: item.persona_version, runtime_kernel_version: item.runtime_kernel_version,
+            room_policy_version: item.room_policy_version, tool_schema_hash: item.tool_schema_hash,
+            summary_version: item.summary_version, compressed_up_to_event_id: item.compressed_up_to_event_id,
+            provider_usage_received: item.provider_usage_received}, null, 2))}</pre></details></td>
         <td>${escapeHtml(_cacheOutcomeLabel(item.cache_outcome))}</td>
         <td>${n(item.input_tokens)}</td><td>${n(item.output_tokens)}</td>
         <td>${n(item.cache_creation_input_tokens)}</td><td>${n(item.cache_read_input_tokens)}</td><td>${n(item.cached_tokens)}</td>
@@ -237,7 +299,9 @@ function _renderConversationCachePins() {
         const actors = Object.entries(pin.actors || {}).map(([actor, state]) =>
             `<div class="form-hint">${escapeHtml(actor)} · ${escapeHtml(state.status)} · ${escapeHtml(state.profile_id || 'unbound')} · ` +
             `last ${escapeHtml(state.last_keepalive || '—')} · next ${escapeHtml(state.next_keepalive || '—')} · ` +
-            `calls ${state.call_count || 0} · cache read ${state.cache_read_input_tokens ?? '—'}</div>`
+            `calls ${state.call_count || 0} · cache read ${state.cache_read_input_tokens ?? '—'} · ` +
+            `${escapeHtml(_cacheOutcomeLabel(state.cache_outcome || 'UNOBSERVABLE'))}` +
+            `${state.last_error ? ' · ' + escapeHtml(state.last_error) : ''}</div>`
         ).join('');
         return `<div class="memory-item" style="margin-bottom:10px;">
             <strong>${escapeHtml(pin.room_id)} · ${escapeHtml(pin.execution_mode)}</strong>
@@ -259,34 +323,51 @@ function _renderActorMemoryAudit(items) {
 }
 
 async function loadModelProfilesAndUsage() {
-    try {
-        const [profiles, bindings, usage, pins, memoryAudit] = await Promise.all([
-            fetch('/api/model-profiles').then(r => r.ok ? r.json() : Promise.reject(new Error('Model Profile 管理未启用'))),
-            fetch('/api/model-bindings').then(r => r.json()),
-            fetch('/api/model-usage/summary').then(r => r.json()),
-            fetch('/api/cache-pins').then(r => r.json()),
-            fetch('/api/actor-memory-tools/audit').then(r => r.json())
-        ]);
-        _gatewayModelProfiles = profiles.profiles || [];
-        _gatewayModelBindings = bindings.bindings || {};
+    const paths = ['/api/model-profiles', '/api/model-bindings', '/api/model-usage/summary', '/api/cache-pins', '/api/actor-memory-tools/audit'];
+    const results = await Promise.allSettled(paths.map(async path => {
+        const response = await fetch(path);
+        if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+        return response.json();
+    }));
+    const [profiles, bindings, usage, pins, memoryAudit] = results;
+    if (profiles.status === 'fulfilled' && bindings.status === 'fulfilled') {
+        _gatewayModelProfiles = profiles.value.profiles;
+        _gatewayModelBindings = bindings.value.bindings;
+        _gatewayActorDefaults = bindings.value.actor_defaults;
         _renderModelProfiles();
-        _renderModelUsage(usage.cache_view || [], usage.cache_observability || {});
-        _conversationCachePins = pins.pins || [];
-        _renderConversationCachePins();
-        _renderActorMemoryAudit(memoryAudit.items || []);
-    } catch (error) {
-        _modelMessage(error.message, true);
+    } else {
+        _gatewayActorDefaults = {};
+        _gatewayModelBindings = {};
+        _gatewayModelProfiles = [];
+        _renderModelProfiles();
+        _modelField('binding-save').disabled = true;
+        _modelField('model-profile-list').textContent = '配置读取失败';
     }
+    if (usage.status === 'fulfilled') _renderModelUsage(usage.value.cache_view, usage.value.cache_observability);
+    else _modelField('model-usage-body').innerHTML = `<tr><td colspan="8">${escapeHtml(usage.reason.message)}</td></tr>`;
+    if (pins.status === 'fulfilled') {
+        _conversationCachePins = pins.value.pins;
+        _renderConversationCachePins();
+    } else _modelField('conversation-cache-pin-list').textContent = pins.reason.message;
+    if (memoryAudit.status === 'fulfilled') _renderActorMemoryAudit(memoryAudit.value.items);
+    else _modelField('actor-memory-audit-body').innerHTML = `<tr><td colspan="6">${escapeHtml(memoryAudit.reason.message)}</td></tr>`;
+    const errors = results.filter(r => r.status === 'rejected').map(r => r.reason.message);
+    if (errors.length) _modelMessage(errors.join(' · '), true);
 }
 
 async function runCacheProbe() {
     const conversationId = _modelField('probe-conversation').value.trim();
     if (!conversationId) return _modelMessage('请填写 Relay 返回的 canonical conversation ID。', true);
+    const profile = _gatewayModelProfiles.find(p => p.profile_id === _modelField('probe-profile').value);
+    const button = _modelField('cache-probe-run');
+    if (!profile || button.disabled) return;
+    button.disabled = true;
     try {
         const response = await fetch('/api/cache-probes', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                profile_id: _modelField('probe-profile').value,
+                profile_id: profile.profile_id,
+                profile_revision: profile.revision,
                 actor_id: _modelField('probe-actor').value,
                 room_id: _modelField('probe-room').value,
                 conversation_id: conversationId,
@@ -299,32 +380,33 @@ async function runCacheProbe() {
         await loadModelProfilesAndUsage();
     } catch (error) {
         _modelMessage(error.message, true);
+    } finally {
+        button.disabled = false;
     }
 }
 
 async function saveActorBinding() {
     const actorId = _modelField('binding-actor').value;
     const profileId = _modelField('binding-default-profile').value;
-    const current = _gatewayModelBindings[actorId] || {};
-    const roomValues = Object.values(current);
-    const revision = roomValues.length ? roomValues[0].binding_revision : null;
+    const current = _gatewayActorDefaults[actorId];
+    if (!current || !profileId) return;
+    const revision = current.revision;
     const fallbackIds = _modelField('binding-fallbacks').value.split(',').map(value => value.trim()).filter(Boolean);
+    const button = _modelField('binding-save');
+    if (button.disabled) return;
+    button.disabled = true;
     try {
-        let response = await fetch('/api/model-bindings', {
+        const response = await fetch('/api/model-bindings', {
             method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: 'set_actor_default', actor_id: actorId, profile_id: profileId, expected_revision: revision})
+            body: JSON.stringify({action: 'save_actor_binding', actor_id: actorId, profile_id: profileId, profile_ids: fallbackIds, expected_revision: revision})
         });
-        if (!response.ok) throw new Error((await response.json()).detail || '默认 Profile 保存失败');
-        const accepted = await response.json();
-        response = await fetch('/api/model-bindings', {
-            method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: 'set_fallbacks', actor_id: actorId, profile_ids: fallbackIds, expected_revision: accepted.revision})
-        });
-        if (!response.ok) throw new Error((await response.json()).detail || 'fallback 保存失败');
+        if (!response.ok) throw new Error((await response.json()).detail || '保存失败');
         _modelMessage('Actor 默认与显式 fallback 已保存。');
         await loadModelProfilesAndUsage();
     } catch (error) {
         _modelMessage(error.message, true);
+    } finally {
+        button.disabled = !_gatewayActorDefaults[_modelField('binding-actor').value];
     }
 }
 

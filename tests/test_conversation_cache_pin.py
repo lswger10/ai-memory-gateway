@@ -16,6 +16,27 @@ from model_usage_store import InMemoryModelUsageStore
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
 
 
+@pytest.mark.anyio
+async def test_pin_api_separates_running_state_from_real_receipt_outcome():
+    import main
+    from dataclasses import replace
+    from cache_dashboard import build_cache_usage_view
+    service, _, _, _ = await _service()
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="conversation-laoke",
+        execution_mode="private", enabled=True)
+    await service.run_due_once()
+    pin = await service.get_pin(pin.pin_id)
+    receipt = (await service.usage_store.list_receipts())[0]
+    for read, creation, expected in ((118, 2, "HIT"), (0, 120, "OBSERVED_MISS"), (None, None, "UNOBSERVABLE")):
+        observed = replace(receipt, usage=ProviderUsage.from_provider_values(
+            cache_read_input_tokens=read, cache_creation_input_tokens=creation))
+        view = main._cache_pin_public(pin, build_cache_usage_view((observed,)))
+        assert view["actors"]["laoke"]["status"] == "active"
+        assert view["actors"]["laoke"]["cache_outcome"] == expected
+    other = replace(receipt, generation_request_id="cache-pin:private:other:laoke:test")
+    assert main._cache_pin_public(pin, build_cache_usage_view((other,)))["actors"]["laoke"]["cache_outcome"] == "UNOBSERVABLE"
+
+
 def _profile(profile_id: str, *, ttl: str | None = "1h") -> ModelProfile:
     strategy = "anthropic_prefix_anchored_v1" if ttl else "no_prompt_cache_v1"
     return ModelProfile.from_dict(
@@ -177,6 +198,21 @@ async def test_private_pin_survives_service_restart_and_respects_due_time():
     assert persisted.enabled is True
     assert persisted.actors["laoke"].next_keepalive_at == NOW + timedelta(minutes=50)
     assert len(runner.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_edited_unverified_profile_pauses_pin_without_provider_call():
+    from dataclasses import replace
+    service, _, _, runner = await _service()
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="conversation-laoke",
+        execution_mode="private", enabled=True)
+    await service.run_due_once()
+    profile = await service.profiles.get_profile("laoke-1h")
+    await service.profiles.put_profile(replace(profile, model="changed-model", revision=2))
+    result = await service.run_due_once()
+    assert result.calls == 0
+    assert len(runner.calls) == 1
+    assert (await service.get_pin(pin.pin_id)).actors["laoke"].status == "paused"
 
 
 @pytest.mark.anyio

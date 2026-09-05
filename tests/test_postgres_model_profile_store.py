@@ -1,9 +1,14 @@
 import json
+import asyncio
+import os
+import uuid
+from dataclasses import replace
 
 import pytest
 
 from model_profiles import ModelProfile
 from postgres_model_stores import PostgresModelProfileStore
+from model_profile_store import ProfileStoreError
 
 
 def _profile_payload() -> dict:
@@ -161,3 +166,53 @@ async def test_postgres_profile_store_requires_verified_probe_for_cache_capabili
     assert await store.has_verified_probe(
         "ofox-claude-cache-5m", 1, "frozen_double_send_cache"
     )
+
+
+@pytest.mark.anyio
+async def test_real_postgres_model_settings_atomicity_and_restart():
+    """Opt-in test DSN only; all writes are confined to a disposable schema."""
+    dsn = os.environ.get("GATEWAY_MODEL_SETTINGS_TEST_DSN")
+    if not dsn or os.environ.get("GATEWAY_TEST_POSTGRES_APPROVED") != "true":
+        pytest.skip("BLOCKED: explicit isolated test PostgreSQL authorization/DSN required")
+    import asyncpg
+    from database import apply_model_execution_schema
+    schema = "group_e2e_" + uuid.uuid4().hex
+    admin = await asyncpg.connect(dsn)
+    pool = None
+    try:
+        await admin.execute(f'CREATE SCHEMA "{schema}"')
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=3, server_settings={"search_path": schema})
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT current_schema()") == schema
+            await apply_model_execution_schema(conn)
+        store = PostgresModelProfileStore(lambda: _pool(pool))
+        profiles = [ModelProfile.from_dict({**_profile_payload(), "profile_id": name, "test_status": "passed"}) for name in ("first", "next", "backup")]
+        for p in profiles:
+            await store.put_profile(p)
+        original = await store.save_actor_binding("jiao", "first", ("backup",), expected_revision=0)
+        with pytest.raises(ProfileStoreError):
+            await store.save_actor_binding("jiao", "next", ("missing",), expected_revision=original.revision)
+        assert await store.get_actor_binding("jiao") == original
+        saves = await asyncio.gather(
+            store.save_actor_binding("jiao", "next", ("backup",), expected_revision=1),
+            store.save_actor_binding("jiao", "backup", ("next",), expected_revision=1), return_exceptions=True)
+        assert sum(isinstance(s, ProfileStoreError) for s in saves) == 1
+        edits = await asyncio.gather(
+            store.put_profile(replace(profiles[0], model="edited-a", revision=2)),
+            store.put_profile(replace(profiles[0], model="edited-b", revision=2)), return_exceptions=True)
+        assert sum(isinstance(s, ProfileStoreError) for s in edits) == 1
+        with pytest.raises(ProfileStoreError, match="revision"):
+            await store.set_test_status("first", "passed", expected_revision=1)
+        assert (await store.get_profile("first")).test_status == "unverified"
+        persisted = await store.get_actor_binding("jiao")
+        await pool.close()
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2, server_settings={"search_path": schema})
+        restarted = PostgresModelProfileStore(lambda: _pool(pool))
+        assert await restarted.get_actor_binding("jiao") == persisted
+        assert (await restarted.get_profile("first")).revision == 2
+    finally:
+        if pool is not None:
+            await pool.close()
+        await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        assert not await admin.fetchval("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)", schema)
+        await admin.close()

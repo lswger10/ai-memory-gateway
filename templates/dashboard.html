@@ -433,24 +433,27 @@
                     <p class="section-desc">Model Profile、人工验证、显式 fallback 与供应商真实 usage</p>
                 </div>
 
-                <div id="models-msg" class="msg-container"></div>
-                <div class="card settings-card">
+                <div id="models-msg" class="msg-container" role="status"></div>
+                <form id="model-profile-form" class="card settings-card" onsubmit="event.preventDefault(); saveModelProfile()">
                     <h3 class="settings-group-title">Model Profile</h3>
+                    <span id="model-profile-revision">新建 Profile</span>
+                    <button type="button" class="btn btn-secondary" onclick="editModelProfile()">新建</button>
                     <p class="form-hint">这里只保存路线配置和环境变量名称，不保存 API Key。新配置必须通过人工探针后才会出现在聊天模型选择器。</p>
                     <div class="settings-grid">
-                        <div class="settings-field"><label>Profile ID</label><input id="model-profile-id" class="input" placeholder="ofox-claude-opus"></div>
-                        <div class="settings-field"><label>显示名称</label><input id="model-profile-name" class="input" placeholder="OFOX Claude Opus"></div>
-                        <div class="settings-field"><label>Provider</label><input id="model-profile-provider" class="input" placeholder="ofox"></div>
+                        <div class="settings-field"><label for="model-profile-id">Profile ID</label><input id="model-profile-id" required class="input" placeholder="ofox-claude-opus"></div>
+                        <div class="settings-field"><label for="model-profile-name">显示名称</label><input id="model-profile-name" required class="input" placeholder="OFOX Claude Opus"></div>
+                        <div class="settings-field"><label for="model-profile-provider">Provider</label><input id="model-profile-provider" required class="input" placeholder="ofox"></div>
                         <div class="settings-field"><label>Protocol</label><select id="model-profile-protocol" class="input"><option value="anthropic_messages">anthropic_messages</option><option value="anthropic_messages_compatible">anthropic_messages_compatible</option><option value="openai_responses">openai_responses</option><option value="openai_chat_completions">openai_chat_completions</option></select></div>
-                        <div class="settings-field"><label>Base URL</label><input id="model-profile-base-url" class="input" placeholder="https://api.example.com"></div>
-                        <div class="settings-field"><label>Route ID</label><input id="model-profile-route-id" class="input" placeholder="provider-route-1"></div>
-                        <div class="settings-field"><label>模型</label><input id="model-profile-model" class="input" placeholder="provider/model-name"></div>
-                        <div class="settings-field"><label>API Key 环境变量名</label><input id="model-profile-key-env" class="input" placeholder="OFOX_API_KEY"></div>
+                        <div class="settings-field"><label for="model-profile-base-url">Base URL</label><input id="model-profile-base-url" required type="url" class="input" placeholder="https://api.example.com"></div>
+                        <div class="settings-field"><label for="model-profile-route-id">Route ID</label><input id="model-profile-route-id" required class="input" placeholder="provider-route-1"></div>
+                        <div class="settings-field"><label for="model-profile-model">模型</label><input id="model-profile-model" required class="input" placeholder="provider/model-name"></div>
+                        <div class="settings-field"><label for="model-profile-key-env">API Key 环境变量名</label><input id="model-profile-key-env" required class="input" placeholder="OFOX_API_KEY"></div>
                         <div class="settings-field"><label>Header templates (JSON)</label><input id="model-profile-headers" class="input" value='{"Authorization":"Bearer ${credential}"}'><small class="form-hint">只写模板，不粘贴真实 Key。Anthropic 可用 {"x-api-key":"${credential}","anthropic-version":"2023-06-01"}</small></div>
                         <div class="settings-field"><label>Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option></select></div>
                         <div class="settings-field"><label>请求 TTL</label><select id="model-profile-cache-ttl" class="input"><option value="">不请求</option><option value="5m">5m</option><option value="1h">1h（必须由真实探针验证）</option></select></div>
                     </div>
                     <div style="display:flex;gap:14px;flex-wrap:wrap;margin:12px 0;">
+                        <label class="checkbox-label"><input type="checkbox" id="model-profile-enabled" checked> enabled</label>
                         <label class="checkbox-label"><input type="checkbox" id="model-cap-streaming" checked> streaming</label>
                         <label class="checkbox-label"><input type="checkbox" id="model-cap-structured"> structured output</label>
                         <label class="checkbox-label"><input type="checkbox" id="model-cap-tools"> tools</label>
@@ -458,8 +461,9 @@
                         <label class="checkbox-label"><input type="checkbox" id="model-cap-image"> image input</label>
                         <label class="checkbox-label"><input type="checkbox" id="model-cap-document"> document input</label>
                     </div>
-                    <button class="btn btn-primary" onclick="saveModelProfile()">保存为未验证 Profile</button>
-                </div>
+                    <p class="form-hint">编辑时，Key 环境变量名和 Header 留空即保留现有配置；填写 {} 可清空 Header。保存推进 revision。</p>
+                    <button id="model-profile-save" type="submit" class="btn btn-primary">保存为未验证 Profile</button>
+                </form>
 
                 <div class="card settings-card">
                     <h3 class="settings-group-title">已配置 Profile</h3>
@@ -475,7 +479,7 @@
                         <div class="settings-field"><label>Room</label><select id="probe-room" class="input"><option value="room_weiwei_jiao">椒椒私聊</option><option value="room_weiwei_laoke">老克私聊</option><option value="room_group_home">客厅</option></select></div>
                         <div class="settings-field"><label>Canonical conversation ID</label><input id="probe-conversation" class="input" placeholder="从 Relay /app/rooms 取得"></div>
                     </div>
-                    <button class="btn btn-warning" onclick="runCacheProbe()">确认产生两次调用并运行</button>
+                    <button id="cache-probe-run" class="btn btn-warning" onclick="runCacheProbe()">确认产生两次调用并运行</button>
                     <pre id="cache-probe-result" class="form-hint" style="white-space:pre-wrap;margin-top:12px;"></pre>
                 </div>
 
@@ -483,11 +487,12 @@
                     <h3 class="settings-group-title">Actor 默认与自动 fallback</h3>
                     <p class="form-hint">自动 fallback 只使用这里明确保存的有序 Profile ID，不跨到未批准路线。</p>
                     <div class="settings-grid">
-                        <div class="settings-field"><label>Actor</label><select id="binding-actor" class="input"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
+                        <div class="settings-field"><label>Actor</label><select id="binding-actor" class="input" onchange="renderActorBinding()"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
                         <div class="settings-field"><label>默认 Profile</label><select id="binding-default-profile" class="input"></select></div>
                         <div class="settings-field"><label>有序 fallback IDs</label><input id="binding-fallbacks" class="input" placeholder="profile-b, profile-c"></div>
                     </div>
-                    <button class="btn btn-primary" onclick="saveActorBinding()">保存默认与 fallback</button>
+                    <button id="binding-save" class="btn btn-primary" disabled onclick="saveActorBinding()">保存默认与 fallback</button>
+                    <pre id="binding-effective" class="form-hint" style="white-space:pre-wrap;"></pre>
                 </div>
 
                 <div class="card table-card">
@@ -608,6 +613,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.10-memory-delete-modal"></script>
+    <script src="/static/js/dashboard.js?v=3.11-model-settings-consistency"></script>
 </body>
 </html>

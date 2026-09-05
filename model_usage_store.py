@@ -5,6 +5,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from model_execution_contracts import ProviderUsage
 
@@ -76,6 +77,7 @@ class ExecutionReceipt:
     compressed_up_to_event_id: int | None = None
     provider_usage_received: bool = False
     execution_purpose: str = "generation"
+    created_at: str | None = None
 
 
 class InMemoryModelUsageStore:
@@ -125,6 +127,7 @@ class InMemoryModelUsageStore:
                 compressed_up_to_event_id=draft.compressed_up_to_event_id,
                 provider_usage_received=draft.provider_usage_received,
                 execution_purpose=draft.execution_purpose,
+                created_at=datetime.now(timezone.utc).isoformat(),
             )
             self._receipts[draft.generation_request_id] = (draft, receipt)
             return receipt
@@ -132,7 +135,7 @@ class InMemoryModelUsageStore:
     async def list_receipts(self, *, limit: int = 200) -> tuple[ExecutionReceipt, ...]:
         async with self._lock:
             values = tuple(item[1] for item in self._receipts.values())
-            return values[-limit:]
+            return tuple(reversed(values[-limit:]))
 
 
 def build_cache_namespace(

@@ -5,6 +5,7 @@ from cache_probe import GatewayCacheProbeService
 from model_execution import ProviderChunk
 from model_execution_contracts import ProviderUsage
 from model_profile_store import InMemoryModelProfileStore
+from model_profile_store import ProfileStoreError
 from model_profiles import ModelProfile
 
 
@@ -88,6 +89,8 @@ async def test_double_send_probe_freezes_every_input_and_promotes_verified_cache
     )
 
     assert result.status == "verified"
+    assert result.profile_id == "profile-1"
+    assert result.profile_revision == 1
     assert len(runner.calls) == 2
     first, second = runner.calls
     assert first[1] == second[1]
@@ -228,3 +231,37 @@ async def test_paid_cache_probe_uses_a_distinct_stable_prefix_per_profile():
     first_context = runner.calls[0][2]
     second_context = runner.calls[2][2]
     assert first_context.static_system != second_context.static_system
+
+
+@pytest.mark.anyio
+async def test_inflight_old_probe_does_not_certify_edited_profile():
+    store = InMemoryModelProfileStore()
+    original = _profile()
+    await store.put_profile(original)
+
+    class EditingRunner(_Runner):
+        async def run(self, **kwargs):
+            if not self.calls:
+                await store.put_profile(replace(original, model="new-model", revision=2))
+            async for chunk in super().run(**kwargs):
+                yield chunk
+
+    runner = EditingRunner([ProviderUsage.from_provider_values(cache_read_input_tokens=80)] * 2)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    with pytest.raises(ProfileStoreError, match="revision"):
+        await service.run(profile_id="profile-1", actor_id="jiao",
+            room_id="room_weiwei_jiao", conversation_id="synthetic-conversation")
+    assert (await store.get_profile("profile-1")).test_status == "unverified"
+    assert not await store.has_verified_probe("profile-1", 2, "frozen_double_send_cache")
+
+
+@pytest.mark.anyio
+async def test_stale_dashboard_probe_revision_rejected_before_provider():
+    store = InMemoryModelProfileStore()
+    await store.put_profile(replace(_profile(), revision=2))
+    runner = _Runner([])
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    with pytest.raises(ProfileStoreError, match="revision"):
+        await service.run(profile_id="profile-1", profile_revision=1, actor_id="jiao",
+            room_id="room_weiwei_jiao", conversation_id="synthetic")
+    assert runner.calls == []

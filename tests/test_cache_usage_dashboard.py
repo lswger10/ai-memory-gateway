@@ -74,6 +74,8 @@ def test_dashboard_distinguishes_hit_observed_miss_and_unobservable():
     assert values[0]["execution_purpose"] == "generation"
     assert values[0]["persona_version"] == "jiao.v2"
     assert values[0]["compressed_up_to_event_id"] == 90
+    assert values[0]["conversation_id"] == "conversation-1"
+    assert values[0]["profile_revision"] == 3
 
 
 def test_cache_write_alone_never_marks_profile_cache_verified():

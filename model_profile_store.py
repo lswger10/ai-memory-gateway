@@ -54,8 +54,12 @@ class InMemoryModelProfileStore:
     async def put_profile(self, profile: ModelProfile) -> ModelProfile:
         async with self._lock:
             existing = self._profiles.get(profile.profile_id)
-            if existing is not None and profile.revision < existing.revision:
-                raise ProfileStoreError("Profile revision cannot move backwards")
+            if existing is not None:
+                if replace(profile, test_status=existing.test_status) == existing:
+                    return existing
+                if profile.revision != existing.revision + 1:
+                    raise ProfileStoreError("Profile revision conflict")
+                profile = replace(profile, test_status="unverified")
             self._profiles[profile.profile_id] = profile
             return profile
 
@@ -66,11 +70,13 @@ class InMemoryModelProfileStore:
                 raise ProfileStoreError(f"unknown Profile: {profile_id}")
             return profile
 
-    async def set_test_status(self, profile_id: str, status: str) -> ModelProfile:
+    async def set_test_status(self, profile_id: str, status: str, *, expected_revision: int) -> ModelProfile:
         async with self._lock:
             profile = self._profiles.get(profile_id)
             if profile is None:
                 raise ProfileStoreError(f"unknown Profile: {profile_id}")
+            if profile.revision != expected_revision:
+                raise ProfileStoreError("Profile revision changed during probe")
             updated = replace(profile, test_status=status)
             self._profiles[profile_id] = updated
             return updated
@@ -105,6 +111,25 @@ class InMemoryModelProfileStore:
         if not profile.selectable:
             raise ProfileStoreError(f"Profile is not selectable: {profile_id}")
         return profile
+
+    async def get_actor_binding(self, actor_id: str) -> StoredBinding | None:
+        async with self._lock:
+            return self._bindings.get(actor_id)
+
+    async def save_actor_binding(
+        self, actor_id: str, profile_id: str, profile_ids: tuple[str, ...], *, expected_revision: int,
+    ) -> StoredBinding:
+        async with self._lock:
+            current = self._bindings.get(actor_id)
+            if (current.revision if current else 0) != expected_revision:
+                raise ProfileStoreError("binding revision conflict")
+            if len(set(profile_ids)) != len(profile_ids) or "*" in profile_ids or profile_id in profile_ids:
+                raise ProfileStoreError("fallbacks must be unique and exclude default")
+            for selected in (profile_id, *profile_ids):
+                self._selectable(selected)
+            saved = StoredBinding(actor_id, profile_id, tuple(profile_ids), expected_revision + 1)
+            self._bindings[actor_id] = saved
+            return saved
 
     async def set_actor_default(
         self,

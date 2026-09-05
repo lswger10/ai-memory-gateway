@@ -32,20 +32,28 @@ class PostgresModelProfileStore:
 
     async def put_profile(self, profile: ModelProfile) -> ModelProfile:
         pool = await self._pool_factory()
-        payload = json.dumps(profile.to_dict(), ensure_ascii=False)
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT revision FROM model_profiles WHERE profile_id=$1", profile.profile_id)
-            if row is not None and int(row["revision"]) > profile.revision:
-                raise ProfileStoreError("Profile revision cannot move backwards")
-            await conn.execute(
+            row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", profile.profile_id)
+            if row is not None:
+                existing = ModelProfile.from_dict(_json_object(row["profile_json"]))
+                if replace(profile, test_status=existing.test_status) == existing:
+                    return existing
+                if profile.revision != existing.revision + 1:
+                    raise ProfileStoreError("Profile revision conflict")
+                profile = replace(profile, test_status="unverified")
+            payload = json.dumps(profile.to_dict(), ensure_ascii=False)
+            result = await conn.execute(
                 """INSERT INTO model_profiles(profile_id,profile_json,enabled,test_status,revision)
                    VALUES($1,$2::jsonb,$3,$4,$5)
                    ON CONFLICT(profile_id) DO UPDATE SET
                      profile_json=EXCLUDED.profile_json, enabled=EXCLUDED.enabled,
                      test_status=EXCLUDED.test_status, revision=EXCLUDED.revision,
-                     updated_at=NOW()""",
+                     updated_at=NOW()
+                   WHERE model_profiles.revision=EXCLUDED.revision-1""",
                 profile.profile_id, payload, profile.enabled, profile.test_status, profile.revision,
             )
+            if result.endswith("0"):
+                raise ProfileStoreError("Profile revision conflict")
         return profile
 
     async def list_profiles(self) -> tuple[ModelProfile, ...]:
@@ -65,8 +73,10 @@ class PostgresModelProfileStore:
             raise ProfileStoreError(f"unknown Profile: {profile_id}")
         return ModelProfile.from_dict(_json_object(row["profile_json"]))
 
-    async def set_test_status(self, profile_id: str, status: str) -> ModelProfile:
+    async def set_test_status(self, profile_id: str, status: str, *, expected_revision: int) -> ModelProfile:
         profile = await self.get_profile(profile_id)
+        if profile.revision != expected_revision:
+            raise ProfileStoreError("Profile revision changed during probe")
         updated = replace(profile, test_status=status)
         pool = await self._pool_factory()
         async with pool.acquire() as conn:
@@ -80,8 +90,42 @@ class PostgresModelProfileStore:
                 profile.revision,
             )
         if result.endswith("0"):
-            raise ProfileStoreError("profile changed during probe")
+            raise ProfileStoreError("Profile revision changed during probe")
         return updated
+
+    async def get_actor_binding(self, actor_id: str) -> StoredBinding | None:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM model_actor_bindings WHERE actor_id=$1", actor_id)
+        if row is None:
+            return None
+        return StoredBinding(actor_id, row["default_profile_id"],
+            tuple(_json_array(row["approved_fallback_profile_ids"])), int(row["revision"]))
+
+    async def save_actor_binding(
+        self, actor_id: str, profile_id: str, profile_ids: tuple[str, ...], *, expected_revision: int,
+    ) -> StoredBinding:
+        if len(set(profile_ids)) != len(profile_ids) or "*" in profile_ids or profile_id in profile_ids:
+            raise ProfileStoreError("fallbacks must be unique and exclude default")
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for selected in (profile_id, *profile_ids):
+                    await self._profile(conn, selected)
+                result = await conn.execute(
+                    """INSERT INTO model_actor_bindings(actor_id,default_profile_id,approved_fallback_profile_ids,revision)
+                       SELECT $1,$2,$3::jsonb,1 WHERE $4=0
+                       ON CONFLICT(actor_id) DO NOTHING""",
+                    actor_id, profile_id, json.dumps(profile_ids), expected_revision,
+                ) if expected_revision == 0 else await conn.execute(
+                    """UPDATE model_actor_bindings SET default_profile_id=$2,
+                       approved_fallback_profile_ids=$3::jsonb,revision=revision+1,updated_at=NOW()
+                       WHERE actor_id=$1 AND revision=$4""",
+                    actor_id, profile_id, json.dumps(profile_ids), expected_revision,
+                )
+                if result.endswith("0"):
+                    raise ProfileStoreError("binding revision conflict")
+        return StoredBinding(actor_id, profile_id, tuple(profile_ids), expected_revision + 1)
 
     async def record_probe_result(
         self,
@@ -294,5 +338,6 @@ class PostgresModelUsageStore:
                 row["tool_schema_hash"], row["summary_version"],
                 row["compressed_up_to_event_id"], row["provider_usage_received"],
                 row["execution_purpose"],
+                row["created_at"].isoformat(),
             ) for row in rows
         )

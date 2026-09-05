@@ -62,6 +62,16 @@ async def test_execution_receipt_idempotent_by_generation_request_id():
 
 
 @pytest.mark.anyio
+async def test_dashboard_receipts_are_newest_first_with_observation_time():
+    store = InMemoryModelUsageStore()
+    await store.record(_draft(generation_request_id="old"))
+    await store.record(_draft(generation_request_id="new"))
+    rows = await store.list_receipts()
+    assert [r.generation_request_id for r in rows] == ["new", "old"]
+    assert rows[0].created_at is not None
+
+
+@pytest.mark.anyio
 async def test_generation_identity_conflict_is_rejected():
     store = InMemoryModelUsageStore()
     await store.record(_draft())
