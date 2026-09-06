@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
+import anyio
 from typing import Any, AsyncIterator, Mapping
 
 from actor_memory_tools import ActorMemoryToolLibrary, actor_memory_tool_definitions
@@ -12,6 +15,7 @@ from cache_strategies import (
 )
 from model_execution import ContextBundle, ProviderChunk, ProviderRunUnavailable
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
+from model_usage_store import UsageRecordingError
 from model_profiles import ModelProfile
 from media_materialization import (
     RelayMediaReader,
@@ -161,6 +165,7 @@ class GatewayProviderRunner:
         context: ContextBundle,
         cache_namespace: str,
         max_output_tokens: int | None = None,
+        on_attempt=None,
     ) -> AsyncIterator[ProviderChunk]:
         try:
             credential = self.credentials.resolve(profile.credential_ref)
@@ -182,31 +187,40 @@ class GatewayProviderRunner:
                 media_parts=media_parts,
             )
             body = rendered.json_body
-            aggregate_usage = ProviderUsage.from_provider_values()
+            aggregate_usage = None
             provider_usage_received = False
             for _ in range(8):
-                stream_context = await self.transport.open_stream(
-                    pool_key=profile.route_id,
-                    base_url=profile.base_url,
-                    headers=headers,
-                    method=rendered.method,
-                    path=rendered.path,
-                    json_body=body,
-                )
-                async with stream_context as response:
-                    if response.status_code >= 400:
-                        raise ProviderRunUnavailable("provider route rejected request")
-                    if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
-                        round_items = [item async for item in self._anthropic(response, profile, request)]
-                    elif profile.protocol == "openai_responses":
-                        round_items = [item async for item in self._openai_responses(response, profile, request)]
-                    else:
-                        round_items = [item async for item in self._openai_chat(response, profile, request)]
+                attempt_id = str(uuid.uuid4())
+                attempt_usage = ProviderUsage.from_provider_values()
+                attempt_usage_received = False
+                attempt_status = "failed"
+                round_items = []
+                try:
+                    stream_context = await self.transport.open_stream(
+                        pool_key=profile.route_id, base_url=profile.base_url, headers=headers,
+                        method=rendered.method, path=rendered.path, json_body=body)
+                    async with stream_context as response:
+                        if response.status_code >= 400:
+                            raise ProviderRunUnavailable("provider route rejected request")
+                        parser = (self._anthropic if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}
+                                  else self._openai_responses if profile.protocol == "openai_responses" else self._openai_chat)
+                        async for item in parser(response, profile, request):
+                            if item.event == "usage":
+                                attempt_usage = item.data["usage"]
+                                attempt_usage_received |= bool(item.data.get("provider_usage_received"))
+                            else:
+                                round_items.append(item)
+                    attempt_status = "succeeded"
+                except (asyncio.CancelledError, GeneratorExit):
+                    attempt_status = "cancelled"
+                    raise
+                finally:
+                    if on_attempt is not None:
+                        await on_attempt(attempt_id, attempt_usage, attempt_status,
+                            attempt_usage_received, _observed_cache_support(attempt_usage))
                 tool_item = next((item for item in round_items if item.event == "tool_calls"), None)
-                usage_item = next((item for item in round_items if item.event == "usage"), None)
-                if usage_item is not None:
-                    aggregate_usage = _add_usage(aggregate_usage, usage_item.data["usage"])
-                    provider_usage_received |= bool(usage_item.data.get("provider_usage_received"))
+                aggregate_usage = attempt_usage if aggregate_usage is None else _add_usage(aggregate_usage, attempt_usage)
+                provider_usage_received |= attempt_usage_received
                 if tool_item is None:
                     for item in round_items:
                         if item.event not in {"usage", "tool_calls"}:
@@ -230,13 +244,15 @@ class GatewayProviderRunner:
                     results.append(result)
                 body = _continue_with_tool_results(profile.protocol, body, calls, results)
             raise ProviderRunUnavailable("provider tool loop exceeded limit")
-        except ProviderRunUnavailable:
+        except (ProviderRunUnavailable, UsageRecordingError, asyncio.CancelledError, GeneratorExit):
             if self.memory_tools is not None and context.actor_memory_context is not None:
-                await self.memory_tools.discard(context.actor_memory_context)
+                with anyio.fail_after(5, shield=True):
+                    await self.memory_tools.discard(context.actor_memory_context)
             raise
         except Exception as exc:
             if self.memory_tools is not None and context.actor_memory_context is not None:
-                await self.memory_tools.discard(context.actor_memory_context)
+                with anyio.fail_after(5, shield=True):
+                    await self.memory_tools.discard(context.actor_memory_context)
             raise ProviderRunUnavailable("provider transport failed") from exc
 
     async def _anthropic(self, response, profile, request):
@@ -244,7 +260,12 @@ class GatewayProviderRunner:
         text = ""
         usage_values: dict[str, Any] = {}
         calls: dict[int, dict[str, Any]] = {}
+        terminal_seen = False
         async for event, data in _sse_json(response):
+            if event == "error" or data.get("error"):
+                raise ProviderRunUnavailable("provider stream reported an error")
+            if event == "message_stop":
+                terminal_seen = True
             if event == "content_block_start":
                 block = data.get("content_block", {})
                 if isinstance(block, Mapping) and block.get("type") == "tool_use":
@@ -264,8 +285,12 @@ class GatewayProviderRunner:
                 message = data.get("message", {})
                 if isinstance(message, Mapping) and isinstance(message.get("usage"), Mapping):
                     usage_values.update(message["usage"])
+                    yield _usage_chunk(adapter, usage_values)
             if event == "message_delta" and isinstance(data.get("usage"), Mapping):
                 usage_values.update(data["usage"])
+                yield _usage_chunk(adapter, usage_values)
+        if not terminal_seen:
+            raise ProviderRunUnavailable("provider stream omitted its terminal event")
         if calls:
             yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls)})
         elif request.execution_kind == "probe":
@@ -287,9 +312,15 @@ class GatewayProviderRunner:
         text = ""
         usage_values: dict[str, Any] = {}
         calls: dict[int, dict[str, Any]] = {}
-        async for _, data in _sse_json(response):
+        terminal_seen = False
+        async for event, data in _sse_json(response):
+            if event == "done":
+                terminal_seen = True
+            if event == "error" or data.get("error"):
+                raise ProviderRunUnavailable("provider stream reported an error")
             choices = data.get("choices")
             if isinstance(choices, list) and choices:
+                terminal_seen |= choices[0].get("finish_reason") is not None
                 delta = choices[0].get("delta", {})
                 value = delta.get("content") if isinstance(delta, Mapping) else None
                 if isinstance(value, str):
@@ -305,6 +336,9 @@ class GatewayProviderRunner:
                         current["json"] += str(function.get("arguments", ""))
             if isinstance(data.get("usage"), Mapping):
                 usage_values.update(data["usage"])
+                yield _usage_chunk(adapter, usage_values)
+        if not terminal_seen:
+            raise ProviderRunUnavailable("provider stream omitted its terminal event")
         if calls:
             yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls)})
         elif request.execution_kind == "probe":
@@ -326,7 +360,10 @@ class GatewayProviderRunner:
         text = ""
         usage_values: dict[str, Any] = {}
         calls: dict[int, dict[str, Any]] = {}
+        terminal_seen = False
         async for event, data in _sse_json(response):
+            if event == "error" or data.get("error"):
+                raise ProviderRunUnavailable("provider stream reported an error")
             if event == "response.output_text.delta":
                 value = data.get("delta")
                 if isinstance(value, str):
@@ -345,9 +382,16 @@ class GatewayProviderRunner:
                 if fragment and (event.endswith(".delta") or not current["json"]):
                     current["json"] += str(fragment)
             response_value = data.get("response")
-            if event == "response.completed" and isinstance(response_value, Mapping):
+            if event in {"response.completed", "response.failed", "response.incomplete"} and isinstance(response_value, Mapping):
                 if isinstance(response_value.get("usage"), Mapping):
                     usage_values.update(response_value["usage"])
+                    yield _usage_chunk(adapter, usage_values)
+            if event in {"response.failed", "response.incomplete"}:
+                raise ProviderRunUnavailable("provider response did not complete")
+            if event == "response.completed":
+                terminal_seen = True
+        if not terminal_seen:
+            raise ProviderRunUnavailable("provider stream omitted its terminal event")
         if calls:
             yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls)})
         elif request.execution_kind == "probe":
@@ -380,7 +424,7 @@ def _finish_calls(calls: Mapping[int, Mapping[str, str]]) -> list[dict[str, Any]
 
 def _add_usage(left: ProviderUsage, right: ProviderUsage) -> ProviderUsage:
     def add(a, b):
-        return None if a is None and b is None else (a or 0) + (b or 0)
+        return None if a is None or b is None else a + b
     return ProviderUsage.from_provider_values(
         input_tokens=add(left.input_tokens, right.input_tokens),
         output_tokens=add(left.output_tokens, right.output_tokens),
@@ -429,7 +473,9 @@ async def _sse_json(response) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         if not line:
             if data_lines:
                 raw = "\n".join(data_lines)
-                if raw != "[DONE]":
+                if raw == "[DONE]":
+                    yield "done", {}
+                else:
                     value = json.loads(raw)
                     if isinstance(value, dict):
                         yield event, value
@@ -448,3 +494,10 @@ def _parse_probe(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProviderRunUnavailable("provider probe was not an object")
     return value
+
+
+def _usage_chunk(adapter, values):
+    usage = adapter.parse_usage(values)
+    return ProviderChunk("usage", {"usage": usage,
+        "observed_cache_support": _observed_cache_support(usage),
+        "provider_usage_received": bool(values)})

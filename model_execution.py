@@ -6,10 +6,11 @@ from typing import Any, AsyncIterator, Protocol
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
 from model_profile_store import InMemoryModelProfileStore
 from model_usage_store import (
-    ExecutionReceiptDraft,
+    execution_receipt_draft,
+    record_provider_attempt,
+    UsageRecordingError,
     InMemoryModelUsageStore,
     build_cache_namespace,
-    build_stable_prefix_hash,
 )
 from provider_adapters import build_provider_provenance
 
@@ -71,6 +72,7 @@ class ProviderRunner(Protocol):
         request: GatewayExecutionRequest,
         context: ContextBundle,
         cache_namespace: str,
+        on_attempt,
     ) -> AsyncIterator[ProviderChunk]: ...
 
 
@@ -144,11 +146,22 @@ class GatewayModelExecutionService:
             observed_cache_support = "unverified"
             final_seen = False
             final_data: dict[str, Any] | None = None
+            receipt = None
+            draft = execution_receipt_draft(
+                profile=profile, generation_request_id=request.generation_request_id,
+                actor_id=request.actor_id, room_id=room_id, conversation_id=conversation_id,
+                context=context, cache_namespace=namespace, fallback_from_profile_id=fallback_from,
+                execution_purpose="generation" if request.execution_kind == "full" else "generation_probe")
+            async def on_attempt(attempt_id, usage, status, provider_usage_received, observed_cache_support):
+                nonlocal receipt
+                receipt = await record_provider_attempt(self._usage_store, draft, attempt_id,
+                    usage, status, provider_usage_received, observed_cache_support)
             provider_stream = self._provider_runner.run(
                 profile=profile,
                 request=request,
                 context=context,
                 cache_namespace=namespace,
+                on_attempt=on_attempt,
             )
             try:
                 async for chunk in provider_stream:
@@ -191,52 +204,8 @@ class GatewayModelExecutionService:
                 if close is not None:
                     await close()
 
-            receipt = await self._usage_store.record(
-                ExecutionReceiptDraft(
-                    generation_request_id=request.generation_request_id,
-                    actor_id=request.actor_id,
-                    room_id=room_id,
-                    conversation_id=conversation_id,
-                    profile_id=profile.profile_id,
-                    profile_revision=profile.revision,
-                    provider=profile.provider,
-                    protocol=profile.protocol,
-                    route_id=profile.route_id,
-                    model=profile.model,
-                    adapter_version=profile.adapter_version,
-                    cache_strategy=profile.cache_strategy,
-                    requested_cache_ttl=profile.requested_cache_ttl,
-                    observed_cache_support=observed_cache_support,
-                    fallback_used=fallback_used,
-                    fallback_from_profile_id=fallback_from,
-                    usage=usage,
-                    status="succeeded",
-                    stable_prefix_hash=(
-                        context.stable_prefix_hash
-                        or build_stable_prefix_hash(
-                            static_system=context.static_system,
-                            stable_summary=context.stable_summary,
-                            stable_history=context.stable_history,
-                        )
-                    ),
-                    prompt_cache_key=(
-                        namespace
-                        if profile.cache_strategy == "openai_stable_prefix_v1"
-                        else None
-                    ),
-                    runtime_kernel_version=context.runtime_kernel_version,
-                    persona_version=context.actor_prompt_version,
-                    room_policy_version=context.room_policy_version,
-                    tool_schema_hash=context.tool_schema_hash,
-                    summary_version=context.summary_version or 1,
-                    compressed_up_to_event_id=(
-                        context.compressed_up_to_event_id
-                        if context.compressed_up_to_event_id is not None
-                        else 0
-                    ),
-                    provider_usage_received=provider_usage_received,
-                )
-            )
+            if receipt is None:
+                raise UsageRecordingError("provider completed without an attempt receipt")
             yield ExecutionStreamEvent("final", final_data or {})
             yield ExecutionStreamEvent(
                 "usage",

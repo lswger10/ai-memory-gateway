@@ -46,6 +46,8 @@ def build_cache_usage_view(
         outcome = _cache_outcome(receipt)
         result.append(
             {
+                "receipt_id": receipt.receipt_id,
+                "status": receipt.status,
                 "generation_request_id": receipt.generation_request_id,
                 "created_at": receipt.created_at,
                 "actor_id": receipt.actor_id,
@@ -96,6 +98,9 @@ def build_cache_observability_summary(
     observable = hits + misses
     total = len(outcomes)
     return {
+        "generation_requests": len({(receipt.actor_id, receipt.generation_request_id)
+                                    for receipt in receipts if receipt.execution_purpose == "generation"}),
+        "provider_attempts": total,
         "total_requests": total,
         "observable_requests": observable,
         "hit_requests": hits,

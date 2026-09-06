@@ -263,14 +263,23 @@ function renderActorBinding() {
         `${room}: ${value.error || value.profile_id} · ${value.source || 'unavailable'}`).join('\n');
 }
 
+const USAGE_MESSAGES = {
+    usage_generation_count_label: '逻辑请求数',
+    usage_attempt_count_label: '供应商尝试数',
+    usage_attempt_succeeded: '完整返回',
+    usage_attempt_failed: '尝试失败',
+    usage_attempt_cancelled: '尝试已取消',
+    usage_attempt_help: '仅统计当前列表（默认最多 200 条）：逻辑请求按生成 ID 计数，包含失败请求，新记录中每次实际发起的供应商调用单计一次尝试，含备用调用和工具续轮，Pin 与缓存探针仅计入尝试；旧版记录可能汇总多轮，行数不能代表精确的历史调用次数；完整返回不代表回复已发布，失败或取消也可能有用量，缺失值显示 —，费用不估算。',
+};
+
 function _renderModelUsage(cacheView, observability) {
     const body = _modelField('model-usage-body');
     if (!body) return;
     const n = value => value === null || value === undefined ? '—' : String(value);
     body.innerHTML = cacheView.length ? cacheView.map(item => `<tr>
-        <td>${escapeHtml(item.actor_id)}<br><small>${escapeHtml(item.execution_purpose || 'generation')}</small><br><small>${escapeHtml(item.created_at || '—')}</small></td><td>${escapeHtml(item.profile_id)} · r${item.profile_revision ?? '—'}<br><small>${escapeHtml(item.model)}</small>
+        <td>${escapeHtml(item.actor_id)}<br><small>${escapeHtml(item.execution_purpose || 'generation')}</small><br><small>${escapeHtml(USAGE_MESSAGES['usage_attempt_' + item.status] || item.status || '—')}</small><br><small>${escapeHtml(item.created_at || '—')}</small></td><td>${escapeHtml(item.profile_id)} · r${item.profile_revision ?? '—'}<br><small>${escapeHtml(item.model)}</small>
         <details><summary>诊断字段</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;">${escapeHtml(JSON.stringify({room_id: item.room_id, conversation_id: item.conversation_id,
-            generation_request_id: item.generation_request_id, provider: item.provider, protocol: item.protocol, route_id: item.route_id,
+            generation_request_id: item.generation_request_id, receipt_id: item.receipt_id, status: item.status, provider: item.provider, protocol: item.protocol, route_id: item.route_id,
             cache_strategy: item.cache_strategy, requested_cache_ttl: item.requested_cache_ttl,
             stable_prefix_hash: item.stable_prefix_hash, prompt_cache_key: item.prompt_cache_key,
             persona_version: item.persona_version, runtime_kernel_version: item.runtime_kernel_version,
@@ -284,7 +293,9 @@ function _renderModelUsage(cacheView, observability) {
     const summary = _modelField('model-usage-summary');
     if (summary) {
         const percent = value => value === null || value === undefined ? '—' : `${(value * 100).toFixed(1)}%`;
-        summary.textContent = `可观测命中率 ${percent(observability?.observable_hit_ratio)} · 遥测覆盖率 ${percent(observability?.telemetry_coverage_ratio)}`;
+        summary.innerHTML = `${USAGE_MESSAGES.usage_generation_count_label} ${escapeHtml(n(observability?.generation_requests))} · ${USAGE_MESSAGES.usage_attempt_count_label} ${escapeHtml(n(observability?.provider_attempts))} · ` +
+            `可观测命中率 ${percent(observability?.observable_hit_ratio)} · 遥测覆盖率 ${percent(observability?.telemetry_coverage_ratio)}` +
+            `<details><summary>统计说明</summary>${USAGE_MESSAGES.usage_attempt_help}</details>`;
     }
 }
 

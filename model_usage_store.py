@@ -4,7 +4,8 @@ import asyncio
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass
+import anyio
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from model_execution_contracts import ProviderUsage
@@ -12,6 +13,10 @@ from model_execution_contracts import ProviderUsage
 
 class UsageStoreConflict(ValueError):
     pass
+
+
+class UsageRecordingError(RuntimeError):
+    """Accounting failure must never be treated as provider fallback permission."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,7 @@ class ExecutionReceiptDraft:
     compressed_up_to_event_id: int | None = None
     provider_usage_received: bool = False
     execution_purpose: str = "generation"
+    receipt_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,18 +93,17 @@ class InMemoryModelUsageStore:
 
     async def record(self, draft: ExecutionReceiptDraft) -> ExecutionReceipt:
         async with self._lock:
-            existing = self._receipts.get(draft.generation_request_id)
+            receipt_id = draft.receipt_id or str(uuid.uuid5(uuid.NAMESPACE_URL, draft.generation_request_id))
+            existing = self._receipts.get(receipt_id)
             if existing is not None:
                 existing_draft, receipt = existing
                 if existing_draft != draft:
                     raise UsageStoreConflict(
-                        "generation_request_id already has different execution provenance"
+                        "receipt_id already has different execution provenance"
                     )
                 return receipt
             receipt = ExecutionReceipt(
-                receipt_id=str(
-                    uuid.uuid5(uuid.NAMESPACE_URL, draft.generation_request_id)
-                ),
+                receipt_id=receipt_id,
                 generation_request_id=draft.generation_request_id,
                 actor_id=draft.actor_id,
                 room_id=draft.room_id,
@@ -129,13 +134,51 @@ class InMemoryModelUsageStore:
                 execution_purpose=draft.execution_purpose,
                 created_at=datetime.now(timezone.utc).isoformat(),
             )
-            self._receipts[draft.generation_request_id] = (draft, receipt)
+            self._receipts[receipt_id] = (draft, receipt)
             return receipt
 
     async def list_receipts(self, *, limit: int = 200) -> tuple[ExecutionReceipt, ...]:
         async with self._lock:
             values = tuple(item[1] for item in self._receipts.values())
             return tuple(reversed(values[-limit:]))
+
+
+def execution_receipt_draft(*, profile, generation_request_id, actor_id, room_id,
+                            conversation_id, context, cache_namespace,
+                            fallback_from_profile_id=None, execution_purpose="generation"):
+    """Shared provenance for generation, Pin and explicit cache-probe attempts."""
+    return ExecutionReceiptDraft(
+        generation_request_id=generation_request_id, actor_id=actor_id,
+        room_id=room_id, conversation_id=conversation_id,
+        profile_id=profile.profile_id, profile_revision=profile.revision,
+        provider=profile.provider, protocol=profile.protocol, route_id=profile.route_id,
+        model=profile.model, adapter_version=profile.adapter_version,
+        cache_strategy=profile.cache_strategy, requested_cache_ttl=profile.requested_cache_ttl,
+        observed_cache_support="unverified", fallback_used=fallback_from_profile_id is not None,
+        fallback_from_profile_id=fallback_from_profile_id,
+        usage=ProviderUsage.from_provider_values(), status="failed",
+        stable_prefix_hash=context.stable_prefix_hash or build_stable_prefix_hash(
+            static_system=context.static_system, stable_summary=context.stable_summary,
+            stable_history=context.stable_history),
+        prompt_cache_key=cache_namespace if profile.cache_strategy == "openai_stable_prefix_v1" else None,
+        runtime_kernel_version=context.runtime_kernel_version,
+        persona_version=context.actor_prompt_version, room_policy_version=context.room_policy_version,
+        tool_schema_hash=context.tool_schema_hash, summary_version=context.summary_version or 1,
+        compressed_up_to_event_id=context.compressed_up_to_event_id or 0,
+        execution_purpose=execution_purpose,
+    )
+
+
+async def record_provider_attempt(store, draft, attempt_id, usage, status,
+                                  provider_usage_received, observed_cache_support):
+    try:
+        # ASGI uses level cancellation: shield only the bounded accounting write.
+        with anyio.fail_after(5, shield=True):
+            return await store.record(replace(draft, receipt_id=attempt_id, usage=usage,
+                status=status, provider_usage_received=provider_usage_received,
+                observed_cache_support=observed_cache_support))
+    except Exception as exc:
+        raise UsageRecordingError("provider attempt receipt could not be persisted") from exc
 
 
 def build_cache_namespace(

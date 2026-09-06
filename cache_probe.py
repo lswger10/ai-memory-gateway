@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import partial
+import uuid
 from typing import Protocol
 
 from model_execution import ContextBundle
 from model_execution_contracts import CONTRACT_VERSION, GatewayExecutionRequest
 from model_execution_contracts import ProviderUsage
-from model_usage_store import build_cache_namespace
+from model_usage_store import build_cache_namespace, execution_receipt_draft, record_provider_attempt, UsageRecordingError
 from model_profile_store import ProfileStoreError
 
 
@@ -41,6 +43,8 @@ class CacheAcceptanceProbe:
         try:
             first = await runner.run_once(frozen_input)
             second = await runner.run_once(frozen_input)
+        except UsageRecordingError:
+            raise
         except Exception:
             return ProbeResult(status="failed", first=empty, second=empty)
         read = second.cache_read_input_tokens
@@ -63,9 +67,10 @@ class GatewayCacheProbeService:
     prompt-cache keepalive or surprise provider spend.
     """
 
-    def __init__(self, *, profiles, provider_runner) -> None:
+    def __init__(self, *, profiles, provider_runner, usage_store) -> None:
         self.profiles = profiles
         self.provider_runner = provider_runner
+        self.usage_store = usage_store
 
     @staticmethod
     def _request(*, actor_id: str, room_id: str, conversation_id: str, profile_id: str):
@@ -77,7 +82,7 @@ class GatewayCacheProbeService:
                 "room_id": room_id,
                 "conversation_id": conversation_id,
                 "current_event_id": 1,
-                "generation_request_id": f"cache-probe:{profile_id}:{actor_id}",
+                "generation_request_id": f"cache-probe:{profile_id}:{actor_id}:{uuid.uuid4()}",
                 "execution_mode": "private" if room_id != "room_group_home" else "group",
                 "fence": {
                     "room_id": room_id,
@@ -120,12 +125,17 @@ class GatewayCacheProbeService:
     async def _once(self, *, profile, request, context, cache_namespace) -> ProviderUsage:
         usage = ProviderUsage.from_provider_values()
         final_seen = False
+        draft = execution_receipt_draft(profile=profile,
+            generation_request_id=request.generation_request_id, actor_id=request.actor_id,
+            room_id=request.room_id, conversation_id=request.conversation_id,
+            context=context, cache_namespace=cache_namespace, execution_purpose="cache_probe")
         stream = self.provider_runner.run(
             profile=profile,
             request=request,
             context=context,
             cache_namespace=cache_namespace,
             max_output_tokens=32,
+            on_attempt=partial(record_provider_attempt, self.usage_store, draft),
         )
         try:
             async for chunk in stream:

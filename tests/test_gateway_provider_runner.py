@@ -87,6 +87,7 @@ class Response:
             'data: {"usage":{"output_tokens":2}}',
             "",
         ]
+        lines.extend(["event: message_stop", "data: {}", ""])
         for line in lines:
             yield line
 
@@ -134,6 +135,7 @@ class ToolResponse(Response):
                 'data: {"delta":{"type":"text_delta","text":"已经记下。"}}',
                 "",
             ]
+        lines.extend(["event: message_stop", "data: {}", ""])
         for line in lines:
             yield line
 
@@ -156,6 +158,7 @@ class OpenAIToolResponse(Response):
                 if self.round_number == 1
                 else {"choices": [{"delta": {"content": "saved"}}]}
             )
+            payload["choices"][0]["finish_reason"] = "tool_calls" if self.round_number == 1 else "stop"
             lines = [f"data: {json.dumps(payload)}", ""]
         elif self.round_number == 1:
             lines = [
@@ -165,6 +168,8 @@ class OpenAIToolResponse(Response):
             ]
         else:
             lines = ["event: response.output_text.delta", 'data: {"delta":"saved"}', ""]
+        if self.protocol == "openai_responses":
+            lines.extend(["event: response.completed", 'data: {"response":{"status":"completed"}}', ""])
         for line in lines:
             yield line
 

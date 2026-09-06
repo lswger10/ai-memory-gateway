@@ -111,6 +111,31 @@ Actor 默认与 ordered fallback 使用一次带 revision 的原子保存；任�
 
 这是一项会产生 provider 费用的用户显式设置；默认没有 Pin，也没有空闲保活。
 
+## 逐尝试 usage
+
+每轮实际 provider HTTP 尝试独立生成 `receipt_id`，保留同一逻辑请求的
+`generation_request_id`。fallback、工具续轮、Pin 和显式双发缓存探针均记录；
+不再只在最终成功时保存一份汇总。`succeeded` 仅表示这次供应商尝试完整返回，
+不代表 Relay 已发布回复；失败/受控取消也保存已收到的 usage，未提供字段为 null。
+同轮累计 usage 按快照更新，跨轮任一字段未知时，汇总该字段仍未知。
+
+现有回执表移除 generation 唯一约束，继续用 receipt 主键去重；同 ID 的不同
+payload 拒绝写入。迁移保留旧行及时间，不改写历史汇总为虚构逐次记录。
+Dashboard 只统计当前最近列表（最多 200 条），区分逻辑生成请求和尝试行，
+调度探针、Pin、缓存探针不计入逻辑生成请求；旧版行可能汇总多轮。
+已产生多份回执后，旧版仅支持 generation 唯一的程序不能作为兼容回退版本，
+不能盲目恢复唯一约束或删除新回执；发布回退必须保留逐次记账能力。
+
+回执写入和取消后的 Memory 暂存清理各使用至多 5 秒的取消屏蔽范围。
+记账失败/超时不会触发 provider fallback；取消仍向上层传播。
+这覆盖正常异常和 ASGI/AnyIO 取消，不保证进程硬退出或数据库持续不可用时的
+最终回执落库，也不代表准确账单或缓存命中率改善。
+
+协议终止依据：[Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming)、
+[OpenAI Chat streaming](https://developers.openai.com/api/reference/resources/chat)、
+[OpenAI Responses streaming](https://developers.openai.com/api/reference/resources/responses/streaming-events)。
+错误事件和缺失终止信号不能作为成功；原成功测试响应现包含明确协议终止。
+
 ## Media 与 v1.1
 
 `group-room.v1.1` 在保持 v1.0 bytes/SHA 不变的前提下，为 typed private 与 Group factual events 增加：
@@ -180,7 +205,8 @@ Bedroom media 与 Group Voice Call 不在 v1.1 范围内。
 `test_real_postgres_lifespan_and_readiness_recovery` 使用共享的 opt-in schema
 夹具运行真实初始化、缺表故障与恢复；复用下述 PostgreSQL DSN/授权变量。
 基线 `cba9d8e` 在该故障下错误返回 200，修复版返回 503，恢复后 200。
-F03/F04 修复后，本地 PostgreSQL 18.6 全量回归为 373 passed；这不等于测试部署或生产验收。
+F06 本地 PostgreSQL 18.6 全量回归为 409 passed、零跳过（59.86 秒）；Tidal 跨进程模型验收 3 passed（108.15 秒）。尚未部署或真实付费验收。
+这些本地结果不等于测试部署或生产验收。
 
 ```powershell
 python -m pytest tests -v

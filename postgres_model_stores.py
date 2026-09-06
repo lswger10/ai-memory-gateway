@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from model_execution_contracts import ProviderUsage
 from model_profile_store import ProfileStoreError, ResolvedProfiles, RoomOverride, StoredBinding
@@ -266,44 +266,21 @@ class PostgresModelUsageStore:
 
     async def record(self, draft: ExecutionReceiptDraft) -> ExecutionReceipt:
         pool = await self._pool_factory()
-        receipt_id = str(uuid.uuid5(uuid.NAMESPACE_URL, draft.generation_request_id))
-        values = (
-            receipt_id, draft.generation_request_id, draft.actor_id, draft.room_id,
-            draft.conversation_id, draft.profile_id, draft.profile_revision, draft.provider,
-            draft.protocol, draft.route_id, draft.model, draft.adapter_version,
-            draft.cache_strategy, draft.requested_cache_ttl, draft.observed_cache_support,
-            draft.fallback_used, draft.fallback_from_profile_id, draft.usage.input_tokens,
-            draft.usage.output_tokens, draft.usage.cache_creation_input_tokens,
-            draft.usage.cache_read_input_tokens, draft.usage.cached_tokens, draft.status,
-            draft.stable_prefix_hash, draft.prompt_cache_key,
-            draft.runtime_kernel_version, draft.persona_version,
-            draft.room_policy_version, draft.tool_schema_hash,
-            draft.summary_version, draft.compressed_up_to_event_id,
-            draft.provider_usage_received, draft.execution_purpose,
-        )
+        receipt_id = draft.receipt_id or str(uuid.uuid5(uuid.NAMESPACE_URL, draft.generation_request_id))
+        payload = asdict(draft)
+        payload.update(payload.pop("usage"))
+        payload["receipt_id"] = receipt_id
+        # Column names come only from the fixed internal dataclass, never requests.
+        columns = ",".join(payload)
+        parameters = ",".join(f"${index}" for index in range(1, len(payload) + 1))
         async with pool.acquire() as conn:
-            existing = await conn.fetchrow("SELECT * FROM model_execution_receipts WHERE generation_request_id=$1", draft.generation_request_id)
-            if existing is None:
-                await conn.execute(
-                    """INSERT INTO model_execution_receipts(
-                    receipt_id,generation_request_id,actor_id,room_id,conversation_id,
-                    profile_id,profile_revision,provider,protocol,route_id,model,
-                    adapter_version,cache_strategy,requested_cache_ttl,
-                    observed_cache_support,fallback_used,fallback_from_profile_id,
-                    input_tokens,output_tokens,cache_creation_input_tokens,
-                    cache_read_input_tokens,cached_tokens,status,stable_prefix_hash,
-                    prompt_cache_key,runtime_kernel_version,persona_version,
-                    room_policy_version,tool_schema_hash,summary_version,
-                    compressed_up_to_event_id,provider_usage_received,
-                    execution_purpose,created_at
-                    ) VALUES(
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                    $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,NOW())""",
-                    *values,
-                )
-            else:
-                if existing["receipt_id"] != receipt_id:
-                    raise UsageStoreConflict("generation request receipt conflict")
+            await conn.execute(
+                f"INSERT INTO model_execution_receipts({columns}) VALUES({parameters}) "
+                "ON CONFLICT(receipt_id) DO NOTHING", *payload.values())
+            existing = await conn.fetchrow(
+                "SELECT * FROM model_execution_receipts WHERE receipt_id=$1", receipt_id)
+            if any(existing[key] != value for key, value in payload.items()):
+                raise UsageStoreConflict("receipt_id already has different execution provenance")
         return ExecutionReceipt(
             receipt_id, draft.generation_request_id, draft.actor_id, draft.room_id,
             draft.conversation_id, draft.profile_id, draft.profile_revision, draft.provider,
@@ -315,6 +292,7 @@ class PostgresModelUsageStore:
             draft.room_policy_version, draft.tool_schema_hash,
             draft.summary_version, draft.compressed_up_to_event_id,
             draft.provider_usage_received, draft.execution_purpose,
+            existing["created_at"].isoformat(),
         )
 
     async def list_receipts(self, *, limit: int = 200) -> tuple[ExecutionReceipt, ...]:

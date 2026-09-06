@@ -4,6 +4,38 @@ from model_execution_contracts import ProviderUsage
 from model_usage_store import ExecutionReceipt
 
 
+def test_dashboard_groups_logical_generations_but_exposes_each_attempt_and_status(monkeypatch):
+    from dataclasses import replace
+    from cache_dashboard import build_cache_observability_summary
+    first = replace(_receipt(observed="unavailable", usage_received=False), receipt_id="failed-attempt", status="failed")
+    success = replace(first, receipt_id="successful-attempt", status="succeeded")
+    pin = replace(first, receipt_id="pin-attempt", execution_purpose="cache_keepalive", generation_request_id="pin-1")
+    probe = replace(first, receipt_id="probe-attempt", execution_purpose="cache_probe", generation_request_id="probe-1")
+    rows = (first, success, pin, probe)
+    summary = build_cache_observability_summary(rows)
+    assert summary["generation_requests"] == 1
+    assert summary["provider_attempts"] == 4
+    view = build_cache_usage_view(rows)
+    assert [row["receipt_id"] for row in view] == ["failed-attempt", "successful-attempt", "pin-attempt", "probe-attempt"]
+    assert [row["status"] for row in view] == ["failed", "succeeded", "failed", "failed"]
+    import main
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+    async def initialized():
+        return None
+    async def list_receipts(**kwargs):
+        return rows
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "synthetic-admin")
+    monkeypatch.setattr(main, "MEMORY_ENABLED", True)
+    monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
+    monkeypatch.setattr(main, "_get_model_execution_service", initialized)
+    monkeypatch.setattr(main, "_model_usage_store", SimpleNamespace(list_receipts=list_receipts))
+    response = TestClient(main.app).get("/api/model-usage/summary", headers={"X-Gateway-Key": "synthetic-admin"})
+    assert response.status_code == 200
+    assert [row["receipt_id"] for row in response.json()["receipts"]] == [row["receipt_id"] for row in view]
+    assert [row["status"] for row in response.json()["receipts"]] == [row["status"] for row in view]
+
+
 def _receipt(
     *,
     observed,
@@ -97,6 +129,8 @@ def test_dashboard_separates_observable_hit_ratio_from_telemetry_coverage():
     summary = cache_dashboard.build_cache_observability_summary(receipts)
 
     assert summary == {
+        "generation_requests": 1,
+        "provider_attempts": 3,
         "total_requests": 3,
         "observable_requests": 2,
         "hit_requests": 1,

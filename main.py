@@ -882,6 +882,8 @@ async def model_usage_summary():
         "cache_observability": build_cache_observability_summary(receipts),
         "receipts": [
             {
+                "receipt_id": row.receipt_id,
+                "status": row.status,
                 "generation_request_id": row.generation_request_id,
                 "actor_id": row.actor_id,
                 "room_id": row.room_id,
@@ -1138,6 +1140,7 @@ async def run_cache_probe(request: Request):
             _cache_probe_service = GatewayCacheProbeService(
                 profiles=_model_profile_store,
                 provider_runner=_model_provider_runner,
+                usage_store=_model_usage_store,
             )
         result = await _cache_probe_service.run(**values)
     except HTTPException:

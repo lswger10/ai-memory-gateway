@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field, replace
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Mapping, Protocol
@@ -11,9 +12,9 @@ from model_execution import ContextBundle, ProviderRunUnavailable
 from model_execution_contracts import ProviderUsage
 from model_profile_store import ProfileStoreError
 from model_usage_store import (
-    ExecutionReceiptDraft,
+    execution_receipt_draft,
+    record_provider_attempt,
     build_cache_namespace,
-    build_stable_prefix_hash,
 )
 
 
@@ -445,66 +446,32 @@ class CachePinService:
                         continue
                     state = claimed
                     calls += 1
+                    draft = execution_receipt_draft(
+                        profile=profile, generation_request_id=generation_request_id,
+                        actor_id=actor_id, room_id=pin.room_id, conversation_id=pin.conversation_id,
+                        context=context, cache_namespace=namespace, execution_purpose="cache_keepalive")
                     stream = self.provider_runner.run(
                         profile=profile,
                         request=request,
                         context=context,
                         cache_namespace=namespace,
                         max_output_tokens=1,
+                        on_attempt=partial(record_provider_attempt, self.usage_store, draft) if self.usage_store else None,
                     )
-                    async for chunk in stream:
-                        if chunk.event == "usage" and isinstance(
-                            chunk.data.get("usage"), ProviderUsage
-                        ):
-                            usage = chunk.data["usage"]
-                            observed_cache_support = str(
-                                chunk.data.get("observed_cache_support", "unverified")
-                            )
-                            provider_usage_received = bool(
-                                chunk.data.get("provider_usage_received", False)
-                            )
-                    if self.usage_store is not None:
-                        await self.usage_store.record(
-                            ExecutionReceiptDraft(
-                                generation_request_id=generation_request_id,
-                                actor_id=actor_id,
-                                room_id=pin.room_id,
-                                conversation_id=pin.conversation_id,
-                                profile_id=profile.profile_id,
-                                profile_revision=profile.revision,
-                                provider=profile.provider,
-                                protocol=profile.protocol,
-                                route_id=profile.route_id,
-                                model=profile.model,
-                                adapter_version=profile.adapter_version,
-                                cache_strategy=profile.cache_strategy,
-                                requested_cache_ttl=profile.requested_cache_ttl,
-                                observed_cache_support=observed_cache_support,
-                                fallback_used=False,
-                                fallback_from_profile_id=None,
-                                usage=usage,
-                                status="succeeded",
-                                stable_prefix_hash=(
-                                    context.stable_prefix_hash
-                                    or build_stable_prefix_hash(
-                                        static_system=context.static_system,
-                                        stable_summary=context.stable_summary,
-                                        stable_history=context.stable_history,
-                                    )
-                                ),
-                                prompt_cache_key=None,
-                                runtime_kernel_version=context.runtime_kernel_version,
-                                persona_version=context.actor_prompt_version,
-                                room_policy_version=context.room_policy_version,
-                                tool_schema_hash=context.tool_schema_hash,
-                                summary_version=context.summary_version or 1,
-                                compressed_up_to_event_id=(
-                                    context.compressed_up_to_event_id or 0
-                                ),
-                                provider_usage_received=provider_usage_received,
-                                execution_purpose="cache_keepalive",
-                            )
-                        )
+                    try:
+                        async for chunk in stream:
+                            if chunk.event == "usage" and isinstance(
+                                chunk.data.get("usage"), ProviderUsage
+                            ):
+                                usage = chunk.data["usage"]
+                                observed_cache_support = str(
+                                    chunk.data.get("observed_cache_support", "unverified")
+                                )
+                                provider_usage_received = bool(
+                                    chunk.data.get("provider_usage_received", False)
+                                )
+                    finally:
+                        await stream.aclose()
                     await self.store.save_actor_state(
                         pin.pin_id,
                         CachePinActorState(

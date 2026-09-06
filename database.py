@@ -373,7 +373,7 @@ CREATE TABLE IF NOT EXISTS model_attachment_descriptions (
 
 CREATE TABLE IF NOT EXISTS model_execution_receipts (
     receipt_id TEXT PRIMARY KEY,
-    generation_request_id TEXT NOT NULL UNIQUE,
+    generation_request_id TEXT NOT NULL,
     actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
     room_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
@@ -407,6 +407,11 @@ CREATE TABLE IF NOT EXISTS model_execution_receipts (
     execution_purpose TEXT NOT NULL DEFAULT 'generation',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE model_execution_receipts
+    DROP CONSTRAINT IF EXISTS model_execution_receipts_generation_request_id_key;
+CREATE INDEX IF NOT EXISTS idx_model_execution_receipts_generation
+    ON model_execution_receipts(generation_request_id);
 
 ALTER TABLE model_execution_receipts
     ADD COLUMN IF NOT EXISTS stable_prefix_hash TEXT,

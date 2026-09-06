@@ -155,6 +155,32 @@ def test_active_pin_shows_observed_cache_result_separately(dashboard):
     assert "calls 68" not in text
 
 
+def test_usage_dom_separates_one_generation_from_two_attempts(dashboard):
+    from dataclasses import replace
+    from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
+    from test_cache_usage_dashboard import _receipt
+    page, responses, _ = dashboard
+    first = replace(_receipt(observed="unavailable", usage_received=False), receipt_id="attempt-failed", status="failed")
+    second = replace(first, receipt_id="attempt-complete", status="succeeded")
+    receipts = (second, first)
+    responses["/api/model-usage/summary"] = {
+        "cache_view": build_cache_usage_view(receipts),
+        "cache_observability": build_cache_observability_summary(receipts)}
+    page.evaluate("loadModelProfilesAndUsage()")
+    summary = page.locator("#model-usage-summary")
+    assert "逻辑请求数 1" in summary.inner_text()
+    assert "供应商尝试数 2" in summary.inner_text()
+    rows = page.locator("#model-usage-body tr")
+    assert rows.count() == 2
+    assert "完整返回" in rows.nth(0).inner_text()
+    assert "尝试失败" in rows.nth(1).inner_text()
+    assert "attempt-failed" in rows.nth(1).text_content()
+    assert rows.nth(1).locator("td").nth(7).inner_text() == "—"
+    summary.locator("summary").click()
+    assert "默认最多 200 条" in summary.inner_text()
+    assert "完整返回不代表回复已发布" in summary.inner_text()
+
+
 def test_double_click_probe_only_sends_once_for_displayed_revision(dashboard):
     page, _, writes = dashboard
     page.fill("#probe-conversation", "synthetic-conversation")

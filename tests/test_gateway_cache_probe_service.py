@@ -1,3 +1,4 @@
+from model_usage_store import InMemoryModelUsageStore
 import pytest
 from dataclasses import replace
 
@@ -7,6 +8,47 @@ from model_execution_contracts import ProviderUsage
 from model_profile_store import InMemoryModelProfileStore
 from model_profile_store import ProfileStoreError
 from model_profiles import ModelProfile
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("second_fails", [False, True])
+async def test_real_postgres_explicit_probe_records_both_http_attempts(isolated_postgres, monkeypatch, second_fails):
+    import database
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    async def factory():
+        return isolated_postgres
+    monkeypatch.setattr(database, "get_pool", factory)
+    monkeypatch.setattr(database, "MEMORY_VECTOR_ENABLED", False)
+    await database.init_tables()
+    profiles = PostgresModelProfileStore(factory)
+    payload = _profile().to_dict()
+    payload["headers"] = {"x-api-key": "${credential}"}
+    await profiles.put_profile(ModelProfile.from_dict(payload))
+    usage = PostgresModelUsageStore(factory)
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if second_fails and len(calls) == 2:
+            return httpx.Response(503)
+        return httpx.Response(200, text='event: message_start\ndata: {"message":{"usage":{"input_tokens":31}}}\n\nevent: message_stop\ndata: {}\n\n')
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service = GatewayCacheProbeService(profiles=profiles, usage_store=usage,
+        provider_runner=GatewayProviderRunner(transport=transport, credential_resolver=Resolver()))
+    try:
+        await service.run(profile_id="profile-1", actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="probe-test")
+        rows = await usage.list_receipts()
+        assert len(calls) == len(rows) == 2
+        assert {row.execution_purpose for row in rows} == {"cache_probe"}
+        assert [row.status for row in rows] == ["failed" if second_fails else "succeeded", "succeeded"]
+        assert [row.usage.input_tokens for row in rows] == [None if second_fails else 31, 31]
+        assert all(row.usage.output_tokens is None for row in rows)
+    finally:
+        await transport.close()
 
 
 def _profile(*, strategy="anthropic_prefix_anchored_v1", ttl="1h"):
@@ -57,6 +99,7 @@ class _Runner:
         context,
         cache_namespace,
         max_output_tokens=None,
+        on_attempt=None,
     ):
         self.calls.append(
             (profile, request, context, cache_namespace, max_output_tokens)
@@ -67,6 +110,9 @@ class _Runner:
             "usage",
             {"usage": usage, "observed_cache_support": "unverified"},
         )
+        if on_attempt:
+            import uuid
+            await on_attempt(str(uuid.uuid4()), usage, "succeeded", True, "unverified")
 
 
 @pytest.mark.anyio
@@ -79,7 +125,7 @@ async def test_double_send_probe_freezes_every_input_and_promotes_verified_cache
             ProviderUsage.from_provider_values(cache_read_input_tokens=380),
         ]
     )
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
 
     result = await service.run(
         profile_id="profile-1",
@@ -110,7 +156,7 @@ async def test_cache_write_only_probe_verifies_route_without_claiming_cache_hit(
             ProviderUsage.from_provider_values(cache_creation_input_tokens=20),
         ]
     )
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
 
     result = await service.run(
         profile_id="profile-1",
@@ -135,7 +181,7 @@ async def test_cache_miss_does_not_unverify_an_already_verified_route():
             ProviderUsage.from_provider_values(input_tokens=100, cached_tokens=0),
         ]
     )
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
 
     result = await service.run(
         profile_id="profile-1",
@@ -158,7 +204,7 @@ async def test_no_cache_profile_can_pass_route_probe_without_fabricated_cache_su
             ProviderUsage.from_provider_values(input_tokens=30, output_tokens=3),
         ]
     )
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
 
     result = await service.run(
         profile_id="profile-1",
@@ -182,7 +228,7 @@ async def test_paid_cache_probe_caps_provider_output_to_minimal_tokens():
             ProviderUsage.from_provider_values(cache_read_input_tokens=380),
         ]
     )
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
 
     await service.run(
         profile_id="profile-1",
@@ -213,7 +259,7 @@ async def test_paid_cache_probe_uses_a_distinct_stable_prefix_per_profile():
             ProviderUsage.from_provider_values(input_tokens=30, output_tokens=3),
         ]
     )
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
 
     await service.run(
         profile_id="profile-1",
@@ -247,7 +293,7 @@ async def test_inflight_old_probe_does_not_certify_edited_profile():
                 yield chunk
 
     runner = EditingRunner([ProviderUsage.from_provider_values(cache_read_input_tokens=80)] * 2)
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
     with pytest.raises(ProfileStoreError, match="revision"):
         await service.run(profile_id="profile-1", actor_id="jiao",
             room_id="room_weiwei_jiao", conversation_id="synthetic-conversation")
@@ -260,7 +306,7 @@ async def test_stale_dashboard_probe_revision_rejected_before_provider():
     store = InMemoryModelProfileStore()
     await store.put_profile(replace(_profile(), revision=2))
     runner = _Runner([])
-    service = GatewayCacheProbeService(profiles=store, provider_runner=runner)
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
     with pytest.raises(ProfileStoreError, match="revision"):
         await service.run(profile_id="profile-1", profile_revision=1, actor_id="jiao",
             room_id="room_weiwei_jiao", conversation_id="synthetic")

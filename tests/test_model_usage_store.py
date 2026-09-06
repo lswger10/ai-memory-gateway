@@ -80,6 +80,59 @@ async def test_generation_identity_conflict_is_rejected():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_attempt_receipts_allow_one_generation_and_deduplicate_exact_payload(persistent, isolated_postgres, monkeypatch):
+    import asyncio
+    import database
+    from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+    from test_model_execution_service import _profile
+    async def factory():
+        return isolated_postgres
+    if persistent:
+        monkeypatch.setattr(database, "get_pool", factory)
+        monkeypatch.setattr(database, "MEMORY_VECTOR_ENABLED", False)
+        await database.init_tables()
+        await PostgresModelProfileStore(factory).put_profile(_profile("profile-a"))
+        store = PostgresModelUsageStore(factory)
+    else:
+        store = InMemoryModelUsageStore()
+    first = _draft(receipt_id="attempt-one", status="failed")
+    final = _draft(receipt_id="attempt-two")
+    repeated = await asyncio.gather(*(store.record(first) for _ in range(3)))
+    assert {item.receipt_id for item in repeated} == {"attempt-one"}
+    await store.record(final)
+    assert len(await store.list_receipts()) == 2
+    with pytest.raises(UsageStoreConflict):
+        await store.record(_draft(receipt_id="attempt-one", status="failed", model="different-model"))
+    assert {item.model for item in await store.list_receipts()} == {"model-a"}
+
+
+@pytest.mark.anyio
+async def test_receipt_schema_upgrade_preserves_existing_history(isolated_postgres, monkeypatch):
+    import database
+    from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+    from test_model_execution_service import _profile
+    async def factory():
+        return isolated_postgres
+    monkeypatch.setattr(database, "get_pool", factory)
+    monkeypatch.setattr(database, "MEMORY_VECTOR_ENABLED", False)
+    await database.init_tables()
+    await PostgresModelProfileStore(factory).put_profile(_profile("profile-a"))
+    store = PostgresModelUsageStore(factory)
+    original = await store.record(_draft())
+    async with isolated_postgres.acquire() as conn:
+        await conn.execute("ALTER TABLE model_execution_receipts ADD CONSTRAINT model_execution_receipts_generation_request_id_key UNIQUE(generation_request_id)")
+        before = dict(await conn.fetchrow("SELECT * FROM model_execution_receipts"))
+    await database.init_tables()
+    async with isolated_postgres.acquire() as conn:
+        assert dict(await conn.fetchrow("SELECT * FROM model_execution_receipts")) == before
+    await store.record(_draft(receipt_id="new-attempt"))
+    rows = await store.list_receipts()
+    assert {row.receipt_id for row in rows} == {original.receipt_id, "new-attempt"}
+    assert len({row.generation_request_id for row in rows}) == 1
+
+
+@pytest.mark.anyio
 async def test_provider_usage_round_trips_exact_values_and_nulls():
     store = InMemoryModelUsageStore()
     usage = ProviderUsage.from_provider_values(

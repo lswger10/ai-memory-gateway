@@ -102,27 +102,22 @@ class _Runner:
         self.calls = []
         self.cancelled = False
 
-    async def run(self, *, profile, request, context, cache_namespace):
+    async def run(self, *, profile, request, context, cache_namespace, on_attempt):
+        import uuid
         self.calls.append((profile.profile_id, request, context, cache_namespace))
+        failed = profile.profile_id in self.fail_profiles
+        usage = (ProviderUsage.from_provider_values() if failed else ProviderUsage.from_provider_values(
+            input_tokens=100, output_tokens=10, cache_creation_input_tokens=80, cache_read_input_tokens=20))
         try:
-            if profile.profile_id in self.fail_profiles:
+            if failed:
                 raise ProviderRunUnavailable("sanitized failure")
             yield ProviderChunk("delta", {"text": "hello"})
             yield ProviderChunk("final", {"text": "hello"})
-            yield ProviderChunk(
-                "usage",
-                {
-                    "usage": ProviderUsage.from_provider_values(
-                        input_tokens=100,
-                        output_tokens=10,
-                        cache_creation_input_tokens=80,
-                        cache_read_input_tokens=20,
-                    ),
-                    "observed_cache_support": "verified",
-                },
-            )
+            yield ProviderChunk("usage", {"usage": usage, "observed_cache_support": "verified"})
         finally:
             self.cancelled = True
+            await on_attempt(str(uuid.uuid4()), usage, "failed" if failed else "succeeded",
+                not failed, "unverified" if failed else "verified")
 
 
 async def _service(*, fail_profiles=(), fallbacks=()):
@@ -222,7 +217,9 @@ async def test_execution_receipt_records_actual_fallback_and_usage():
     _ = [event async for event in service.stream(_request(binding_revision=2))]
     receipts = await usage_store.list_receipts()
 
-    assert len(receipts) == 1
+    assert len(receipts) == 2
+    assert receipts[1].status == "failed"
+    assert receipts[1].usage.input_tokens is None
     receipt = receipts[0]
     assert receipt.profile_id == "approved"
     assert receipt.fallback_used is True
@@ -296,3 +293,258 @@ def _request_to_dict(request):
         "bedroom_session_id": request.bedroom_session_id,
         "binding_revision": request.binding_revision,
     }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled", "protocol_error", "truncated"])
+@pytest.mark.parametrize("protocol", ["anthropic_messages", "openai_chat_completions", "openai_responses"])
+async def test_real_http_attempt_preserves_usage_received_before_interruption(protocol, outcome):
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    service, _, _, usage_store = await _service()
+    payload = _profile("primary").to_dict()
+    payload.update(protocol=protocol, cache_strategy="no_prompt_cache_v1", requested_cache_ttl=None)
+    payload["capabilities"].update(cache_strategies=["no_prompt_cache_v1"], cache_ttls=[])
+    # A fresh store keeps the exact known binding revision while changing protocol.
+    profiles = InMemoryModelProfileStore()
+    await profiles.put_profile(ModelProfile.from_dict(payload))
+    await profiles.set_actor_default("jiao", "primary")
+    service._profiles = profiles
+    packets = {
+        "anthropic_messages": b'event: message_start\ndata: {"message":{"usage":{"input_tokens":19}}}\n\n',
+        "openai_chat_completions": b'data: {"choices":[],"usage":{"prompt_tokens":19}}\n\n',
+        "openai_responses": b'event: response.incomplete\ndata: {"response":{"usage":{"input_tokens":19}}}\n\n',
+    }
+    if outcome in {"failed", "cancelled"}:
+        packets["openai_responses"] = b'event: response.completed\ndata: {"response":{"usage":{"input_tokens":19}}}\n\n'
+    elif outcome == "truncated":
+        packets["openai_responses"] = b'event: response.output_text.delta\ndata: {"delta":"partial"}\n\n'
+    calls = []
+    class InterruptedBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield packets[protocol]
+            if outcome == "cancelled":
+                raise asyncio.CancelledError()
+            if outcome == "failed":
+                raise httpx.ReadError("synthetic interrupted stream")
+            if outcome == "protocol_error":
+                yield b'event: error\ndata: {"error":{"type":"synthetic_provider_failure"}}\n\n'
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, stream=InterruptedBody())
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service._provider_runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver())
+    try:
+        if outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                _ = [event async for event in service.stream(_request())]
+        else:
+            events = [event async for event in service.stream(_request())]
+            assert events[-1].event == "unavailable"
+        assert len(calls) == 1
+        receipts = await usage_store.list_receipts()
+        assert len(receipts) == 1
+        assert receipts[0].status == ("cancelled" if outcome == "cancelled" else "failed")
+        assert receipts[0].usage.input_tokens == (None if protocol == "openai_responses" and outcome == "truncated" else 19)
+        assert receipts[0].usage.output_tokens is None
+        assert receipts[0].usage.cache_read_input_tokens is None
+        assert receipts[0].generation_request_id == "generation-1"
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
+async def test_real_http_fallback_has_separate_failed_and_successful_receipts():
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    service, _, _, usage_store = await _service(fallbacks=("approved",))
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, text='event: message_start\ndata: {"message":{"usage":{"input_tokens":5}}}\n\nevent: content_block_delta\ndata: {"delta":{"text":"hello"}}\n\nevent: message_delta\ndata: {"usage":{"output_tokens":2}}\n\nevent: message_stop\ndata: {}\n\n')
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service._provider_runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver())
+    try:
+        events = [event async for event in service.stream(_request(binding_revision=2))]
+        assert sum(event.event == "final" for event in events) == 1
+        assert len(calls) == 2
+        receipts = await usage_store.list_receipts()
+        assert len(receipts) == 2
+        by_profile = {receipt.profile_id: receipt for receipt in receipts}
+        assert by_profile["primary"].status == "failed"
+        assert by_profile["primary"].usage.input_tokens is None
+        assert by_profile["approved"].status == "succeeded"
+        assert by_profile["approved"].usage.input_tokens == 5
+        assert by_profile["approved"].fallback_used
+        assert len({receipt.receipt_id for receipt in receipts}) == 2
+        assert len({receipt.generation_request_id for receipt in receipts}) == 1
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blocked", [False, True])
+async def test_usage_store_failure_does_not_dispatch_paid_fallback(blocked):
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from model_usage_store import UsageRecordingError
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    service, _, _, _ = await _service(fallbacks=("approved",))
+    class BrokenStore:
+        async def record(self, draft):
+            if blocked:
+                import anyio
+                await anyio.sleep_forever()
+            raise RuntimeError("synthetic database unavailable")
+    service._usage_store = BrokenStore()
+    calls = []
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, text='event: message_stop\ndata: {}\n\n')
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service._provider_runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver())
+    try:
+        with pytest.raises(UsageRecordingError):
+            _ = [event async for event in service.stream(_request(binding_revision=2))]
+        assert len(calls) == 1
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_staged_tool", [False, True])
+async def test_asgi_level_cancellation_persists_received_usage_in_postgres(isolated_postgres, monkeypatch, with_staged_tool):
+    import anyio
+    import database
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    from dataclasses import replace
+    import json
+    from actor_memory_tools import ActorMemoryExecutionContext, ActorMemoryToolLibrary, PostgresActorMemoryToolStore
+    async def factory():
+        return isolated_postgres
+    monkeypatch.setattr(database, "get_pool", factory)
+    monkeypatch.setattr(database, "MEMORY_VECTOR_ENABLED", False)
+    await database.init_tables()
+    profile = _profile("primary")
+    if with_staged_tool:
+        profile = replace(profile, capabilities=replace(profile.capabilities, tools=True))
+    await PostgresModelProfileStore(factory).put_profile(profile)
+    service, builder, _, _ = await _service()
+    profiles = InMemoryModelProfileStore()
+    await profiles.put_profile(profile)
+    await profiles.set_actor_default("jiao", "primary")
+    service._profiles = profiles
+    tools = None
+    if with_staged_tool:
+        tools = ActorMemoryToolLibrary(PostgresActorMemoryToolStore(factory))
+        original_build = builder.build
+        async def build(request, *args, **kwargs):
+            return replace(await original_build(request), tool_schema_hash="actor-memory-tools.v1",
+                actor_memory_context=ActorMemoryExecutionContext(actor_id="jiao", room_id="room_group_home",
+                    conversation_id="conversation-1", generation_request_id="generation-1", source_event_id=101,
+                    execution_mode="group", profile_id="primary"))
+        builder.build = build
+    service._usage_store = PostgresModelUsageStore(factory)
+    class CancelledBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: message_start\ndata: {"message":{"usage":{"input_tokens":19}}}\n\n'
+            scope.cancel()
+            await anyio.sleep(0)
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if with_staged_tool and len(calls) == 1:
+            tool = {"index": 0, "content_block": {"type": "tool_use", "id": "staged-write", "name": "write_memory",
+                "input": {"content": "remember rain", "scope": "group", "memory_type": "fact", "perspective": "jiao",
+                    "confidential": False, "importance": 5, "evidence_event_ids": [101]}}}
+            return httpx.Response(200, text="event: content_block_start\ndata: " + json.dumps(tool) + "\n\nevent: message_stop\ndata: {}\n\n")
+        return httpx.Response(200, stream=CancelledBody())
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service._provider_runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver(), memory_tools=tools)
+    try:
+        with anyio.CancelScope() as scope:
+            _ = [event async for event in service.stream(_request())]
+        receipts = await service._usage_store.list_receipts()
+        assert len(receipts) == (2 if with_staged_tool else 1)
+        assert receipts[0].usage.input_tokens == 19
+        assert receipts[0].status == "cancelled"
+        if with_staged_tool:
+            async with isolated_postgres.acquire() as conn:
+                stages = await conn.fetch("SELECT status FROM actor_memory_tool_stages")
+                assert [row["status"] for row in stages] == ["discarded"]
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("second_fails", [False, True])
+async def test_real_http_tool_rounds_have_individual_receipts_and_unknown_totals(second_fails, isolated_postgres, monkeypatch):
+    from dataclasses import replace
+    import httpx
+    from actor_memory_tools import ActorMemoryExecutionContext, ActorMemoryToolLibrary, InMemoryActorMemoryToolStore
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    import database
+    from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+    service, builder, _, usage_store = await _service()
+    profiles = InMemoryModelProfileStore()
+    payload = _profile("primary").to_dict()
+    payload["capabilities"]["tools"] = True
+    await profiles.put_profile(ModelProfile.from_dict(payload))
+    await profiles.set_actor_default("jiao", "primary")
+    service._profiles = profiles
+    async def factory():
+        return isolated_postgres
+    monkeypatch.setattr(database, "get_pool", factory)
+    monkeypatch.setattr(database, "MEMORY_VECTOR_ENABLED", False)
+    await database.init_tables()
+    await PostgresModelProfileStore(factory).put_profile(ModelProfile.from_dict(payload))
+    usage_store = PostgresModelUsageStore(factory)
+    service._usage_store = usage_store
+    original = builder.build
+    async def build(request, *args, **kwargs):
+        return replace(await original(request), tool_schema_hash="actor-memory-tools.v1",
+            actor_memory_context=ActorMemoryExecutionContext(actor_id="jiao", room_id="room_group_home",
+                conversation_id="conversation-1", generation_request_id="generation-1", source_event_id=101,
+                execution_mode="group", profile_id="primary"))
+    builder.build = build
+    calls = []
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, text='event: message_start\ndata: {"message":{"usage":{"input_tokens":7}}}\n\nevent: content_block_start\ndata: {"index":0,"content_block":{"type":"tool_use","id":"read-1","name":"search_memory","input":{"query":"rain"}}}\n\nevent: message_stop\ndata: {}\n\n')
+        if second_fails:
+            return httpx.Response(503)
+        return httpx.Response(200, text='event: content_block_delta\ndata: {"delta":{"text":"hello"}}\n\nevent: message_stop\ndata: {}\n\n')
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service._provider_runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver(),
+        memory_tools=ActorMemoryToolLibrary(InMemoryActorMemoryToolStore()))
+    try:
+        events = [event async for event in service.stream(_request())]
+        assert len(calls) == 2
+        receipts = await usage_store.list_receipts()
+        assert len(receipts) == 2
+        assert [receipt.status for receipt in receipts] == ["failed" if second_fails else "succeeded", "succeeded"]
+        assert [receipt.usage.input_tokens for receipt in receipts] == [None, 7]
+        if not second_fails:
+            assert next(event for event in events if event.event == "usage").data["input_tokens"] is None
+            assert events[-1].data["execution_receipt_id"] == receipts[0].receipt_id
+    finally:
+        await transport.close()

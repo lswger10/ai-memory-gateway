@@ -104,7 +104,7 @@ class _Runner:
     async def run(self, **kwargs):
         self.calls.append(kwargs)
         yield ProviderChunk("final", {"text": "ignored"})
-        yield ProviderChunk(
+        chunk = ProviderChunk(
             "usage",
             {
                 "usage": ProviderUsage.from_provider_values(
@@ -117,6 +117,12 @@ class _Runner:
                 "provider_usage_received": True,
             },
         )
+        yield chunk
+        if kwargs.get("on_attempt"):
+            import uuid
+            await kwargs["on_attempt"](str(uuid.uuid4()), chunk.data["usage"],
+                "succeeded", True, "verified")
+
 
 
 async def _service():
@@ -567,3 +573,44 @@ async def test_postgres_pin_creation_rolls_back_if_actor_initialization_fails(po
         await service.set_pin(room_id="room_group_home", conversation_id="failed-init",
             execution_mode="group", enabled=True)
     assert await service.list_pins() == ()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_postgres_pin_records_partial_http_usage_on_failure_and_cancel(postgres_pin_service, cancelled):
+    import asyncio
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
+    from test_gateway_provider_runner import Resolver
+    service, _, _ = postgres_pin_service
+    await PostgresModelProfileStore(service.store._pool_factory).put_profile(_profile("laoke-1h"))
+    service.usage_store = PostgresModelUsageStore(service.store._pool_factory)
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="failed-http",
+        execution_mode="private", enabled=True)
+    class Interrupted(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'event: message_start\ndata: {"message":{"usage":{"input_tokens":23}}}\n\n'
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise httpx.ReadError("synthetic failure")
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=Interrupted())), **kwargs))
+    service.provider_runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver())
+    try:
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await service.run_due_once()
+        else:
+            assert (await service.run_due_once()).calls == 1
+        receipts = await service.usage_store.list_receipts()
+        assert len(receipts) == 1
+        assert receipts[0].status == ("cancelled" if cancelled else "failed")
+        assert receipts[0].execution_purpose == "cache_keepalive"
+        assert receipts[0].usage.input_tokens == 23
+        assert receipts[0].usage.output_tokens is None
+        assert (await service.run_due_once()).calls == 0
+        assert (await service.get_pin(pin.pin_id)).enabled
+    finally:
+        await transport.close()
