@@ -204,19 +204,19 @@
                     <h3>合并记忆</h3>
                     <p>已选择 <span id="mergeCount">0</span> 条记忆</p>
                     <div class="form-group">
-                        <label class="form-label">标题（可选）：</label>
+                        <label for="mergeTitle" class="form-label">标题（可选）：</label>
                         <input type="text" id="mergeTitle" class="form-input" placeholder="10字以内的标题" maxlength="20">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">合并后内容：</label>
+                        <label for="mergeContent" class="form-label">合并后内容：</label>
                         <textarea id="mergeContent" class="textarea" rows="6" placeholder="请输入合并后的完整描述..."></textarea>
                     </div>
                     <div class="form-group">
-                        <label class="form-label">重要度：</label>
+                        <label for="mergeImportance" class="form-label">重要度：</label>
                         <input type="number" id="mergeImportance" class="form-input" value="5" min="1" max="10" style="width:80px;">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">层级：</label>
+                        <label for="mergeLayer" class="form-label">层级：</label>
                         <select id="mergeLayer" class="select-input">
                             <option value="2">事件记忆</option>
                             <option value="3">核心记忆</option>
@@ -235,11 +235,11 @@
                     <h3>整理记忆</h3>
                     <p>将指定时间段的碎片记忆整理合并为事件记忆</p>
                     <div class="form-group">
-                        <label class="form-label">开始日期：</label>
+                        <label for="consolidateDateStart" class="form-label">开始日期：</label>
                         <input type="date" id="consolidateDateStart" class="form-input">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">结束日期：</label>
+                        <label for="consolidateDateEnd" class="form-label">结束日期：</label>
                         <input type="date" id="consolidateDateEnd" class="form-input">
                     </div>
                     <div class="form-group">
@@ -286,7 +286,7 @@
                     <!-- 纯文本导入 -->
                     <div id="tab-text" class="tab-panel active">
                         <div class="form-group">
-                            <label class="form-label">上传 .txt 文件（每行一条记忆）</label>
+                            <label for="txtFile" class="form-label">上传 .txt 文件（每行一条记忆）</label>
                             <input type="file" id="txtFile" accept=".txt" class="file-input">
                         </div>
                         <div class="divider"><span>或者直接输入</span></div>
@@ -305,7 +305,7 @@
                     <!-- JSON 导入 -->
                     <div id="tab-json" class="tab-panel">
                         <div class="form-group">
-                            <label class="form-label">上传从导出功能保存的 .json 文件</label>
+                            <label for="jsonFile" class="form-label">上传从导出功能保存的 .json 文件</label>
                             <input type="file" id="jsonFile" accept=".json" class="file-input">
                         </div>
                         <div class="divider"><span>或者直接粘贴</span></div>
@@ -412,7 +412,7 @@
                         <div class="card">
                             <h4 style="margin-bottom: 16px;">导入对话记录</h4>
                             <div class="form-group">
-                                <label class="form-label">上传导出的 .json 文件</label>
+                                <label for="convJsonFile" class="form-label">上传导出的 .json 文件</label>
                                 <input type="file" id="convJsonFile" accept=".json" class="file-input">
                             </div>
                             <div class="divider"><span>或者直接粘贴</span></div>
@@ -443,14 +443,14 @@
                         <div class="settings-field"><label for="model-profile-id">Profile ID</label><input id="model-profile-id" required class="input" placeholder="ofox-claude-opus"></div>
                         <div class="settings-field"><label for="model-profile-name">显示名称</label><input id="model-profile-name" required class="input" placeholder="OFOX Claude Opus"></div>
                         <div class="settings-field"><label for="model-profile-provider">Provider</label><input id="model-profile-provider" required class="input" placeholder="ofox"></div>
-                        <div class="settings-field"><label>Protocol</label><select id="model-profile-protocol" class="input"><option value="anthropic_messages">anthropic_messages</option><option value="anthropic_messages_compatible">anthropic_messages_compatible</option><option value="openai_responses">openai_responses</option><option value="openai_chat_completions">openai_chat_completions</option></select></div>
+                        <div class="settings-field"><label for="model-profile-protocol">Protocol</label><select id="model-profile-protocol" class="input"><option value="anthropic_messages">anthropic_messages</option><option value="anthropic_messages_compatible">anthropic_messages_compatible</option><option value="openai_responses">openai_responses</option><option value="openai_chat_completions">openai_chat_completions</option></select></div>
                         <div class="settings-field"><label for="model-profile-base-url">Base URL</label><input id="model-profile-base-url" required type="url" class="input" placeholder="https://api.example.com"></div>
                         <div class="settings-field"><label for="model-profile-route-id">Route ID</label><input id="model-profile-route-id" required class="input" placeholder="provider-route-1"></div>
                         <div class="settings-field"><label for="model-profile-model">模型</label><input id="model-profile-model" required class="input" placeholder="provider/model-name"></div>
                         <div class="settings-field"><label for="model-profile-key-env">API Key 环境变量名</label><input id="model-profile-key-env" required class="input" placeholder="OFOX_API_KEY"></div>
-                        <div class="settings-field"><label>Header templates (JSON)</label><input id="model-profile-headers" class="input" value='{"Authorization":"Bearer ${credential}"}'><small class="form-hint">只写模板，不粘贴真实 Key。Anthropic 可用 {"x-api-key":"${credential}","anthropic-version":"2023-06-01"}</small></div>
-                        <div class="settings-field"><label>Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option></select></div>
-                        <div class="settings-field"><label>请求 TTL</label><select id="model-profile-cache-ttl" class="input"><option value="">不请求</option><option value="5m">5m</option><option value="1h">1h（必须由真实探针验证）</option></select></div>
+                        <div class="settings-field"><label for="model-profile-headers">Header templates (JSON)</label><input id="model-profile-headers" class="input" value='{"Authorization":"Bearer ${credential}"}'><small class="form-hint">只写模板，不粘贴真实 Key。Anthropic 可用 {"x-api-key":"${credential}","anthropic-version":"2023-06-01"}</small></div>
+                        <div class="settings-field"><label for="model-profile-cache-strategy">Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option></select></div>
+                        <div class="settings-field"><label for="model-profile-cache-ttl">请求 TTL</label><select id="model-profile-cache-ttl" class="input"><option value="">不请求</option><option value="5m">5m</option><option value="1h">1h（必须由真实探针验证）</option></select></div>
                     </div>
                     <div style="display:flex;gap:14px;flex-wrap:wrap;margin:12px 0;">
                         <label class="checkbox-label"><input type="checkbox" id="model-profile-enabled" checked> enabled</label>
@@ -474,10 +474,10 @@
                     <h3 class="settings-group-title">人工双发探针</h3>
                     <p class="form-hint">此按钮会真实调用供应商两次并产生费用。不会自动运行，也不是缓存保活。</p>
                     <div class="settings-grid">
-                        <div class="settings-field"><label>Profile</label><select id="probe-profile" class="input"></select></div>
-                        <div class="settings-field"><label>Actor</label><select id="probe-actor" class="input"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
-                        <div class="settings-field"><label>Room</label><select id="probe-room" class="input"><option value="room_weiwei_jiao">椒椒私聊</option><option value="room_weiwei_laoke">老克私聊</option><option value="room_group_home">客厅</option></select></div>
-                        <div class="settings-field"><label>Canonical conversation ID</label><input id="probe-conversation" class="input" placeholder="从 Relay /app/rooms 取得"></div>
+                        <div class="settings-field"><label for="probe-profile">Profile</label><select id="probe-profile" class="input"></select></div>
+                        <div class="settings-field"><label for="probe-actor">Actor</label><select id="probe-actor" class="input"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
+                        <div class="settings-field"><label for="probe-room">Room</label><select id="probe-room" class="input"><option value="room_weiwei_jiao">椒椒私聊</option><option value="room_weiwei_laoke">老克私聊</option><option value="room_group_home">客厅</option></select></div>
+                        <div class="settings-field"><label for="probe-conversation">Canonical conversation ID</label><input id="probe-conversation" class="input" placeholder="从 Relay /app/rooms 取得"></div>
                     </div>
                     <button id="cache-probe-run" class="btn btn-warning" onclick="runCacheProbe()">确认产生两次调用并运行</button>
                     <pre id="cache-probe-result" class="form-hint" style="white-space:pre-wrap;margin-top:12px;"></pre>
@@ -487,9 +487,9 @@
                     <h3 class="settings-group-title">Actor 默认与自动 fallback</h3>
                     <p class="form-hint">自动 fallback 只使用这里明确保存的有序 Profile ID，不跨到未批准路线。</p>
                     <div class="settings-grid">
-                        <div class="settings-field"><label>Actor</label><select id="binding-actor" class="input" onchange="renderActorBinding()"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
-                        <div class="settings-field"><label>默认 Profile</label><select id="binding-default-profile" class="input"></select></div>
-                        <div class="settings-field"><label>有序 fallback IDs</label><input id="binding-fallbacks" class="input" placeholder="profile-b, profile-c"></div>
+                        <div class="settings-field"><label for="binding-actor">Actor</label><select id="binding-actor" class="input" onchange="renderActorBinding()"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
+                        <div class="settings-field"><label for="binding-default-profile">默认 Profile</label><select id="binding-default-profile" class="input"></select></div>
+                        <div class="settings-field"><label for="binding-fallbacks">有序 fallback IDs</label><input id="binding-fallbacks" class="input" placeholder="profile-b, profile-c"></div>
                     </div>
                     <button id="binding-save" class="btn btn-primary" disabled onclick="saveActorBinding()">保存默认与 fallback</button>
                     <pre id="binding-effective" class="form-hint" style="white-space:pre-wrap;"></pre>
@@ -523,31 +523,31 @@
                 <div class="card settings-card">
                     <h3 class="settings-group-title">记忆系统</h3>
                     <div class="settings-field settings-toggle-row">
-                        <label>启用记忆</label>
+                        <label for="set-MEMORY_ENABLED">启用记忆</label>
                         <label class="toggle"><input type="checkbox" id="set-MEMORY_ENABLED"><span class="toggle-slider"></span></label>
                     </div>
                     <div class="settings-field">
-                        <label>记忆提取 / 整理模型</label>
+                        <label for="set-MEMORY_MODEL">记忆提取 / 整理模型</label>
                         <div class="combo-box" id="combo-MEMORY_MODEL">
                             <input type="text" id="set-MEMORY_MODEL" class="combo-input" placeholder="搜索或输入模型名（留空用默认）" autocomplete="off">
                             <div class="combo-dropdown" id="dropdown-MEMORY_MODEL"></div>
                         </div>
                     </div>
                     <div class="settings-field">
-                        <label>记忆模型 API Key (MEMORY_API_KEY)</label>
+                        <label for="set-MEMORY_API_KEY">记忆模型 API Key (MEMORY_API_KEY)</label>
                         <input type="text" id="set-MEMORY_API_KEY" class="input" placeholder="sk-...">
                         <small class="form-hint" id="set-MEMORY_API_KEY-hint">仅供独立记忆提取任务；不会回退到 Model Profile 的供应商密钥</small>
                     </div>
                     <div class="settings-field">
-                        <label>最大注入记忆数 (MAX_MEMORIES_INJECT)</label>
+                        <label for="set-MAX_MEMORIES_INJECT">最大注入记忆数 (MAX_MEMORIES_INJECT)</label>
                         <input type="number" id="set-MAX_MEMORIES_INJECT" class="input" min="1" max="50">
                     </div>
                     <div class="settings-field">
-                        <label>最低分数阈值 (MIN_SCORE_THRESHOLD)</label>
+                        <label for="set-MIN_SCORE_THRESHOLD">最低分数阈值 (MIN_SCORE_THRESHOLD)</label>
                         <input type="number" id="set-MIN_SCORE_THRESHOLD" class="input" min="0" max="1" step="0.01">
                     </div>
                     <div class="settings-field">
-                        <label>提取间隔轮数 (MEMORY_EXTRACT_INTERVAL)</label>
+                        <label for="set-MEMORY_EXTRACT_INTERVAL">提取间隔轮数 (MEMORY_EXTRACT_INTERVAL)</label>
                         <input type="number" id="set-MEMORY_EXTRACT_INTERVAL" class="input" min="0" max="20">
                         <small class="form-hint">0=关闭提取，1=每轮，N=每N轮</small>
                     </div>
@@ -557,24 +557,24 @@
                 <div class="card settings-card">
                     <h3 class="settings-group-title">向量搜索</h3>
                     <div class="settings-field settings-toggle-row">
-                        <label>启用向量搜索</label>
+                        <label for="set-MEMORY_VECTOR_ENABLED">启用向量搜索</label>
                         <label class="toggle"><input type="checkbox" id="set-MEMORY_VECTOR_ENABLED"><span class="toggle-slider"></span></label>
                     </div>
                     <div class="settings-field">
-                        <label>Embedding API Key</label>
+                        <label for="set-EMBEDDING_API_KEY">Embedding API Key</label>
                         <input type="text" id="set-EMBEDDING_API_KEY" class="input" placeholder="sk-...">
                         <small class="form-hint" id="set-EMBEDDING_API_KEY-hint">打码显示，留空不改</small>
                     </div>
                     <div class="settings-field">
-                        <label>Embedding Base URL</label>
+                        <label for="set-EMBEDDING_BASE_URL">Embedding Base URL</label>
                         <input type="text" id="set-EMBEDDING_BASE_URL" class="input" placeholder="https://api.openai.com/v1">
                     </div>
                     <div class="settings-field">
-                        <label>Embedding 模型</label>
+                        <label for="set-EMBEDDING_MODEL">Embedding 模型</label>
                         <input type="text" id="set-EMBEDDING_MODEL" class="input" placeholder="text-embedding-3-small">
                     </div>
                     <div class="settings-field">
-                        <label>Embedding 维度</label>
+                        <label for="set-EMBEDDING_DIM">Embedding 维度</label>
                         <input type="number" id="set-EMBEDDING_DIM" class="input" min="64" max="4096">
                     </div>
                 </div>
@@ -584,23 +584,23 @@
                     <h3 class="settings-group-title">搜索权重</h3>
                     <small class="form-hint" style="display:block;margin-bottom:12px;">四项权重之和建议为 1.0</small>
                     <div class="settings-field">
-                        <label>关键词权重 <span class="slider-val" id="val-MEMORY_HW_KEYWORD"></span></label>
+                        <label for="set-MEMORY_HW_KEYWORD">关键词权重 <span class="slider-val" id="val-MEMORY_HW_KEYWORD"></span></label>
                         <input type="range" id="set-MEMORY_HW_KEYWORD" min="0" max="1" step="0.05" oninput="updateSliderVal('MEMORY_HW_KEYWORD')">
                     </div>
                     <div class="settings-field">
-                        <label>语义权重 <span class="slider-val" id="val-MEMORY_HW_SEMANTIC"></span></label>
+                        <label for="set-MEMORY_HW_SEMANTIC">语义权重 <span class="slider-val" id="val-MEMORY_HW_SEMANTIC"></span></label>
                         <input type="range" id="set-MEMORY_HW_SEMANTIC" min="0" max="1" step="0.05" oninput="updateSliderVal('MEMORY_HW_SEMANTIC')">
                     </div>
                     <div class="settings-field">
-                        <label>重要度权重 <span class="slider-val" id="val-MEMORY_HW_IMPORTANCE"></span></label>
+                        <label for="set-MEMORY_HW_IMPORTANCE">重要度权重 <span class="slider-val" id="val-MEMORY_HW_IMPORTANCE"></span></label>
                         <input type="range" id="set-MEMORY_HW_IMPORTANCE" min="0" max="1" step="0.05" oninput="updateSliderVal('MEMORY_HW_IMPORTANCE')">
                     </div>
                     <div class="settings-field">
-                        <label>时效性权重 <span class="slider-val" id="val-MEMORY_HW_RECENCY"></span></label>
+                        <label for="set-MEMORY_HW_RECENCY">时效性权重 <span class="slider-val" id="val-MEMORY_HW_RECENCY"></span></label>
                         <input type="range" id="set-MEMORY_HW_RECENCY" min="0" max="1" step="0.05" oninput="updateSliderVal('MEMORY_HW_RECENCY')">
                     </div>
                     <div class="settings-field">
-                        <label>语义阈值 <span class="slider-val" id="val-MEMORY_SEMANTIC_THRESHOLD"></span></label>
+                        <label for="set-MEMORY_SEMANTIC_THRESHOLD">语义阈值 <span class="slider-val" id="val-MEMORY_SEMANTIC_THRESHOLD"></span></label>
                         <input type="range" id="set-MEMORY_SEMANTIC_THRESHOLD" min="0" max="1" step="0.05" oninput="updateSliderVal('MEMORY_SEMANTIC_THRESHOLD')">
                     </div>
                 </div>

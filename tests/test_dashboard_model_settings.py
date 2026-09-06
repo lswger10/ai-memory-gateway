@@ -75,6 +75,45 @@ def test_binding_form_displays_actual_default_and_saves_once(dashboard):
     assert page.locator("#binding-fallbacks").input_value() == ""
 
 
+@pytest.mark.parametrize("width", [1280, 390])
+def test_existing_form_labels_name_focus_and_keyboard_controls(dashboard, width):
+    page, _, writes = dashboard
+    page.set_viewport_size({"width": width, "height": 900})
+    # Checks the actual browser association for every existing textual label,
+    # including hidden settings and import forms, without duplicating HTML IDs.
+    missing = page.locator("label").evaluate_all("""labels => labels
+        .filter(label => label.textContent.trim() && !label.control)
+        .map(label => label.textContent.trim())""")
+    assert missing == []
+    for name, target in [
+        ("Protocol", "model-profile-protocol"),
+        ("Header templates (JSON)", "model-profile-headers"),
+        ("Cache Strategy", "model-profile-cache-strategy"),
+        ("请求 TTL", "model-profile-cache-ttl"),
+    ]:
+        assert page.get_by_label(name, exact=True).get_attribute("id") == target
+        page.locator(f'label[for="{target}"]').click()
+        assert page.evaluate("document.activeElement.id") == target
+    page.get_by_label("Protocol", exact=True).focus()
+    page.keyboard.press("Tab")
+    assert page.evaluate("document.activeElement.id") == "model-profile-base-url"
+    page.get_by_label("请求 TTL", exact=True).select_option("5m")
+    page.get_by_label("请求 TTL", exact=True).focus()
+    page.keyboard.press("ArrowDown")
+    assert page.get_by_label("请求 TTL", exact=True).input_value() == "1h"
+    page.locator('[data-section="manage"]').click()
+    page.evaluate("document.querySelector('#mergeModal').style.display = 'flex'")
+    for name, target in [("标题（可选）：", "mergeTitle"), ("合并后内容：", "mergeContent"),
+                         ("重要度：", "mergeImportance"), ("层级：", "mergeLayer")]:
+        assert page.get_by_label(name, exact=True).get_attribute("id") == target
+        page.locator(f'label[for="{target}"]').click()
+        assert page.evaluate("document.activeElement.id") == target
+    page.get_by_label("标题（可选）：", exact=True).focus()
+    page.keyboard.press("Tab")
+    assert page.evaluate("document.activeElement.id") == "mergeContent"
+    assert writes == []
+
+
 def test_profile_editor_loads_real_values_and_advances_revision(dashboard):
     page, _, writes = dashboard
     page.locator('#model-profile-list button[data-profile-id="claude"]').click(timeout=1500)
