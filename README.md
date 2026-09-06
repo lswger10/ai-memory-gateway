@@ -146,7 +146,10 @@ Bedroom media 与 Group Voice Call 不在 v1.1 范围内。
 
 永久回归：`tests/test_gateway_health_auth.py` 从 FastAPI HTTP 边界验证缺密钥拒绝、
 管理员权限、初始化失败、查询失败/恢复和空库区分。Persona API 的现有测试继续覆盖限权。
-这些可控数据库故障测试不等于真实 PostgreSQL、测试部署或生产验收。
+`test_real_postgres_lifespan_and_readiness_recovery` 使用共享的 opt-in schema
+夹具运行真实初始化、缺表故障与恢复；复用下述 PostgreSQL DSN/授权变量。
+基线 `cba9d8e` 在该故障下错误返回 200，修复版返回 503，恢复后 200。
+本地 PostgreSQL 18.6 全量回归为 334 passed；这不等于测试部署或生产验收。
 
 ```powershell
 python -m pytest tests -v

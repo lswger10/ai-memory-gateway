@@ -106,3 +106,39 @@ def test_disabled_persistence_is_not_database_readiness(monkeypatch):
     assert response.status_code == 503
     assert response.json()["ready"] is False
     assert response.json()["memory_count"] is None
+
+
+@pytest.mark.anyio
+async def test_real_postgres_lifespan_and_readiness_recovery(monkeypatch, isolated_postgres):
+    import httpx
+
+    async def pool_factory():
+        return isolated_postgres
+
+    monkeypatch.setattr(main, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(main._db_module, "DATABASE_URL", "postgresql://isolated-test")
+    monkeypatch.setattr(main._db_module, "get_pool", pool_factory)
+    monkeypatch.setattr(main, "get_pool", pool_factory)
+    monkeypatch.setattr(main, "close_pool", AsyncMock())  # Fixture owns the pool.
+    monkeypatch.setattr(main, "_actor_prompt_store", None)
+    monkeypatch.setattr(main, "_actor_prompt_mapping", None)
+    monkeypatch.setattr(main, "_model_provider_runner", None)
+    monkeypatch.setattr(main, "resolve_feature_flags", lambda: {"model_execution": False})
+    monkeypatch.setattr(main, "group_memory_features_from_env", lambda: {"group_memory": False})
+    async with main.lifespan(main.app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            empty = await client.get("/")
+            assert empty.status_code == 200
+            assert empty.json()["memory_count"] == 0
+            async with isolated_postgres.acquire() as conn:
+                await conn.execute("ALTER TABLE memories RENAME TO temporarily_unavailable_memories")
+            failed = await client.get("/")
+            assert failed.status_code == 503
+            assert failed.json()["memory_count"] is None
+            assert (await client.get("/health")).status_code == 200
+            async with isolated_postgres.acquire() as conn:
+                await conn.execute("ALTER TABLE temporarily_unavailable_memories RENAME TO memories")
+            recovered = await client.get("/")
+            assert recovered.status_code == 200
+            assert recovered.json()["ready"] is True
+            assert recovered.json()["memory_count"] == 0
