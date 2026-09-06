@@ -214,17 +214,24 @@ class InMemoryConversationPartitionStore:
         self._sync_watermarks: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
-    async def append_accepted_facts(self, facts: Iterable[ConversationFact]) -> int:
+    async def append_accepted_facts(self, facts: Iterable[ConversationFact], *, repair: bool = False, history_store=None) -> int:
         inserted = 0
         async with self._lock:
+            updated = dict(self._facts)
             for fact in facts:
-                existing = self._facts.get(fact.fact_identity)
+                existing = updated.get(fact.fact_identity)
                 if existing is not None:
-                    if existing.content_hash != fact.content_hash:
+                    if existing.content_hash != fact.content_hash and not repair:
                         raise ConversationPartitionConflict("accepted fact identity changed")
-                    continue
-                self._facts[fact.fact_identity] = fact
+                    if existing == fact:
+                        continue
+                updated[fact.fact_identity] = fact
                 inserted += 1
+            if history_store is not None:
+                for partition_id in sorted({fact.partition_id for fact in updated.values()
+                                             if self._facts.get(fact.fact_identity) != fact}):
+                    await history_store.invalidate_conversation_state(partition_id)
+            self._facts = updated
         return inserted
 
     async def list_facts(
@@ -306,14 +313,33 @@ class PostgresConversationPartitionStore:
         value = self._pool_factory()
         return await value if inspect.isawaitable(value) else value
 
-    async def append_accepted_facts(self, facts: Iterable[ConversationFact]) -> int:
+    async def append_accepted_facts(self, facts: Iterable[ConversationFact], *, repair: bool = False, history_store=None) -> int:
+        facts = tuple(facts)
         pool = await self._pool()
         inserted = 0
+        # Only authenticated full-history sync may repair the cognitive projection.
+        conflict_update = "fact_identity = EXCLUDED.fact_identity"
+        if repair:
+            conflict_update = ", ".join(
+                f"{column}=EXCLUDED.{column}" for column in (
+                    "session_id", "room_id", "canonical_conversation_id", "source_event_id",
+                    "actor_id", "event_role", "fact_hash", "content", "request_id", "created_at",
+                    "source_kind", "provenance_json", "attachments_json", "message_kind",
+                    "bedroom_session_id", "retention_policy", "role", "burst_id", "event_type",
+                    "reply_to_event_id", "mentions_json",
+                )
+            )
         async with pool.acquire() as conn:
             async with conn.transaction():
+                if history_store is not None:
+                    for partition_id in sorted({fact.partition_id for fact in facts}):
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock(hashtextextended('history-repair:' || $1, 0))",
+                            partition_id,
+                        )
                 for fact in facts:
                     row = await conn.fetchrow(
-                        """
+                        f"""
                         INSERT INTO conversations (
                             session_id, room_id, canonical_conversation_id,
                             source_event_id, actor_id, event_role,
@@ -329,7 +355,7 @@ class PostgresConversationPartitionStore:
                             NOW(),$18,$19,$20,$21::jsonb
                         )
                         ON CONFLICT (fact_identity) WHERE fact_identity IS NOT NULL
-                        DO UPDATE SET fact_identity = EXCLUDED.fact_identity
+                        DO UPDATE SET {conflict_update}
                         RETURNING fact_hash
                         """,
                         fact.partition_id,
@@ -360,6 +386,9 @@ class PostgresConversationPartitionStore:
                     # this compact statement. Returning the number accepted is sufficient
                     # for callers; factual identity is still stored exactly once.
                     inserted += 1
+                if history_store is not None:
+                    for partition_id in sorted({fact.partition_id for fact in facts}):
+                        await history_store.invalidate_conversation_state(partition_id, connection=conn)
         return inserted
 
     async def list_facts(

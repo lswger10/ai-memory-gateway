@@ -41,6 +41,16 @@ Gateway 不直接发布 final；Orchestrator 消费 Gateway stream 后仍需通�
 
 历史对话查看、搜索、导入、导出和 Memory 管理仍保留。
 
+Relay 派生事实（`fact_identity` 非空）不可通过旧 Conversations 编辑、删除、
+批量删除或合并入口修改；这些入口返回 409 / `relay_derived_conversation_read_only`。
+不含派生事实的旧会话仍可管理；Memory 编辑和永久删除语义不变。
+执行前从 Relay 分页核对到当前事件的完整历史，不能仅凭同步水位判断完整。
+缺失或冲突从 Relay 修复；来源缺少当前事件、重复或遗漏已接受事实时阻断执行，
+不推进水位。修复事实与清空对应压缩摘要在同一 PostgreSQL 事务中完成，
+沿用摘要 revision 拒绝旧压缩写回；会话 advisory lock 同时协调新缓存创建。
+目前每轮核对成本随历史长度线性增长；只有 Relay 提供权威完整性证明后才能安全恢复增量读取。
+对应永久回归：`tests/test_conversation_integrity.py`（使用显式授权的隔离 PostgreSQL）。
+
 ## Model Profiles
 
 Profile 明确声明：
@@ -149,7 +159,7 @@ Bedroom media 与 Group Voice Call 不在 v1.1 范围内。
 `test_real_postgres_lifespan_and_readiness_recovery` 使用共享的 opt-in schema
 夹具运行真实初始化、缺表故障与恢复；复用下述 PostgreSQL DSN/授权变量。
 基线 `cba9d8e` 在该故障下错误返回 200，修复版返回 503，恢复后 200。
-本地 PostgreSQL 18.6 全量回归为 334 passed；这不等于测试部署或生产验收。
+F02 修复后，本地 PostgreSQL 18.6 全量回归为 352 passed；这不等于测试部署或生产验收。
 
 ```powershell
 python -m pytest tests -v

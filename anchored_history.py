@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 class AnchoredHistoryError(ValueError):
@@ -222,6 +222,15 @@ class InMemoryAnchoredHistoryStore:
             self._states[cache_namespace] = replacement
             return replacement
 
+    async def invalidate_conversation_state(self, conversation_id: str) -> None:
+        async with self._lock:
+            for namespace, state in self._states.items():
+                if self._identities.get(namespace, {}).get("conversation_id") == conversation_id:
+                    self._states[namespace] = replace(
+                        state, summary="", summary_token_count=0, compressed_up_to_event_id=0,
+                        state_revision=state.state_revision + 1,
+                    )
+
     async def delete_conversation_state(self, conversation_id: str) -> None:
         async with self._lock:
             self._states = {
@@ -275,37 +284,43 @@ class PostgresAnchoredHistoryStore:
             raise AnchoredHistoryError("complete cache identity is required")
         pool = await self._pool_factory()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """WITH inserted AS (
-                     INSERT INTO model_cache_state(
-                       cache_namespace,actor_id,conversation_id,profile_id,
-                       profile_revision,execution_mode,actor_prompt_version,
-                       runtime_kernel_version,room_policy_version,tool_schema_hash,
-                       cache_strategy_version
-                     ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                     ON CONFLICT(cache_namespace) DO NOTHING
-                     RETURNING cache_namespace,compressed_up_to_event_id,summary,
-                               summary_token_count,state_revision
-                   )
-                   SELECT cache_namespace,compressed_up_to_event_id,summary,
-                          summary_token_count,state_revision FROM inserted
-                   UNION ALL
-                   SELECT cache_namespace,compressed_up_to_event_id,summary,
-                          summary_token_count,state_revision
-                   FROM model_cache_state WHERE cache_namespace=$1
-                   LIMIT 1""",
-                cache_namespace,
-                identity["actor_id"],
-                identity["conversation_id"],
-                identity["profile_id"],
-                identity["profile_revision"],
-                identity["execution_mode"],
-                identity["actor_prompt_version"],
-                identity["runtime_kernel_version"],
-                identity["room_policy_version"],
-                identity["tool_schema_hash"],
-                identity["cache_strategy_version"],
-            )
+            async with conn.transaction():
+                # Coordinate new namespaces with atomic factual repair; no persisted lock state.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock_shared(hashtextextended('history-repair:' || $1, 0))",
+                    identity["conversation_id"],
+                )
+                row = await conn.fetchrow(
+                    """WITH inserted AS (
+                         INSERT INTO model_cache_state(
+                           cache_namespace,actor_id,conversation_id,profile_id,
+                           profile_revision,execution_mode,actor_prompt_version,
+                           runtime_kernel_version,room_policy_version,tool_schema_hash,
+                           cache_strategy_version
+                         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                         ON CONFLICT(cache_namespace) DO NOTHING
+                         RETURNING cache_namespace,compressed_up_to_event_id,summary,
+                                   summary_token_count,state_revision
+                       )
+                       SELECT cache_namespace,compressed_up_to_event_id,summary,
+                              summary_token_count,state_revision FROM inserted
+                       UNION ALL
+                       SELECT cache_namespace,compressed_up_to_event_id,summary,
+                              summary_token_count,state_revision
+                       FROM model_cache_state WHERE cache_namespace=$1
+                       LIMIT 1""",
+                    cache_namespace,
+                    identity["actor_id"],
+                    identity["conversation_id"],
+                    identity["profile_id"],
+                    identity["profile_revision"],
+                    identity["execution_mode"],
+                    identity["actor_prompt_version"],
+                    identity["runtime_kernel_version"],
+                    identity["room_policy_version"],
+                    identity["tool_schema_hash"],
+                    identity["cache_strategy_version"],
+                )
         if row is None:
             raise AnchoredHistoryError("cache state could not be created")
         return _state_from_row(row)
@@ -371,6 +386,20 @@ class PostgresAnchoredHistoryStore:
                 if row is None:
                     raise AnchoredHistoryError("cache state revision conflict")
         return _state_from_row(row)
+
+    async def invalidate_conversation_state(self, conversation_id: str, *, connection=None) -> None:
+        if connection is None:
+            pool = await self._pool_factory()
+            async with pool.acquire() as conn:
+                await self.invalidate_conversation_state(conversation_id, connection=conn)
+            return
+        await connection.execute(
+            """UPDATE model_cache_state SET summary='',summary_token_count=0,
+                 compressed_up_to_event_id=0,stable_prefix_hash=NULL,
+                 state_revision=state_revision+1,updated_at=NOW()
+               WHERE conversation_id=$1""",
+            conversation_id,
+        )
 
     async def delete_conversation_state(self, conversation_id: str) -> None:
         pool = await self._pool_factory()

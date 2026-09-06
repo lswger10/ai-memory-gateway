@@ -942,6 +942,7 @@ async def update_last_assistant_message(session_id: str, new_content: str, model
     """覆盖指定session最后一条assistant消息的content（用于re-roll去重）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        await _require_legacy_conversations(conn, session_ids=(session_id,))
         row = await conn.fetchrow("""
             SELECT id FROM conversations
             WHERE session_id = $1 AND role = 'assistant'
@@ -950,7 +951,7 @@ async def update_last_assistant_message(session_id: str, new_content: str, model
         """, session_id)
         if row:
             await conn.execute(
-                "UPDATE conversations SET content = $1, model = $2 WHERE id = $3",
+                "UPDATE conversations SET content = $1, model = $2 WHERE id = $3 AND fact_identity IS NULL",
                 new_content, model, row['id']
             )
             return row['id']
@@ -1036,12 +1037,27 @@ async def search_conversations(query: str, limit: int = 20, offset: int = 0):
         return results, total
 
 
+class RelayDerivedConversationError(ValueError):
+    """Legacy management cannot mutate Relay-owned factual projections."""
+
+
+async def _require_legacy_conversations(conn, *, message_id=None, session_ids=()):
+    derived = await conn.fetchval(
+        """SELECT 1 FROM conversations WHERE fact_identity IS NOT NULL
+           AND (id=$1 OR session_id=ANY($2::text[])) LIMIT 1""",
+        message_id, list(session_ids),
+    )
+    if derived:
+        raise RelayDerivedConversationError("relay_derived_conversation_read_only")
+
+
 async def update_message_content(message_id: int, new_content: str):
     """更新单条对话消息的内容"""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        await _require_legacy_conversations(conn, message_id=message_id)
         result = await conn.execute(
-            "UPDATE conversations SET content = $1 WHERE id = $2",
+            "UPDATE conversations SET content = $1 WHERE id = $2 AND fact_identity IS NULL",
             new_content, message_id,
         )
         return int(result.split()[-1]) if result else 0
@@ -1051,8 +1067,9 @@ async def delete_single_message(message_id: int):
     """删除单条对话消息（硬删除）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        await _require_legacy_conversations(conn, message_id=message_id)
         result = await conn.execute(
-            "DELETE FROM conversations WHERE id = $1",
+            "DELETE FROM conversations WHERE id = $1 AND fact_identity IS NULL",
             message_id,
         )
         return int(result.split()[-1]) if result else 0
@@ -2375,15 +2392,19 @@ async def get_conversations_paginated(page: int = 1, per_page: int = 20):
 async def delete_conversation(session_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM conversations WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM session_cache_state WHERE session_id = $1", session_id)
+        async with conn.transaction():
+            await _require_legacy_conversations(conn, session_ids=(session_id,))
+            await conn.execute("DELETE FROM conversations WHERE session_id = $1 AND fact_identity IS NULL", session_id)
+            await conn.execute("DELETE FROM session_cache_state WHERE session_id = $1", session_id)
 
 
 async def batch_delete_conversations(session_ids: list):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM conversations WHERE session_id = ANY($1)", session_ids)
-        await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", session_ids)
+        async with conn.transaction():
+            await _require_legacy_conversations(conn, session_ids=session_ids)
+            await conn.execute("DELETE FROM conversations WHERE session_id = ANY($1) AND fact_identity IS NULL", session_ids)
+            await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", session_ids)
 
 
 async def merge_sessions_to_target(source_ids: list, target_id: str) -> dict:
@@ -2391,12 +2412,14 @@ async def merge_sessions_to_target(source_ids: list, target_id: str) -> dict:
         return {'merged_sessions': 0, 'merged_messages': 0, 'merged_token_records': 0}
     pool = await get_pool()
     async with pool.acquire() as conn:
-        msg_count = await conn.fetchval("SELECT COUNT(*) FROM conversations WHERE session_id = ANY($1)", source_ids)
-        await conn.execute("UPDATE conversations SET session_id = $1 WHERE session_id = ANY($2)", target_id, source_ids)
-        token_count = await conn.fetchval("SELECT COUNT(*) FROM token_usage WHERE session_id = ANY($1)", source_ids)
-        await conn.execute("UPDATE token_usage SET session_id = $1 WHERE session_id = ANY($2)", target_id, source_ids)
-        await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", source_ids)
-        return {'merged_sessions': len(source_ids), 'merged_messages': msg_count or 0, 'merged_token_records': token_count or 0}
+        async with conn.transaction():
+            await _require_legacy_conversations(conn, session_ids=(*source_ids, target_id))
+            msg_count = await conn.fetchval("SELECT COUNT(*) FROM conversations WHERE session_id = ANY($1)", source_ids)
+            await conn.execute("UPDATE conversations SET session_id = $1 WHERE session_id = ANY($2) AND fact_identity IS NULL", target_id, source_ids)
+            token_count = await conn.fetchval("SELECT COUNT(*) FROM token_usage WHERE session_id = ANY($1)", source_ids)
+            await conn.execute("UPDATE token_usage SET session_id = $1 WHERE session_id = ANY($2)", target_id, source_ids)
+            await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", source_ids)
+            return {'merged_sessions': len(source_ids), 'merged_messages': msg_count or 0, 'merged_token_records': token_count or 0}
 
 
 async def list_all_session_cache_states() -> list:
@@ -2447,6 +2470,7 @@ async def rename_session_id(old_id: str, new_id: str) -> bool:
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await _require_legacy_conversations(conn, session_ids=(old_id, new_id))
             # 检查新ID是否已存在
             exists = await conn.fetchval(
                 "SELECT 1 FROM session_cache_state WHERE session_id = $1", new_id
@@ -2460,7 +2484,7 @@ async def rename_session_id(old_id: str, new_id: str) -> bool:
             )
             # conversations
             await conn.execute(
-                "UPDATE conversations SET session_id = $1 WHERE session_id = $2",
+                "UPDATE conversations SET session_id = $1 WHERE session_id = $2 AND fact_identity IS NULL",
                 new_id, old_id
             )
             # token_usage

@@ -35,13 +35,13 @@ class GatewayExecutionContextBuilder:
         self.history_compactor = history_compactor or AnchoredHistoryCompactor()
         self.conversation_store = conversation_store or InMemoryConversationPartitionStore()
         self.conversation_sync = conversation_sync or ConversationSyncService(
-            group_context.relay_client, self.conversation_store
+            group_context.relay_client, self.conversation_store, self.history_store
         )
         self.bedroom_conversation_sync = (
             bedroom_conversation_sync
             or ConversationSyncService(
                 getattr(bedroom_context, "relay_client", group_context.relay_client),
-                self.conversation_store,
+                self.conversation_store, self.history_store,
             )
         )
 

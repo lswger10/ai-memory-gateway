@@ -20,6 +20,10 @@ class _Connection:
     def transaction(self):
         return _Transaction()
 
+    async def execute(self, sql, *args):
+        assert "pg_advisory_xact_lock_shared" in sql
+        assert len(args) == 1
+
     async def fetchrow(self, sql, *args):
         if "INSERT INTO model_cache_state" in sql:
             namespace = args[0]
@@ -159,6 +163,9 @@ async def _pool(pool):
 
 class _PostgresCteVisibilityConnection:
     """Model PostgreSQL's same-statement visibility for data-modifying CTEs."""
+
+    transaction = _Connection.transaction
+    execute = _Connection.execute
 
     async def fetchrow(self, sql, *args):
         if "INSERT INTO model_cache_state" not in sql:

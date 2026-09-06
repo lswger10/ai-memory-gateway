@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Res
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from database import RelayDerivedConversationError
 from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, create_typed_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
 import database as _db_module  # 用于 memory settings 热更新 database.py 全局变量
 from group_contracts import (
@@ -2198,6 +2199,8 @@ async def api_delete_conversation(session_id: str):
     try:
         await delete_conversation(session_id)
         return {"status": "ok"}
+    except RelayDerivedConversationError:
+        return JSONResponse(status_code=409, content={"error": "relay_derived_conversation_read_only"})
     except Exception as e:
         return {"error": str(e)}
 
@@ -2212,6 +2215,8 @@ async def api_batch_delete(request: Request):
         if ids:
             await batch_delete_conversations(ids)
         return {"status": "ok", "deleted": len(ids)}
+    except RelayDerivedConversationError:
+        return JSONResponse(status_code=409, content={"error": "relay_derived_conversation_read_only"})
     except Exception as e:
         return {"error": str(e)}
 
@@ -2228,6 +2233,8 @@ async def api_merge_sessions(request: Request):
             return {"error": "source_ids 和 target_id 不能为空"}
         result = await merge_sessions_to_target(source_ids, target_id)
         return {"status": "ok", **result}
+    except RelayDerivedConversationError:
+        return JSONResponse(status_code=409, content={"error": "relay_derived_conversation_read_only"})
     except Exception as e:
         return {"error": str(e)}
 
@@ -2260,6 +2267,8 @@ async def api_update_message(message_id: int, request: Request):
         if updated == 0:
             return {"error": "消息不存在"}
         return {"status": "ok"}
+    except RelayDerivedConversationError:
+        return JSONResponse(status_code=409, content={"error": "relay_derived_conversation_read_only"})
     except Exception as e:
         return {"error": str(e)}
 
@@ -2274,6 +2283,8 @@ async def api_delete_message(message_id: int):
         if deleted == 0:
             return {"error": "消息不存在"}
         return {"status": "ok"}
+    except RelayDerivedConversationError:
+        return JSONResponse(status_code=409, content={"error": "relay_derived_conversation_read_only"})
     except Exception as e:
         return {"error": str(e)}
 
