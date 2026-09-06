@@ -164,3 +164,10 @@ def quarantine_legacy_memory_row(row: Mapping[str, Any]) -> dict[str, Any]:
     result["source_kind"] = None
     result["provenance"] = dict(result.get("provenance") or {})
     return result
+
+
+def memory_replacement_boundary(row: Mapping[str, Any]) -> tuple:
+    """Classification that a merge must preserve without inferred disclosure."""
+    return tuple(row.get(field) for field in (
+        "scope", "confidential", "perspective", "memory_type", "source_kind",
+    ))

@@ -167,6 +167,9 @@ def test_mutation_library_updates_tombstones_restores_evidence_merges_and_supers
         ("set_memory_status", {"memory_id": one, "status": "stale"}),
         ("restore_memory", {"memory_id": one}),
         ("change_scope", {"memory_id": movable, "scope": "group"}),
+        # Replacement preserves classification; explicitly align the second source.
+        ("set_memory_type", {"memory_id": two, "memory_type": "inference"}),
+        ("set_confidential", {"memory_id": two, "confidential": True}),
         ("merge_memories", {"memory_ids": [one, two], "content": "合并偏好", "importance": 8}),
         ("supersede_memory", {"memory_id": replaceable, "content": "替代理解", "memory_type": "fact", "importance": 8}),
         ("delete_memory", {"memory_id": movable}),
@@ -178,8 +181,29 @@ def test_mutation_library_updates_tombstones_restores_evidence_merges_and_supers
         assert receipt["status"] == "committed"
         rows = await store.all_records()
         assert any(row["content"] == "合并偏好" for row in rows)
+        merged = next(row for row in rows if row["content"] == "合并偏好")
+        assert merged["memory_type"] == "inference" and merged["confidential"] is True
         assert any(row["content"] == "替代理解" for row in rows)
         assert next(row for row in rows if row["id"] == two)["status"] == "superseded"
+    asyncio.run(run())
+
+
+def test_failed_staged_merge_rolls_back_earlier_in_memory_mutations():
+    async def run():
+        from copy import deepcopy
+        store = InMemoryActorMemoryToolStore()
+        one = store.seed(content="first", scope="weiwei-jiao", perspective="jiao")
+        two = store.seed(content="second", scope="weiwei-jiao", perspective="jiao")
+        library = ActorMemoryToolLibrary(store)
+        ctx = context(generation="failed-batch")
+        await library.call(ctx, "type", "set_memory_type", {"memory_id": one, "memory_type": "inference"})
+        await library.call(ctx, "merge", "merge_memories", {"memory_ids": [one, two], "content": "mixed", "importance": 5})
+        before = deepcopy(store.records)
+        with pytest.raises(ValueError, match="cross_boundary"):
+            await library.commit_accepted(ctx, accepted_event_id=999)
+        assert store.records == before
+        assert all(stage["status"] == "staged" for stage in store.stages.values())
+        assert not store.receipts
     asyncio.run(run())
 
 

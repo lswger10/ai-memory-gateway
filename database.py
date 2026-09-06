@@ -20,7 +20,8 @@ from actor_prompt_store import ACTOR_PROMPT_MIGRATION_SQL
 from memory_policy import (
     AuthorizedMemorySearchResult,
     CandidateAudit,
-    RetrievalPolicy,
+    RetrievalPolicy, MemoryWrite, MemoryScope, MemoryType, Perspective, SourceKind,
+    memory_replacement_boundary,
 )
 
 # 时区偏移（和 main.py 保持一致）
@@ -1131,7 +1132,7 @@ def _group_memory_source_link(write) -> dict:
     return link
 
 
-async def _persist_or_merge_group_memory(conn, write) -> int:
+async def _persist_or_merge_group_memory(conn, write, *, require_new=False) -> int:
     """One lock, dedupe, and evidence pipeline for every typed Group source."""
     provenance = dict(write.provenance or {})
     evidence_ids = sorted(
@@ -1168,6 +1169,8 @@ async def _persist_or_merge_group_memory(conn, write) -> int:
     )
     source_link = _group_memory_source_link(write)
     if existing is not None:
+        if require_new:
+            raise ValueError("memory_replacement_duplicate")
         current_evidence = existing["evidence"] or []
         if isinstance(current_evidence, str):
             current_evidence = json.loads(current_evidence)
@@ -2632,7 +2635,9 @@ async def get_fragments_by_date(event_date):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id, content, importance, created_at
+            SELECT id, content, importance, created_at, scope, confidential, perspective,
+                   memory_type, source_kind, evidence, provenance, source_session, confidence,
+                   last_supported_at, status, is_active
             FROM memories
             WHERE layer = 1 AND is_active = TRUE
             AND created_at >= $1 AND created_at < $2
@@ -2652,50 +2657,15 @@ async def get_fragments_by_date_range(start_date, end_date):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id, content, importance, created_at
+            SELECT id, content, importance, created_at, scope, confidential, perspective,
+                   memory_type, source_kind, evidence, provenance, source_session, confidence,
+                   last_supported_at, status, is_active
             FROM memories
             WHERE layer = 1 AND is_active = TRUE
             AND created_at >= $1 AND created_at < $2
             ORDER BY created_at
         """, start_utc, end_utc)
         return [dict(r) for r in rows]
-
-
-async def create_event_memory(title: str, content: str, importance: int, 
-                               event_date, merged_from: list):
-    """创建事件记忆（从碎片合并而来）"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date)
-            VALUES ($1, $2, 2, $3, TRUE, $4, $5)
-            RETURNING id
-        """, content, importance, title, merged_from, event_date)
-        
-        new_id = row['id'] if row else None
-        
-        # 向量搜索：计算并保存 embedding
-        if MEMORY_VECTOR_ENABLED and new_id:
-            try:
-                embedding = await compute_embedding(content)
-                if embedding:
-                    await save_memory_embedding(conn, new_id, embedding)
-            except Exception as e:
-                print(f"⚠️ 事件记忆embedding计算失败（id={new_id}）: {e}")
-        
-        return new_id
-
-
-async def deactivate_memories(memory_ids: list):
-    """将记忆标记为不活跃（合并后的碎片）"""
-    if not memory_ids:
-        return
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE memories SET is_active = FALSE
-            WHERE id = ANY($1::int[])
-        """, memory_ids)
 
 
 async def promote_to_core(memory_id: int, title: str = None):
@@ -2714,44 +2684,108 @@ async def promote_to_core(memory_id: int, title: str = None):
             """, memory_id)
 
 
-async def merge_memories(memory_ids: list, new_title: str, new_content: str, 
-                         importance: int, layer: int = 2):
-    """合并多条记忆为一条新记忆"""
-    if not memory_ids:
-        return None
-    
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        # 获取原记忆的日期（取最早的）
-        rows = await conn.fetch("""
-            SELECT MIN(DATE(created_at)) as event_date
-            FROM memories WHERE id = ANY($1::int[])
-        """, memory_ids)
-        event_date = rows[0]['event_date'] if rows else None
-        
-        # 创建新记忆
-        row = await conn.fetchrow("""
-            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date)
-            VALUES ($1, $2, $3, $4, TRUE, $5, $6)
-            RETURNING id
-        """, new_content, importance, layer, new_title, memory_ids, event_date)
-        
-        new_id = row['id'] if row else None
-        
-        # 向量搜索：计算并保存 embedding
-        if MEMORY_VECTOR_ENABLED and new_id:
-            try:
-                embedding = await compute_embedding(new_content)
+def _replacement_ids(values):
+    if not isinstance(values, list) or not values or any(type(value) is not int or value < 1 for value in values):
+        raise ValueError("memory_replacement_invalid_sources")
+    if len(set(values)) != len(values):
+        raise ValueError("memory_replacement_duplicate_sources")
+    return values
+
+
+async def _replace_memory_sources(conn, memory_ids, title, content, importance, layer, event_date=None):
+    ids = _replacement_ids(memory_ids)
+    if not isinstance(content, str) or not content.strip() or not isinstance(title, str):
+        raise ValueError("memory_replacement_invalid_content")
+    if type(importance) is not int or not 1 <= importance <= 10 or type(layer) is not int or layer not in {2, 3}:
+        raise ValueError("memory_replacement_invalid_classification")
+    sources = [dict(row) for row in await conn.fetch(
+        "SELECT * FROM memories WHERE id=ANY($1::int[]) ORDER BY id FOR UPDATE", ids)]
+    if len(sources) != len(ids) or any(not row["is_active"] or row["status"] != "active" for row in sources):
+        raise ValueError("memory_replacement_sources_changed")
+    if len({memory_replacement_boundary(row) for row in sources}) != 1:
+        raise ValueError("memory_replacement_cross_boundary")
+    first = sources[0]
+    if first["scope"] == "group" and first["confidential"]:
+        raise ValueError("memory_replacement_invalid_classification")
+    decoded = lambda value: json.loads(value) if isinstance(value, str) else value
+    evidence = sorted({int(value) for row in sources for value in decoded(row["evidence"])})
+    source_provenance = [decoded(row["provenance"]) or {} for row in sources]
+    provenance = {key: value for key, value in source_provenance[0].items()
+                  if all(item.get(key) == value for item in source_provenance)}
+    provenance.update({
+        "evidence_event_ids": evidence,
+        "merged_sources": [{"id": row["id"], "source_session": row["source_session"],
+                            "provenance": decoded(row["provenance"]), "evidence": decoded(row["evidence"])}
+                           for row in sources],
+    })
+    supported = [row["last_supported_at"] for row in sources if row["last_supported_at"] is not None]
+    last_supported = max(supported) if supported else None
+    provenance.pop("last_supported_at", None)
+    if first["scope"] == "legacy_unscoped":
+        # Real legacy consumers remain quarantined; never invent typed identities for them.
+        duplicate = await conn.fetchval(
+            """SELECT id FROM memories WHERE scope='legacy_unscoped' AND confidential=$1
+               AND is_active=TRUE AND LOWER(REGEXP_REPLACE(BTRIM(content), '\\s+', ' ', 'g'))=$2 LIMIT 1""",
+            first["confidential"], " ".join(content.split()).casefold())
+        if duplicate is not None:
+            raise ValueError("memory_replacement_duplicate")
+        new_id = await conn.fetchval(
+            """INSERT INTO memories(content,confidential,provenance,evidence,evidence_count,source_session)
+               VALUES($1,$2,$3::jsonb,$4::jsonb,$5,$6) RETURNING id""",
+            content, first["confidential"], json.dumps(provenance, ensure_ascii=False), json.dumps(evidence), len(evidence),
+            first["source_session"] if all(row["source_session"] == first["source_session"] for row in sources) else None)
+    else:
+        confidence = [row["confidence"] for row in sources if row["confidence"] is not None]
+        write = MemoryWrite(content=content, scope=MemoryScope(first["scope"]), memory_type=MemoryType(first["memory_type"]),
+            perspective=Perspective(first["perspective"]), confidential=first["confidential"],
+            source_kind=SourceKind(first["source_kind"]), confidence=min(confidence) if len(confidence) == len(sources) else None,
+            evidence_count=len(evidence), provenance=provenance)
+        new_id = await _persist_or_merge_group_memory(conn, write, require_new=True)
+    await conn.execute(
+        """UPDATE memories SET importance=$1,layer=$2,title=$3,merged_from=$4,event_date=$5,
+             last_supported_at=$6,updated_at=NOW() WHERE id=$7""",
+        importance, layer, title, ids, event_date or min(row["created_at"].date() for row in sources), last_supported, new_id)
+    if MEMORY_VECTOR_ENABLED:
+        # Embedding remains optional; a failed vector write cannot abort the factual replacement.
+        try:
+            async with conn.transaction():
+                embedding = await compute_embedding(content)
                 if embedding:
                     await save_memory_embedding(conn, new_id, embedding)
-            except Exception as e:
-                print(f"⚠️ 合并记忆embedding计算失败（id={new_id}）: {e}")
-        
-        # 将原记忆标记为不活跃
-        if new_id:
-            await deactivate_memories(memory_ids)
-        
-        return new_id
+        except Exception as exc:
+            print(f"replacement embedding unavailable: {type(exc).__name__}")
+    await conn.execute(
+        """UPDATE memories SET is_active=FALSE,status='superseded',superseded_by=$1,updated_at=NOW()
+           WHERE id=ANY($2::int[])""", new_id, ids)
+    return new_id
+
+
+async def merge_memories(memory_ids: list, new_title: str, new_content: str, importance: int, layer: int = 2):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await _replace_memory_sources(conn, memory_ids, new_title, new_content, importance, layer)
+
+
+async def replace_memory_batch(events, source_rows, event_date):
+    expected = {row["id"]: row for row in source_rows}
+    covered = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("memory_replacement_invalid_output")
+        covered.extend(_replacement_ids(event.get("merged_ids")))
+    if len(set(covered)) != len(covered) or not set(covered) <= expected.keys():
+        raise ValueError("memory_replacement_invalid_sources")
+    if not covered:
+        return []
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetch("SELECT * FROM memories WHERE id=ANY($1::int[]) ORDER BY id FOR UPDATE", covered)
+            if len(current) != len(covered) or any(any(row[field] != value for field, value in expected[row["id"]].items()) for row in current):
+                raise ValueError("memory_replacement_sources_changed")
+            return [await _replace_memory_sources(conn, event["merged_ids"], event.get("title", ""),
+                    event.get("content", ""), event.get("importance", 5), 2, event_date) for event in events]
 
 
 async def check_duplicate_memory(new_content: str, threshold: float = 0.7) -> dict:
@@ -2945,44 +2979,19 @@ async def cleanup_old_fragments(days: int = 30):
 
 
 async def revert_merge(memory_id: int):
-    """撤回合并操作
-    
-    恢复原始碎片（is_active = TRUE），删除合并后的事件记忆
-    
-    Args:
-        memory_id: 要撤回的事件记忆ID
-        
-    Returns:
-        {"status": "ok", "restored": 恢复的碎片数量}
-        或 {"error": "错误信息"}
-    """
+    """Restore merge sources and remove the replacement in one transaction."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # 获取事件记忆信息
-        row = await conn.fetchrow("""
-            SELECT id, layer, merged_from FROM memories WHERE id = $1
-        """, memory_id)
-        
-        if not row:
-            return {"error": "记忆不存在"}
-        
-        if row['layer'] != 2:
-            return {"error": "只能撤回事件记忆的合并"}
-        
-        merged_from = row['merged_from']
-        if not merged_from or len(merged_from) == 0:
-            return {"error": "没有合并来源，无法撤回"}
-        
-        # 恢复原始碎片
-        result = await conn.execute("""
-            UPDATE memories SET is_active = TRUE
-            WHERE id = ANY($1::int[])
-        """, merged_from)
-        restored = int(result.split()[-1]) if result else 0
-        
-        # 删除事件记忆
-        await conn.execute("""
-            DELETE FROM memories WHERE id = $1
-        """, memory_id)
-        
-        return {"status": "ok", "restored": restored}
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT id,layer,merged_from,is_active FROM memories WHERE id=$1 FOR UPDATE", memory_id)
+            if not row or row["layer"] != 2 or not row["is_active"] or not row["merged_from"]:
+                return {"error": "memory_replacement_invalid"}
+            sources = await conn.fetch(
+                "SELECT id,superseded_by FROM memories WHERE id=ANY($1::int[]) ORDER BY id FOR UPDATE", row["merged_from"])
+            if len(sources) != len(set(row["merged_from"])) or any(source["superseded_by"] not in (None, memory_id) for source in sources):
+                return {"error": "memory_replacement_sources_changed"}
+            result = await conn.execute(
+                """UPDATE memories SET is_active=TRUE,status='active',superseded_by=NULL,updated_at=NOW()
+                   WHERE id=ANY($1::int[])""", row["merged_from"])
+            await conn.execute("DELETE FROM memories WHERE id=$1", memory_id)
+            return {"status": "ok", "restored": int(result.split()[-1])}

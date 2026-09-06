@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import hashlib
 import json
 from typing import Any, Mapping
 
 from database import _persist_or_merge_group_memory, get_pool, search_authorized_memories
 from memory_policy import MemoryScope, MemoryStatus, MemoryType, MemoryWrite, Perspective, SourceKind
-from memory_policy import build_retrieval_policy, room_members
+from memory_policy import build_retrieval_policy, room_members, memory_replacement_boundary
 
 
 ACTOR_MEMORY_TOOL_NAMES = frozenset(
@@ -93,6 +94,27 @@ def actor_memory_tool_definitions() -> tuple[dict[str, Any], ...]:
     )
 
 
+def _validate_replacement_arguments(name, args):
+    if name not in {"merge_memories", "supersede_memory"}:
+        return
+    schema = next(item["input_schema"] for item in actor_memory_tool_definitions() if item["name"] == name)
+    if set(args) - schema["properties"].keys() or not set(schema["required"]) <= args.keys():
+        raise ValueError("memory_replacement_invalid_arguments")
+    _bounded_text(args["content"], "content")
+    ActorMemoryToolLibrary._validate_importance(args["importance"])
+    if name == "merge_memories":
+        ids = args["memory_ids"]
+        if not isinstance(ids, list) or len(ids) < 2:
+            raise ValueError("memory_replacement_invalid_sources")
+        ids = [_positive_int(value, "memory_id") for value in ids]
+        if len(set(ids)) != len(ids):
+            raise ValueError("memory_replacement_duplicate_sources")
+    else:
+        _positive_int(args["memory_id"], "memory_id")
+        if args["memory_type"] not in {"fact", "inference"}:
+            raise ValueError("memory_replacement_invalid_classification")
+
+
 @dataclass(frozen=True, slots=True)
 class ActorMemoryExecutionContext:
     actor_id: str
@@ -164,6 +186,7 @@ class ActorMemoryToolLibrary:
         return await self.store.stage(context, tool_call_id, name, args)
 
     async def _validate_mutation(self, context, name: str, args: dict[str, Any]) -> None:
+        _validate_replacement_arguments(name, args)
         if name == "propose_memory_candidate":
             _bounded_text(args.get("content"), "content")
             if args.get("memory_type") not in {"fact", "inference"}:
@@ -227,8 +250,8 @@ class ActorMemoryToolLibrary:
             if "importance" in args:
                 self._validate_importance(args["importance"])
         elif name == "merge_memories":
-            if len({row["scope"] for row in records}) != 1:
-                raise ValueError("merged memories must share a scope")
+            if len({memory_replacement_boundary(row) for row in records}) != 1:
+                raise ValueError("memory_replacement_cross_boundary")
             _bounded_text(args.get("content"), "content")
             self._validate_importance(args.get("importance"))
         elif name == "supersede_memory":
@@ -327,13 +350,18 @@ class InMemoryActorMemoryToolStore:
         if receipt_key in self.receipts:
             return dict(self.receipts[receipt_key])
         resulting = []
-        for stage in self.stages.values():
-            if stage["context"].actor_id != context.actor_id or stage["context"].generation_request_id != context.generation_request_id or stage["status"] != "staged":
-                continue
-            stage_ids = self._apply(context, stage["name"], stage["arguments"], accepted_event_id)
-            resulting.extend(stage_ids)
-            stage["status"] = "committed"
-            stage["resulting_memory_ids"] = list(stage_ids)
+        original = deepcopy((self.records, self.stages, self.next_id))
+        try:
+            for stage in self.stages.values():
+                if stage["context"].actor_id != context.actor_id or stage["context"].generation_request_id != context.generation_request_id or stage["status"] != "staged":
+                    continue
+                stage_ids = self._apply(context, stage["name"], stage["arguments"], accepted_event_id)
+                resulting.extend(stage_ids)
+                stage["status"] = "committed"
+                stage["resulting_memory_ids"] = list(stage_ids)
+        except Exception:
+            self.records, self.stages, self.next_id = original
+            raise
         receipt = {"status": "committed", "actor_id": context.actor_id, "generation_request_id": context.generation_request_id, "accepted_event_id": accepted_event_id, "resulting_memory_ids": sorted(set(resulting))}
         self.receipts[receipt_key] = receipt
         return dict(receipt)
@@ -345,6 +373,7 @@ class InMemoryActorMemoryToolStore:
         return {"status": "discarded", "actor_id": context.actor_id, "generation_request_id": context.generation_request_id}
 
     def _apply(self, context, name: str, args: dict[str, Any], accepted_event_id: int) -> list[int]:
+        _validate_replacement_arguments(name, args)
         if name == "propose_memory_candidate":
             scope = _PAIRWISE_SCOPE[context.actor_id]
             evidence = sorted(set(args["evidence_event_ids"]) | {accepted_event_id})
@@ -372,6 +401,8 @@ class InMemoryActorMemoryToolStore:
             return [memory_id]
         ids = args.get("memory_ids") or [args["memory_id"]]
         rows = [self.records[int(memory_id)] for memory_id in ids]
+        if name in {"merge_memories", "supersede_memory"} and any(row["status"] != "active" for row in rows):
+            raise ValueError("memory_replacement_sources_changed")
         if name == "update_memory":
             for field in ("content", "importance"):
                 if field in args:
@@ -387,8 +418,11 @@ class InMemoryActorMemoryToolStore:
         elif name == "add_evidence": rows[0]["evidence"] = sorted(set(rows[0]["evidence"]) | {args["event_id"]})
         elif name == "remove_evidence": rows[0]["evidence"] = [item for item in rows[0]["evidence"] if item != args["event_id"]]
         elif name == "merge_memories":
-            memory_id = self.seed(content=args["content"], scope=rows[0]["scope"], perspective=context.actor_id, confidential=any(row["confidential"] for row in rows), source_kind="actor_tool")
+            if len({memory_replacement_boundary(row) for row in rows}) != 1:
+                raise ValueError("memory_replacement_cross_boundary")
+            memory_id = self.seed(content=args["content"], scope=rows[0]["scope"], perspective=rows[0]["perspective"], confidential=rows[0]["confidential"], source_kind="actor_tool")
             self.records[memory_id]["importance"] = args["importance"]
+            self.records[memory_id]["memory_type"] = rows[0]["memory_type"]
             self.records[memory_id]["evidence"] = sorted({item for row in rows for item in row["evidence"]})
             for row in rows:
                 row["status"], row["superseded_by"] = "superseded", memory_id
@@ -484,7 +518,7 @@ class PostgresActorMemoryToolStore:
         return await conn.fetchrow(
             """
             SELECT id,content,importance,scope,memory_type,perspective,
-                   confidential,source_kind,status,evidence,superseded_by,provenance
+                   confidential,source_kind,status,is_active,evidence,superseded_by,provenance
             FROM memories
             WHERE id=$1 AND scope=ANY($2::text[])
               AND (confidential=FALSE OR scope=ANY($3::text[]))
@@ -601,13 +635,13 @@ class PostgresActorMemoryToolStore:
 
     @staticmethod
     def _write(context, args, accepted_event_id, *, source_kind: SourceKind, template=None):
-        evidence = sorted({int(item) for item in args.get("evidence_event_ids", template.get("evidence", []) if template else [])})
+        evidence = sorted({int(item) for item in (template.get("evidence", []) if template else args.get("evidence_event_ids", []))})
         return MemoryWrite(
             content=args["content"],
-            scope=MemoryScope(args.get("scope", template["scope"] if template else _PAIRWISE_SCOPE[context.actor_id])),
+            scope=MemoryScope((template["scope"] if template else args.get("scope", _PAIRWISE_SCOPE[context.actor_id]))),
             memory_type=MemoryType(args.get("memory_type", template["memory_type"] if template else "fact")),
-            perspective=Perspective(args.get("perspective", template["perspective"] if template else context.actor_id)),
-            confidential=bool(args.get("confidential", template["confidential"] if template else False)),
+            perspective=Perspective((template["perspective"] if template else args.get("perspective", context.actor_id))),
+            confidential=bool((template["confidential"] if template else args.get("confidential", False))),
             source_kind=source_kind,
             confidence=args.get("confidence"),
             status=MemoryStatus.ACTIVE,
@@ -620,10 +654,14 @@ class PostgresActorMemoryToolStore:
                 "source_event_id": accepted_event_id,
                 "evidence_event_ids": evidence,
                 "tool_action": "actor_memory_tool",
+                **({"merged_sources": template.get("merged_sources", [{"id": template["id"],
+                    "source_kind": template["source_kind"], "provenance": template.get("provenance"),
+                    "evidence": template.get("evidence", [])}])} if template else {}),
             },
         )
 
     async def _apply(self, conn, context, name: str, args: dict[str, Any], accepted_event_id: int) -> list[int]:
+        _validate_replacement_arguments(name, args)
         if name == "propose_memory_candidate":
             candidate = {
                 **args,
@@ -650,6 +688,8 @@ class PostgresActorMemoryToolStore:
             return [memory_id]
         ids = [int(item) for item in (args.get("memory_ids") or [args["memory_id"]])]
         rows = await self._authorized_rows(conn, context, ids)
+        if name in {"merge_memories", "supersede_memory"} and any(row["status"] != "active" or not row["is_active"] for row in rows):
+            raise ValueError("memory_replacement_sources_changed")
         if name == "update_memory":
             fields, values = [], []
             for field in ("content", "importance"):
@@ -679,15 +719,17 @@ class PostgresActorMemoryToolStore:
             else: evidence.discard(int(args["event_id"]))
             await conn.execute("UPDATE memories SET evidence=$1::jsonb,evidence_count=$2,updated_at=NOW() WHERE id=$3", json.dumps(sorted(evidence)), len(evidence), ids[0])
         elif name == "merge_memories":
-            if len({row["scope"] for row in rows}) != 1:
-                raise ValueError("merged memories must share a scope")
+            if len({memory_replacement_boundary(row) for row in rows}) != 1:
+                raise ValueError("memory_replacement_cross_boundary")
             template = dict(rows[0]); template["evidence"] = sorted({int(item) for row in rows for item in row.get("evidence") or []})
-            new_id = await _persist_or_merge_group_memory(conn, self._write(context, args, accepted_event_id, source_kind=SourceKind.ACTOR_TOOL, template=template))
+            template["merged_sources"] = [{"id": row["id"], "source_kind": row["source_kind"],
+                "provenance": row.get("provenance"), "evidence": row.get("evidence", [])} for row in rows]
+            new_id = await _persist_or_merge_group_memory(conn, self._write(context, args, accepted_event_id, source_kind=SourceKind.ACTOR_TOOL, template=template), require_new=True)
             await conn.execute("UPDATE memories SET importance=$1,updated_at=NOW() WHERE id=$2", args["importance"], new_id)
             await conn.execute("UPDATE memories SET status='superseded',is_active=FALSE,superseded_by=$1,updated_at=NOW() WHERE id=ANY($2::int[])", new_id, ids)
             return [new_id, *ids]
         elif name == "supersede_memory":
-            new_id = await _persist_or_merge_group_memory(conn, self._write(context, args, accepted_event_id, source_kind=SourceKind.ACTOR_TOOL, template=rows[0]))
+            new_id = await _persist_or_merge_group_memory(conn, self._write(context, args, accepted_event_id, source_kind=SourceKind.ACTOR_TOOL, template=rows[0]), require_new=True)
             await conn.execute("UPDATE memories SET importance=$1,updated_at=NOW() WHERE id=$2", args["importance"], new_id)
             await conn.execute("UPDATE memories SET status='superseded',is_active=FALSE,superseded_by=$1,updated_at=NOW() WHERE id=$2", new_id, ids[0])
             return [new_id, ids[0]]

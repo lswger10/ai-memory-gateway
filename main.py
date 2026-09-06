@@ -25,8 +25,9 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Res
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from memory_policy import memory_replacement_boundary
 from database import RelayDerivedConversationError
-from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, create_typed_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
+from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, create_typed_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, replace_memory_batch, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
 import database as _db_module  # 用于 memory settings 热更新 database.py 全局变量
 from group_contracts import (
     CONTRACT_VERSION,
@@ -1719,16 +1720,36 @@ async def consolidate_memories_for_date(event_date):
 
 
 async def consolidate_memories_for_date_range(start_date, end_date):
-    """整理指定时间段的碎片记忆"""
-    from datetime import date
-    import re
-    
-    # 获取该时间段的碎片
     fragments = await get_fragments_by_date_range(start_date, end_date)
-    
     if not fragments:
         return {"status": "no_fragments", "start_date": str(start_date), "end_date": str(end_date)}
-    
+    groups = {}
+    for fragment in fragments:
+        groups.setdefault(memory_replacement_boundary(fragment), []).append(fragment)
+    events = []
+    try:
+        for group in groups.values():
+            proposals = await _request_consolidation_events(group)
+            if not isinstance(proposals, list):
+                return proposals
+            allowed = {row["id"] for row in group}
+            for proposal in proposals:
+                if not isinstance(proposal, dict) or not isinstance(proposal.get("merged_ids"), list) or not set(proposal["merged_ids"]) <= allowed:
+                    raise ValueError("memory_replacement_invalid_sources")
+            events.extend(proposals)
+        new_ids = await replace_memory_batch(events, fragments, start_date)
+        return {"status": "ok" if new_ids else "no_changes", "start_date": str(start_date), "end_date": str(end_date),
+                "fragments_processed": sum(len(event["merged_ids"]) for event in events), "events_created": len(new_ids)}
+    except (ValueError, TypeError) as exc:
+        code = str(exc)
+        return {"status": "error", "error": code if code.startswith("memory_replacement_") else "memory_replacement_invalid"}
+    except Exception as exc:
+        print(f"memory replacement transaction failed: {type(exc).__name__}, sqlstate={getattr(exc, 'sqlstate', None)}")
+        return {"status": "error", "error": "memory_replacement_failed"}
+
+
+async def _request_consolidation_events(fragments):
+    import re
     # 构建碎片文本
     fragments_text = "\n".join([
         f"[ID={f['id']}] ({f['created_at'].strftime('%m-%d') if hasattr(f['created_at'], 'strftime') else str(f['created_at'])[:10]}) {f['content']}"
@@ -1832,32 +1853,8 @@ async def consolidate_memories_for_date_range(start_date, end_date):
             else:
                 return {"status": "error", "error": "无法解析 AI 返回的 JSON", "raw": content}
             
-            # 创建事件记忆并停用碎片
-            created_count = 0
-            for event in events:
-                merged_ids = event.get("merged_ids", [])
-                if merged_ids:
-                    await create_event_memory(
-                        title=event.get("title", ""),
-                        content=event.get("content", ""),
-                        importance=event.get("importance", 5),
-                        event_date=start_date,
-                        merged_from=merged_ids
-                    )
-                    created_count += 1
-            
-            # 停用所有已处理的碎片
-            all_fragment_ids = [f['id'] for f in fragments]
-            await deactivate_memories(all_fragment_ids)
-            
-            return {
-                "status": "ok",
-                "start_date": str(start_date),
-                "end_date": str(end_date),
-                "fragments_processed": len(fragments),
-                "events_created": created_count
-            }
-            
+            return events
+
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -1950,7 +1947,10 @@ async def api_merge_memories(request: Request):
     if not memory_ids or not new_content:
         return {"error": "请提供记忆ID列表和合并后内容"}
     
-    new_id = await merge_memories(memory_ids, new_title, new_content, importance, layer)
+    try:
+        new_id = await merge_memories(memory_ids, new_title, new_content, importance, layer)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc)})
     return {"status": "ok", "new_id": new_id, "merged": len(memory_ids)}
 
 

@@ -905,7 +905,19 @@ function clearSelection() {
     updateFloatingBar();
 }
 
+// Wording prepared from the replacement transaction's verified behavior.
+const MEMORY_MANAGEMENT_MESSAGES = {
+    memory_consolidation_no_changes: '本次整理没有生成新记忆，未作更改，可保留现状或调整日期后重试。',
+    memory_replacement_invalid: '所选记忆的分类或来源不符合替代要求，本次替代未执行，请重新选择记忆。',
+    memory_replacement_failed: '本次记忆替代失败，本次操作未写入更改。',
+};
+
 function showManageMsg(type, text) {
+    if (typeof text === 'string') {
+        const key = text.replace(/^❌\s*/, '');
+        text = MEMORY_MANAGEMENT_MESSAGES[key] || (key.startsWith('memory_replacement_')
+            ? MEMORY_MANAGEMENT_MESSAGES.memory_replacement_invalid : text);
+    }
     const container = document.getElementById('manage-msg');
     container.innerHTML = '<div class="msg msg-' + type + '">' + text + '</div>';
     setTimeout(() => {
@@ -1095,6 +1107,8 @@ async function doConsolidate() {
                         const r = status.result;
                         if (r.status === 'no_fragments') {
                             showManageMsg('info', '📝 该时间段没有需要整理的碎片记忆');
+                        } else if (r.status === 'no_changes') {
+                            showManageMsg('info', 'memory_consolidation_no_changes');
                         } else if (r.status === 'ok') {
                             showManageMsg('success', '✅ 整理完成！处理了 ' + r.fragments_processed + ' 条碎片，生成了 ' + r.events_created + ' 条事件记忆');
                             loadMemories();

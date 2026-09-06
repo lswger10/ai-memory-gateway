@@ -51,6 +51,21 @@ Relay 派生事实（`fact_identity` 非空）不可通过旧 Conversations 编�
 目前每轮核对成本随历史长度线性增长；只有 Relay 提供权威完整性证明后才能安全恢复增量读取。
 对应永久回归：`tests/test_conversation_integrity.py`（使用显式授权的隔离 PostgreSQL）。
 
+## 记忆整理与合并
+
+整理先按 scope、confidential、perspective、memory_type 和 source_kind 分组，
+每组独立请求整理模型；手动合并拒绝跨组来源。typed 替代复用 scoped writer，
+保留证据并记录每条原记忆的来源；legacy_unscoped 仍隔离，不自动推断归属。
+新记忆与实际覆盖来源的停用在同一事务完成；空结果返回 `no_changes`，
+未覆盖来源保持活跃，重复/外部 ID、重复内容和中途写入失败不留下部分替代。
+恢复归档要求所有来源仍存在且未被其他替代占用；永久删除语义不变。
+
+Actor merge/supersede 使用已声明工具参数和原记忆分类，提交时拒绝已停用来源。
+Dashboard 整理还会核验模型调用期间来源是否被编辑；Actor stage→commit 期间
+仍活跃来源的内容编辑没有版本比较，不能把前者的保障泛化为全部 Actor 路径。
+永久回归：`tests/test_memory_replacement.py` 使用真实隔离 PostgreSQL；
+Actor staged rollback 与 Dashboard 无变更文案另有现有套件中的回归。
+
 ## Model Profiles
 
 Profile 明确声明：
@@ -159,7 +174,7 @@ Bedroom media 与 Group Voice Call 不在 v1.1 范围内。
 `test_real_postgres_lifespan_and_readiness_recovery` 使用共享的 opt-in schema
 夹具运行真实初始化、缺表故障与恢复；复用下述 PostgreSQL DSN/授权变量。
 基线 `cba9d8e` 在该故障下错误返回 200，修复版返回 503，恢复后 200。
-F02 修复后，本地 PostgreSQL 18.6 全量回归为 352 passed；这不等于测试部署或生产验收。
+F03/F04 修复后，本地 PostgreSQL 18.6 全量回归为 373 passed；这不等于测试部署或生产验收。
 
 ```powershell
 python -m pytest tests -v

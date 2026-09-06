@@ -176,3 +176,19 @@ def test_failed_binding_reload_cannot_save_stale_defaults(dashboard):
     page.select_option("#binding-actor", "laoke")
     assert page.locator("#binding-save").is_disabled()
     assert len(writes) == 1
+
+
+def test_empty_memory_consolidation_shows_no_change(dashboard):
+    page, responses, writes = dashboard
+    responses["/api/memories/consolidate/status"] = {"running": False, "result": {
+        "status": "no_changes", "events_created": 0, "fragments_processed": 0}}
+    page.locator('[data-section="manage"]').click()
+    page.evaluate("""async () => {
+        document.getElementById('consolidateDateStart').value = '2026-09-06';
+        document.getElementById('consolidateDateEnd').value = '2026-09-06';
+        await doConsolidate();
+    }""")
+    page.wait_for_function("document.querySelector('#manage-msg').textContent.includes('未作更改')", timeout=6000)
+    assert page.locator("#manage-msg .msg-info").count() == 1
+    assert "整理完成" not in page.locator("#manage-msg").inner_text()
+    assert [path for path, _ in writes] == ["/api/memories/consolidate"]
