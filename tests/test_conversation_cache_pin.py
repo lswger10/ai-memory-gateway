@@ -400,3 +400,170 @@ def _run(awaitable):
     import asyncio
 
     return asyncio.run(awaitable)
+
+
+@pytest.fixture
+async def postgres_pin_service(isolated_postgres, monkeypatch):
+    import database
+    from conversation_cache_pin import PostgresConversationCachePinStore
+    async def pool_factory():
+        return isolated_postgres
+    monkeypatch.setattr(database, "get_pool", pool_factory)
+    monkeypatch.setattr(database, "MEMORY_VECTOR_ENABLED", False)
+    await database.init_tables()
+    service, _, builder, runner = await _service()
+    service.store = PostgresConversationCachePinStore(pool_factory)
+    return service, builder, runner
+
+
+@pytest.mark.anyio
+async def test_postgres_competing_workers_dispatch_once_and_keep_atomic_count(postgres_pin_service):
+    import asyncio
+    from conversation_cache_pin import PostgresConversationCachePinStore
+    service, builder, runner = postgres_pin_service
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="competition",
+        execution_mode="private", enabled=True)
+    both_building = asyncio.Event()
+    entered = 0
+    original = builder.build_cache_keepalive
+    async def synchronized_build(**kwargs):
+        nonlocal entered
+        entered += 1
+        if entered % 2 == 0:
+            both_building.set()
+        await asyncio.wait_for(both_building.wait(), 5)
+        return await original(**kwargs)
+    builder.build_cache_keepalive = synchronized_build
+    second = CachePinService(store=PostgresConversationCachePinStore(service.store._pool_factory),
+        profiles=service.profiles, context_builder=builder, provider_runner=runner,
+        usage_store=service.usage_store, now=lambda: service.now())
+    for cycle in range(2):
+        service.now = lambda: NOW + timedelta(minutes=50 * cycle)
+        both_building.clear()
+        results = await asyncio.gather(service.run_due_once(), second.run_due_once())
+        assert sum(result.calls for result in results) == 1
+        assert len(runner.calls) == cycle + 1
+        assert len(await service.usage_store.list_receipts()) == cycle + 1
+        stored = await service.get_pin(pin.pin_id)
+        assert stored.actors["laoke"].call_count == cycle + 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("bedroom", [False, True])
+async def test_postgres_disable_during_context_build_prevents_dispatch(postgres_pin_service, bedroom):
+    service, builder, runner = postgres_pin_service
+    kwargs = dict(room_id="room_weiwei_laoke", conversation_id="closing",
+        execution_mode="bedroom" if bedroom else "private", enabled=True)
+    if bedroom:
+        kwargs.update(bedroom_session_id="closing-bedroom", actor_id="laoke")
+    pin = await service.set_pin(**kwargs)
+    original = builder.build_cache_keepalive
+    async def close_then_build(**context_kwargs):
+        if bedroom:
+            await service.end_bedroom("closing-bedroom")
+        else:
+            await service.set_pin(**{**kwargs, "enabled": False})
+        return await original(**context_kwargs)
+    builder.build_cache_keepalive = close_then_build
+    assert (await service.run_due_once()).calls == 0
+    assert runner.calls == []
+    assert (await service.get_pin(pin.pin_id)).actors["laoke"].call_count == 0
+
+
+@pytest.mark.anyio
+async def test_postgres_claim_survives_worker_crash_and_restarts_next_interval(postgres_pin_service):
+    import asyncio
+    import os
+    import subprocess
+    import sys
+    service, _, runner = postgres_pin_service
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="crash",
+        execution_mode="private", enabled=True)
+    pool = await service.store._pool_factory()
+    async with pool.acquire() as conn:
+        schema = await conn.fetchval("SELECT current_schema()")
+    script = """
+import asyncio, asyncpg, os, sys
+from datetime import datetime, timedelta
+from conversation_cache_pin import PostgresConversationCachePinStore
+async def main():
+    pool = await asyncpg.create_pool(os.environ['GATEWAY_MODEL_SETTINGS_TEST_DSN'],
+        min_size=1, max_size=1, server_settings={'search_path': sys.argv[1]})
+    async def factory(): return pool
+    now = datetime.fromisoformat(sys.argv[3])
+    assert await PostgresConversationCachePinStore(factory).claim_due(
+        sys.argv[2], 'laoke', now, now + timedelta(minutes=50))
+    os._exit(23)
+asyncio.run(main())
+"""
+    child = await asyncio.to_thread(subprocess.run,
+        [sys.executable, "-c", script, schema, pin.pin_id, NOW.isoformat()],
+        capture_output=True, timeout=15)
+    assert child.returncode == 23, child.stderr.decode(errors="replace")
+    assert (await service.run_due_once()).calls == 0
+    assert runner.calls == []
+    service.now = lambda: NOW + timedelta(minutes=50)
+    assert (await service.run_due_once()).calls == 1
+    assert len(runner.calls) == 1
+    assert (await service.get_pin(pin.pin_id)).enabled
+
+
+@pytest.mark.anyio
+async def test_postgres_late_state_write_cannot_undo_claim_or_counter(postgres_pin_service):
+    from dataclasses import replace
+    service, _, _ = postgres_pin_service
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="late-write",
+        execution_mode="private", enabled=True)
+    old = pin.actors["laoke"]
+    claimed = await service.store.claim_due(pin.pin_id, "laoke", NOW, NOW + timedelta(minutes=50))
+    await service.store.save_actor_state(pin.pin_id,
+        replace(old, status="paused", next_keepalive_at=None), expected=old)
+    assert (await service.get_pin(pin.pin_id)).actors["laoke"] == claimed
+
+
+@pytest.mark.anyio
+async def test_postgres_cancelled_dispatch_keeps_pin_enabled_and_due_time(postgres_pin_service):
+    import asyncio
+    service, _, runner = postgres_pin_service
+    pin = await service.set_pin(room_id="room_weiwei_laoke", conversation_id="cancelled",
+        execution_mode="private", enabled=True)
+    async def cancel(**kwargs):
+        runner.calls.append(kwargs)
+        raise asyncio.CancelledError()
+        yield
+    original = runner.run
+    runner.run = cancel
+    with pytest.raises(asyncio.CancelledError):
+        await service.run_due_once()
+    assert len(runner.calls) == 1
+    assert (await service.run_due_once()).calls == 0
+    runner.run = original
+    service.now = lambda: NOW + timedelta(minutes=50)
+    assert (await service.run_due_once()).calls == 1
+    assert (await service.get_pin(pin.pin_id)).actors["laoke"].call_count == 2
+
+
+@pytest.mark.anyio
+async def test_postgres_partial_actor_initialization_recovers_existing_pin(postgres_pin_service):
+    service, _, runner = postgres_pin_service
+    pin = await service.set_pin(room_id="room_group_home", conversation_id="partial-init",
+        execution_mode="group", enabled=True)
+    pool = await service.store._pool_factory()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM conversation_cache_pin_actor_state WHERE pin_id=$1 AND actor_id='laoke'", pin.pin_id)
+    assert (await service.run_due_once()).calls == 1
+    assert len(runner.calls) == 1
+    assert set((await service.get_pin(pin.pin_id)).actors) == {"jiao", "laoke"}
+
+
+@pytest.mark.anyio
+async def test_postgres_pin_creation_rolls_back_if_actor_initialization_fails(postgres_pin_service):
+    service, _, _ = postgres_pin_service
+    pool = await service.store._pool_factory()
+    async with pool.acquire() as conn:
+        await conn.execute("ALTER TABLE conversation_cache_pin_actor_state ADD CONSTRAINT synthetic_actor_failure CHECK(actor_id <> 'laoke')")
+    import asyncpg
+    with pytest.raises(asyncpg.CheckViolationError):
+        await service.set_pin(room_id="room_group_home", conversation_id="failed-init",
+            execution_mode="group", enabled=True)
+    assert await service.list_pins() == ()

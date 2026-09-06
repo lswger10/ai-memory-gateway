@@ -150,6 +150,9 @@ def test_active_pin_shows_observed_cache_result_separately(dashboard):
     text = page.locator("#conversation-cache-pin-list").inner_text()
     assert "active" in text
     assert "可观测未命中" in text
+    assert "保活领取次数 68" in text
+    assert "领取后即计数，即使尚未发送" in text
+    assert "calls 68" not in text
 
 
 def test_double_click_probe_only_sends_once_for_displayed_revision(dashboard):

@@ -70,8 +70,10 @@ class ConversationCachePinStore(Protocol):
     async def get_pin(self, pin_id: str) -> ConversationCachePin | None: ...
     async def list_pins(self) -> tuple[ConversationCachePin, ...]: ...
     async def save_actor_state(
-        self, pin_id: str, state: CachePinActorState
+        self, pin_id: str, state: CachePinActorState, *, expected: CachePinActorState | None = None
     ) -> None: ...
+    async def claim_due(self, pin_id: str, actor_id: str, now: datetime,
+                        next_at: datetime) -> CachePinActorState | None: ...
 
 
 class InMemoryConversationCachePinStore:
@@ -83,6 +85,8 @@ class InMemoryConversationCachePinStore:
         async with self._lock:
             previous = self._pins.get(pin.pin_id)
             actors = dict(previous.actors) if previous is not None else dict(pin.actors)
+            for actor_id in _pin_actors(pin):
+                actors.setdefault(actor_id, CachePinActorState(actor_id))
             saved = replace(pin, actors=actors)
             self._pins[pin.pin_id] = saved
             return saved
@@ -96,13 +100,29 @@ class InMemoryConversationCachePinStore:
             return tuple(self._pins[key] for key in sorted(self._pins))
 
     async def save_actor_state(
-        self, pin_id: str, state: CachePinActorState
+        self, pin_id: str, state: CachePinActorState, *, expected: CachePinActorState | None = None
     ) -> None:
         async with self._lock:
             pin = self._pins[pin_id]
+            current = pin.actors.get(state.actor_id)
+            if current is not None and (expected is None or
+                    (current.next_keepalive_at, current.call_count) !=
+                    (expected.next_keepalive_at, expected.call_count)):
+                return
             actors = dict(pin.actors)
             actors[state.actor_id] = state
             self._pins[pin_id] = replace(pin, actors=actors)
+
+    async def claim_due(self, pin_id: str, actor_id: str, now: datetime,
+                        next_at: datetime) -> CachePinActorState | None:
+        async with self._lock:
+            pin = self._pins[pin_id]
+            state = pin.actors[actor_id]
+            if not pin.enabled or (state.next_keepalive_at is not None and state.next_keepalive_at > now):
+                return None
+            claimed = replace(state, next_keepalive_at=next_at, call_count=state.call_count + 1)
+            self._pins[pin_id] = replace(pin, actors={**pin.actors, actor_id: claimed})
+            return claimed
 
 
 class PostgresConversationCachePinStore:
@@ -140,7 +160,7 @@ class PostgresConversationCachePinStore:
 
     async def upsert_pin(self, pin: ConversationCachePin) -> ConversationCachePin:
         pool = await self._pool_factory()
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """INSERT INTO conversation_cache_pins(
                      pin_id,room_id,conversation_id,execution_mode,
@@ -161,6 +181,11 @@ class PostgresConversationCachePinStore:
                 pin.bedroom_session_id,
                 pin.bedroom_actor_id,
                 pin.enabled,
+            )
+            await conn.executemany(
+                """INSERT INTO conversation_cache_pin_actor_state(pin_id,actor_id,status)
+                   VALUES($1,$2,'pending') ON CONFLICT(pin_id,actor_id) DO NOTHING""",
+                [(pin.pin_id, actor_id) for actor_id in _pin_actors(pin)],
             )
             row = await conn.fetchrow(
                 "SELECT * FROM conversation_cache_pins WHERE pin_id=$1", pin.pin_id
@@ -184,7 +209,7 @@ class PostgresConversationCachePinStore:
             return tuple([await self._from_row(conn, row) for row in rows])
 
     async def save_actor_state(
-        self, pin_id: str, state: CachePinActorState
+        self, pin_id: str, state: CachePinActorState, *, expected: CachePinActorState | None = None
     ) -> None:
         pool = await self._pool_factory()
         async with pool.acquire() as conn:
@@ -201,7 +226,10 @@ class PostgresConversationCachePinStore:
                      call_count=EXCLUDED.call_count,
                      cache_read_input_tokens=EXCLUDED.cache_read_input_tokens,
                      last_error=EXCLUDED.last_error,
-                     updated_at=NOW()""",
+                     updated_at=NOW()
+                   WHERE $10::boolean
+                     AND conversation_cache_pin_actor_state.next_keepalive_at IS NOT DISTINCT FROM $11::timestamptz
+                     AND conversation_cache_pin_actor_state.call_count=$12""",
                 pin_id,
                 state.actor_id,
                 state.status,
@@ -211,7 +239,26 @@ class PostgresConversationCachePinStore:
                 state.call_count,
                 state.cache_read_input_tokens,
                 state.last_error,
+                expected is not None,
+                expected.next_keepalive_at if expected else None,
+                expected.call_count if expected else None,
             )
+
+    async def claim_due(self, pin_id: str, actor_id: str, now: datetime,
+                        next_at: datetime) -> CachePinActorState | None:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """WITH enabled_pin AS (
+                     SELECT pin_id FROM conversation_cache_pins
+                     WHERE pin_id=$1 AND enabled FOR SHARE
+                   )
+                   UPDATE conversation_cache_pin_actor_state AS state
+                   SET next_keepalive_at=$4, call_count=call_count+1, updated_at=NOW()
+                   FROM enabled_pin WHERE state.pin_id=enabled_pin.pin_id AND actor_id=$2
+                     AND (next_keepalive_at IS NULL OR next_keepalive_at <= $3)
+                   RETURNING state.*""", pin_id, actor_id, now, next_at)
+            return None if row is None else self._actor_state(row)
 
 
 def _pin_identity(
@@ -294,17 +341,8 @@ class CachePinService:
             bedroom_session_id=bedroom_session_id,
             bedroom_actor_id=actor_id,
         )
-        actors = _pin_actors(pin)
-        saved = await self.store.upsert_pin(pin)
-        for actor_id in actors:
-            if actor_id not in saved.actors:
-                await self.store.save_actor_state(
-                    saved.pin_id, CachePinActorState(actor_id=actor_id)
-                )
-        refreshed = await self.store.get_pin(saved.pin_id)
-        if refreshed is None:
-            raise CachePinError("cache pin disappeared after save")
-        return refreshed
+        _pin_actors(pin)
+        return await self.store.upsert_pin(pin)
 
     async def get_pin(self, pin_id: str) -> ConversationCachePin:
         pin = await self.store.get_pin(pin_id)
@@ -329,13 +367,16 @@ class CachePinService:
                 continue
             for actor_id in _pin_actors(pin):
                 state = pin.actors.get(actor_id, CachePinActorState(actor_id))
+                if actor_id not in pin.actors:
+                    # Repair only the incomplete initialization left by older releases.
+                    await self.store.save_actor_state(pin.pin_id, state)
                 try:
                     resolved = await self.profiles.resolve(actor_id, pin.room_id)
                 except ProfileStoreError:
                     await self.store.save_actor_state(pin.pin_id, replace(
                         state, status="paused", next_keepalive_at=None,
                         last_error="model_binding_unavailable",
-                    ))
+                    ), expected=state)
                     continue
                 profile = resolved.primary
                 cache_verified = _supports_verified_one_hour_cache(profile) and (
@@ -355,6 +396,7 @@ class CachePinService:
                             next_keepalive_at=now + self.interval,
                             last_error="profile_has_no_verified_1h_cache",
                         ),
+                        expected=state,
                     )
                     continue
                 if state.next_keepalive_at is not None and state.next_keepalive_at > now:
@@ -396,6 +438,13 @@ class CachePinService:
                     usage = ProviderUsage.from_provider_values()
                     observed_cache_support = "unverified"
                     provider_usage_received = False
+                    # ponytail: reserve the existing interval before dispatch; a crashed
+                    # worker resumes next interval, without a second lease/job registry.
+                    claimed = await self.store.claim_due(pin.pin_id, actor_id, now, now + self.interval)
+                    if claimed is None:
+                        continue
+                    state = claimed
+                    calls += 1
                     stream = self.provider_runner.run(
                         profile=profile,
                         request=request,
@@ -456,7 +505,6 @@ class CachePinService:
                                 execution_purpose="cache_keepalive",
                             )
                         )
-                    calls += 1
                     await self.store.save_actor_state(
                         pin.pin_id,
                         CachePinActorState(
@@ -465,9 +513,10 @@ class CachePinService:
                             profile_id=profile.profile_id,
                             last_keepalive_at=now,
                             next_keepalive_at=now + self.interval,
-                            call_count=state.call_count + 1,
+                            call_count=state.call_count,
                             cache_read_input_tokens=usage.cache_read_input_tokens,
                         ),
+                        expected=state,
                     )
                 except ProviderRunUnavailable:
                     await self.store.save_actor_state(
@@ -479,5 +528,6 @@ class CachePinService:
                             next_keepalive_at=now + self.interval,
                             last_error="provider_unavailable",
                         ),
+                        expected=state,
                     )
         return CachePinRunResult(calls=calls)

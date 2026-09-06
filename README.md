@@ -95,11 +95,17 @@ Actor 默认与 ordered fallback 使用一次带 revision 的原子保存；任�
 用户可为椒椒私聊、老克私聊、Living Room 或 active Bedroom session 开启“保持这段对话的长上下文”。
 
 - Pin 持久化在 Gateway。
+- PostgreSQL 在同一条领取语句中核验启用/到期，推进下次时间并增加计数；
+  竞争执行者仅一个发起保活。旧执行者按原领取状态条件写回，不覆盖新领取。
+  创建 Pin 和 actor 状态使用同一事务；旧版中断留下的缺失 actor 行会补齐。
+- `call_count` 现为保活领取次数，包含领取后、发送前崩溃；旧值沿用历史成功次数，
+  不追溯重算。它不能证明供应商实际接收或收费。进程崩溃/取消保留下次时间，
+  下一个原有周期可重新领取，Pin 不会自动关闭；这一等待可能错过缓存 TTL。
 - 只有当前 verified Profile 明确支持 `anthropic_prefix_anchored_v1` + `1h` 时才约每 50 分钟发起一次最小 keepalive。
 - 不支持的 Profile 保留 Pin，但状态为 `paused`。
 - keepalive 不写公开 timeline，不产生 Relay final，不触发 Memory extraction。
 - Bedroom session 正式结束后停止其 Pin。
-- usage receipt 的 `status=cache_keepalive`，Dashboard 显示 last/next/call count/cache read。
+- usage receipt 的 `execution_purpose=cache_keepalive`，Dashboard 显示 last/next/领取次数/cache read。
 - `active/paused` 只描述保活运行状态，最近供应商回执另分 HIT / OBSERVED_MISS / UNOBSERVABLE；缺字段不是未命中，也不能以 active 宣称命中。编辑后未验证的 Profile 会暂停保活。
 - Dashboard 诊断展示真实 receipt 的时间、Profile revision、conversation 和 prefix/version/cursor；不估算缺失的 usage。
 

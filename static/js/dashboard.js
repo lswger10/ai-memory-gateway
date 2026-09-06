@@ -288,6 +288,11 @@ function _renderModelUsage(cacheView, observability) {
     }
 }
 
+const CACHE_PIN_MESSAGES = {
+    cache_pin_claim_count_label: '保活领取次数',
+    cache_pin_claim_count_help: '领取后即计数，即使尚未发送；实际用量与缓存命中以供应商回执为准。',
+};
+
 function _renderConversationCachePins() {
     const list = _modelField('conversation-cache-pin-list');
     if (!list) return;
@@ -299,7 +304,7 @@ function _renderConversationCachePins() {
         const actors = Object.entries(pin.actors || {}).map(([actor, state]) =>
             `<div class="form-hint">${escapeHtml(actor)} · ${escapeHtml(state.status)} · ${escapeHtml(state.profile_id || 'unbound')} · ` +
             `last ${escapeHtml(state.last_keepalive || '—')} · next ${escapeHtml(state.next_keepalive || '—')} · ` +
-            `calls ${state.call_count || 0} · cache read ${state.cache_read_input_tokens ?? '—'} · ` +
+            `${CACHE_PIN_MESSAGES.cache_pin_claim_count_label} ${state.call_count || 0} · cache read ${state.cache_read_input_tokens ?? '—'} · ` +
             `${escapeHtml(_cacheOutcomeLabel(state.cache_outcome || 'UNOBSERVABLE'))}` +
             `${state.last_error ? ' · ' + escapeHtml(state.last_error) : ''}</div>`
         ).join('');
@@ -307,6 +312,7 @@ function _renderConversationCachePins() {
             <strong>${escapeHtml(pin.room_id)} · ${escapeHtml(pin.execution_mode)}</strong>
             <span class="badge">${pin.enabled ? 'pin on' : 'pin off'} · ${escapeHtml(pin.status)}</span>
             <div class="form-hint">${escapeHtml(pin.conversation_id)}</div>${actors}
+            <div class="form-hint">${CACHE_PIN_MESSAGES.cache_pin_claim_count_help}</div>
         </div>`;
     }).join('');
 }
