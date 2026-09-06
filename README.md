@@ -219,3 +219,18 @@ git diff --check
 模型配置浏览器回归在独立 Edge/Chromium 中使用真实 DOM，所有网络均拦截为测试响应。
 `tests/test_postgres_model_profile_store.py` 的并发/重连验收需显式设置 `GATEWAY_MODEL_SETTINGS_TEST_DSN` 与
 `GATEWAY_TEST_POSTGRES_APPROVED=true`，只允许已授权 test PostgreSQL；测试自建并清理临时 `group_e2e_<hex>` schema，不访问业务表。
+
+
+## 固定构建输入（F13）
+
+Dockerfile 使用官方 Python 3.12 镜像的不可变 manifest 摘要；
+requirements.txt 固定直接与传递运行依赖，继续使用 pip。
+.dockerignore 只允许逐项列出的运行文件，新增模块、模板或静态资源需明确加入。
+本地密钥、数据库、缓存、测试、文档和未列出的新文件不会进入构建上下文。
+外部配置仍由运行时引用或挂载提供，不要把真实配置加入白名单。
+
+在仓库根目录执行 `docker build .`。平台若保存了 Dockerfile override，
+必须核对它与仓库中的固定版本一致。依赖和镜像摘要更新必须重新安装、构建和测试。
+Windows Python 3.13 的回归结果不等同于 Linux Python 3.12 镜像构建验收。
+配套 Tidal 的 `tests/acceptance/test_group_build_inputs.py` 检查两仓输入；
+跨服务测试通过 `GATEWAY_PYTHON` 显式选择本仓依赖环境。
