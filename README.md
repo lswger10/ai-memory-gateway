@@ -108,7 +108,7 @@ Bedroom media 与 Group Voice Call 不在 v1.1 范围内。
 | `MEMORY_MODEL` | 独立记忆整理模型 |
 | `MODEL_EXECUTION_ENABLED` | Gateway 模型执行 |
 | `MODEL_PROFILE_MANAGEMENT_ENABLED` | Profile 管理 API |
-| `GROUP_MEMORY_ENABLED` | Group scoped memory |
+| `GATEWAY_GROUP_MEMORY_ENABLED` | Group scoped memory |
 | `GATEWAY_BEDROOM_ENABLED` | Bedroom context/retention |
 | `CONVERSATION_CACHE_PIN_INTERVAL_SECONDS` | Pin 调度间隔，默认 3000 秒 |
 | `CONVERSATION_CACHE_PIN_POLL_SECONDS` | 到期扫描间隔，默认 60 秒 |

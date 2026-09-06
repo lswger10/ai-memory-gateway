@@ -1,15 +1,10 @@
 """
-AI Memory Gateway — 带记忆系统的 LLM 转发网关
-=============================================
-让你的 AI 拥有长期记忆。
+AI Memory Gateway — cognitive history, scoped Memory and model execution.
 
-工作原理：
-1. 接收客户端（Kelivo / ChatBox / 任何 OpenAI 兼容客户端）的消息
-2. 自动搜索数据库中的相关记忆，注入 system prompt
-3. 转发给 LLM API（支持 OpenRouter / OpenAI / 任何兼容接口）
-4. 后台自动存储对话 + 用 AI 提取新记忆
-
-环境变量 MEMORY_ENABLED=false 时退化为纯转发网关（第一阶段）。
+Relay accepts factual events; Gateway derives persistent cognitive partitions,
+resolves actor Persona/Model Profile and executes providers; Orchestrator owns
+scheduling and fenced publication. MEMORY_ENABLED=false disables persistence
+readiness; the former generic forwarding endpoint is retired.
 """
 
 import os

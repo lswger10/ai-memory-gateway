@@ -247,3 +247,13 @@ def test_below_threshold_inference_never_enters_candidate_set(service):
     ))
     assert expired.id not in result.candidate_ids
     assert expired.status == "active"
+def test_documented_group_memory_gate_enables_the_runtime(monkeypatch):
+    import re
+    from pathlib import Path
+    from memory_policy import group_memory_features_from_env
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    name = re.search(r"\| `([^`]+)` \| Group scoped memory \|", readme).group(1)
+    monkeypatch.delenv("GATEWAY_GROUP_MEMORY_ENABLED", raising=False)
+    monkeypatch.setenv(name, "true")
+    assert group_memory_features_from_env()["group_memory"] is True
