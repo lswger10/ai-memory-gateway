@@ -3,6 +3,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+import pytest
+
+
+@pytest.fixture
+def admin_client(monkeypatch):
+    import main
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "test-admin")
+    return TestClient(main.app, headers={"X-Gateway-Key": "test-admin"})
 
 
 FIXTURE_ROOT = (
@@ -13,7 +21,7 @@ PACK_REQUEST = json.loads(
 )
 
 
-def test_admin_can_list_all_typed_fields_including_jiao_laoke_confidential():
+def test_admin_can_list_all_typed_fields_including_jiao_laoke_confidential(admin_client):
     import main
 
     row = {
@@ -45,7 +53,7 @@ def test_admin_can_list_all_typed_fields_including_jiao_laoke_confidential():
     with patch.object(main, "MEMORY_ENABLED", True), patch.object(
         main, "get_all_memories_detail", loader
     ), patch.object(main, "get_layer_statistics", AsyncMock(return_value=None)):
-        response = TestClient(main.app).get(
+        response = admin_client.get(
             "/api/memories?scope=jiao-laoke&confidential=true"
         )
 
@@ -79,13 +87,13 @@ def test_admin_credential_cannot_be_reused_as_actor_or_orchestrator_credential()
     assert response.json()["error"]["code"] == "invalid_service_key"
 
 
-def test_archive_management_is_read_plus_append_only_annotation():
+def test_archive_management_is_read_plus_append_only_annotation(admin_client):
     import main
 
     archive_rows = [{"id": 5, "raw_content": "raw", "annotations": []}]
     list_fn = AsyncMock(return_value=archive_rows)
     append_fn = AsyncMock(return_value={"id": 9, "archive_id": 5, "annotation_type": "note", "payload": {"text": "checked"}})
-    client = TestClient(main.app)
+    client = admin_client
     with patch.object(main, "MEMORY_ENABLED", True), patch.object(
         main, "list_cold_archive_for_management", list_fn
     ), patch.object(main, "append_cold_archive_annotation", append_fn):
@@ -103,25 +111,25 @@ def test_archive_management_is_read_plus_append_only_annotation():
     assert raw_update.status_code in {404, 405}
 
 
-def test_archive_annotation_rejects_unbounded_type():
+def test_archive_annotation_rejects_unbounded_type(admin_client):
     import main
 
     with patch.object(main, "MEMORY_ENABLED", True):
-        response = TestClient(main.app).post(
+        response = admin_client.post(
             "/api/archive/5/annotations",
             json={"annotation_type": "rewrite_raw", "payload": {}},
         )
     assert response.status_code == 422
 
 
-def test_admin_can_create_typed_scoped_memory():
+def test_admin_can_create_typed_scoped_memory(admin_client):
     import main
 
     create_fn = AsyncMock(return_value=88)
     with patch.object(main, "MEMORY_ENABLED", True), patch.object(
         main, "create_typed_memory", create_fn
     ):
-        response = TestClient(main.app).post(
+        response = admin_client.post(
             "/api/memories",
             json={
                 "content": "薇薇喜欢红色的小辣椒",
@@ -145,10 +153,10 @@ def test_admin_can_create_typed_scoped_memory():
     create_fn.assert_awaited_once_with(write, importance=8)
 
 
-def test_admin_typed_memory_rejects_legacy_unscoped_and_group_confidential():
+def test_admin_typed_memory_rejects_legacy_unscoped_and_group_confidential(admin_client):
     import main
 
-    client = TestClient(main.app)
+    client = admin_client
     base = {
         "content": "explicit memory",
         "memory_type": "fact",
@@ -169,12 +177,12 @@ def test_admin_typed_memory_rejects_legacy_unscoped_and_group_confidential():
     assert group_secret.status_code == 422
 
 
-def test_dashboard_delete_hard_deletes_and_restore_reactivates_archived_memory():
+def test_dashboard_delete_hard_deletes_and_restore_reactivates_archived_memory(admin_client):
     import main
 
     update_fn = AsyncMock()
     delete_fn = AsyncMock()
-    client = TestClient(main.app)
+    client = admin_client
     with patch.object(main, "MEMORY_ENABLED", True), patch.object(
         main, "update_memory_with_layer", update_fn
     ), patch.object(

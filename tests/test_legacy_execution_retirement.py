@@ -20,9 +20,10 @@ def test_legacy_openai_execution_and_global_ai_settings_are_not_routes():
     assert "/api/cache-pins" in paths
 
 
-def test_memory_settings_exclude_retired_global_execution_authority():
+def test_memory_settings_exclude_retired_global_execution_authority(monkeypatch):
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "test-admin")
     with patch.object(main, "get_all_gateway_config", AsyncMock(return_value={})):
-        response = TestClient(main.app).get("/api/memory-settings")
+        response = TestClient(main.app, headers={"X-Gateway-Key": "test-admin"}).get("/api/memory-settings")
     assert response.status_code == 200
     settings = response.json()["settings"]
     assert not {
@@ -40,7 +41,7 @@ def test_memory_settings_exclude_retired_global_execution_authority():
 def test_health_names_the_single_current_configuration_authority(monkeypatch):
     monkeypatch.setattr(main, "MEMORY_ENABLED", False)
     response = TestClient(main.app).get("/")
-    assert response.status_code == 200
+    assert response.status_code == 503
     assert response.json()["configuration_authority"] == "model_profiles_and_actor_personas"
     assert "system_prompt_loaded" not in response.json()
 

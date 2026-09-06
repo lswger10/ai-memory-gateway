@@ -57,6 +57,7 @@ class _ProfileStore:
 
 
 def test_management_api_redacts_credentials_and_cannot_self_assert_passed(monkeypatch):
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "test-admin")
     store = _ProfileStore()
 
     async def runtime():
@@ -65,7 +66,7 @@ def test_management_api_redacts_credentials_and_cannot_self_assert_passed(monkey
 
     monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
     monkeypatch.setattr(main, "_get_model_execution_service", runtime)
-    response = TestClient(main.app).put("/api/model-profiles", json=_profile_payload())
+    response = TestClient(main.app, headers={"X-Gateway-Key": "test-admin"}).put("/api/model-profiles", json=_profile_payload())
 
     assert response.status_code == 200
     assert store.saved.test_status == "unverified"
@@ -92,6 +93,7 @@ def test_safe_profile_never_serializes_secret_values(monkeypatch):
 
 
 def test_cache_probe_requires_explicit_charge_confirmation(monkeypatch):
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "test-admin")
     class ProbeService:
         calls = []
 
@@ -106,7 +108,7 @@ def test_cache_probe_requires_explicit_charge_confirmation(monkeypatch):
     service = ProbeService()
     monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
     monkeypatch.setattr(main, "_cache_probe_service", service)
-    client = TestClient(main.app)
+    client = TestClient(main.app, headers={"X-Gateway-Key": "test-admin"})
     body = {
         "profile_id": "profile-1",
         "actor_id": "jiao",
@@ -128,12 +130,13 @@ def test_cache_probe_requires_explicit_charge_confirmation(monkeypatch):
 
 
 def _client_with_store(monkeypatch, store):
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "test-admin")
     async def runtime():
         return object()
     monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
     monkeypatch.setattr(main, "_model_profile_store", store)
     monkeypatch.setattr(main, "_get_model_execution_service", runtime)
-    return TestClient(main.app)
+    return TestClient(main.app, headers={"X-Gateway-Key": "test-admin"})
 
 
 def test_profile_edit_preserves_hidden_credentials_and_rejects_stale_save(monkeypatch):

@@ -134,6 +134,20 @@ Bedroom media 与 Group Voice Call 不在 v1.1 范围内。
 
 ## 本地验证
 
+### 管理鉴权与健康状态（F01/F10 稳定化）
+
+管理请求必须使用 `GATEWAY_SECRET`；未配置时返回 503，错误密钥返回 401。
+`ACTOR_PERSONA_PROXY_SECRET` 仍只允许现有 Persona 方法和路径，不能读取或修改 Memory。
+`/health` 是公开的进程存活检查；`/` 是数据库就绪检查，部署验收必须使用后者。
+只有数据库初始化完成且当前查询成功时，`/` 返回 200 / `ready: true`。
+数据库故障或持久化关闭返回 503 / `ready: false` / `memory_count: null`；
+真正空库在就绪时返回 `memory_count: 0`。初始化失败不启动提取/Pin worker，
+修正配置后重启以重新执行初始化；初始化后发生的短暂查询故障在数据库恢复后可恢复就绪。
+
+永久回归：`tests/test_gateway_health_auth.py` 从 FastAPI HTTP 边界验证缺密钥拒绝、
+管理员权限、初始化失败、查询失败/恢复和空库区分。Persona API 的现有测试继续覆盖限权。
+这些可控数据库故障测试不等于真实 PostgreSQL、测试部署或生产验收。
+
 ```powershell
 python -m pytest tests -v
 python -m compileall .

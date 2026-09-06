@@ -335,6 +335,7 @@ def test_postgres_schema_persists_pin_and_per_actor_runtime_state():
 
 def test_management_api_exposes_conversation_pin_without_provider_secrets(monkeypatch):
     import main
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "test-admin")
 
     service, _, _, _ = _run(_service())
 
@@ -344,7 +345,7 @@ def test_management_api_exposes_conversation_pin_without_provider_secrets(monkey
     monkeypatch.setattr(main, "MEMORY_ENABLED", True)
     monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
     monkeypatch.setattr(main, "_get_cache_pin_service", get_service)
-    client = TestClient(main.app)
+    client = TestClient(main.app, headers={"X-Gateway-Key": "test-admin"})
     response = client.put(
         "/api/cache-pins",
         json={

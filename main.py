@@ -125,7 +125,7 @@ PORT = int(os.getenv("PORT", "8080"))
 # 设置后所有非公开端点都需要鉴权，二选一：
 #   - 请求头方式：X-Gateway-Key: 你的密钥（客户端/API 调用）
 #   - URL参数方式：?gateway_key=你的密钥（方便浏览器访问 dashboard）
-# 不设置则跳过鉴权（兼容旧部署，仅建议内网环境使用）
+# 缺少管理密钥时拒绝管理请求；健康检查独立公开。
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
 
 # Narrow credential used only by Relay's actor Persona proxy. It is deliberately
@@ -190,6 +190,7 @@ async def _conversation_cache_pin_worker() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动时初始化数据库，关闭时断开连接"""
+    app.state.database_initialized = False
     group_worker_task = None
     cache_pin_worker_task = None
     if MEMORY_ENABLED:
@@ -246,17 +247,18 @@ async def lifespan(app: FastAPI):
             
             if not MEMORY_EXTRACT_ENABLED:
                 print(f"ℹ️  记忆提取+注入已关闭（MEMORY_EXTRACT_ENABLED=false）")
+            app.state.database_initialized = True
             
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
-            print("⚠️  记忆系统将不可用，但网关仍可正常转发")
+            print("[readiness] database_initialization_failed; restart after correcting the database configuration")
     else:
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
     
     features = group_memory_features_from_env()
-    if MEMORY_ENABLED and features["group_memory"] and features["burst_extraction"]:
+    if app.state.database_initialized and MEMORY_ENABLED and features["group_memory"] and features["burst_extraction"]:
         group_worker_task = asyncio.create_task(_group_extraction_worker())
-    if MEMORY_ENABLED and resolve_feature_flags()["model_execution"]:
+    if app.state.database_initialized and MEMORY_ENABLED and resolve_feature_flags()["model_execution"]:
         cache_pin_worker_task = asyncio.create_task(_conversation_cache_pin_worker())
 
     yield
@@ -308,20 +310,31 @@ templates = Jinja2Templates(directory="templates")
 
 @app.get("/")
 async def health_check():
-    memory_count = 0
-    if MEMORY_ENABLED:
+    memory_count = None
+    database_status = "disabled" if not MEMORY_ENABLED else "initialization_failed"
+    if MEMORY_ENABLED and getattr(app.state, "database_initialized", False):
         try:
             memory_count = await get_all_memories_count()
-        except Exception:
-            pass
-    return {
-        "status": "running",
+            database_status = "ready"
+        except Exception as exc:
+            database_status = "unavailable"
+            print(f"[readiness] database query failed: {type(exc).__name__}")
+    ready = database_status == "ready"
+    return JSONResponse(status_code=200 if ready else 503, content={
+        "status": "ready" if ready else "not_ready",
+        "ready": ready,
+        "database_status": database_status,
         "gateway": "AI Memory Gateway v3",
         "memory_enabled": MEMORY_ENABLED,
         "memory_count": memory_count,
         "model_execution_enabled": resolve_feature_flags()["model_execution"],
         "configuration_authority": "model_profiles_and_actor_personas",
-    }
+    })
+
+
+@app.get("/health")
+async def liveness_check():
+    return {"status": "alive"}
 
 
 # ============================================================
@@ -362,14 +375,6 @@ async def gateway_auth_middleware(request: Request, call_next):
     ):
         return await call_next(request)
 
-    # 未设置任何密钥时跳过鉴权（兼容旧部署，但会打印警告）
-    if not GATEWAY_SECRET and not ACTOR_PERSONA_PROXY_SECRET:
-        if not hasattr(gateway_auth_middleware, "_warned"):
-            print("⚠️  GATEWAY_SECRET 未设置！所有 API 端点不受保护！")
-            print("⚠️  请在环境变量中设置 GATEWAY_SECRET 以启用鉴权")
-            gateway_auth_middleware._warned = True
-        return await call_next(request)
-
     # 公开路径不需要鉴权（根路径精确匹配）
     if path == "/":
         return await call_next(request)
@@ -399,6 +404,12 @@ async def gateway_auth_middleware(request: Request, call_next):
         and actor_persona_proxy_path_allowed(path, request.method)
     ):
         return await call_next(request)
+
+    if not GATEWAY_SECRET:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "gateway_management_unconfigured"},
+        )
 
     return JSONResponse(
         status_code=401,
