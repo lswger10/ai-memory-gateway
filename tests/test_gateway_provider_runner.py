@@ -207,6 +207,57 @@ class FailingSecondToolTransport(OpenAIToolTransport):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("protocol", ["anthropic_messages_compatible", "openai_chat_completions", "openai_responses"])
+async def test_denied_memory_tool_returns_error_and_still_completes_reply(protocol):
+    payload = profile().to_dict()
+    payload["capabilities"]["tools"] = True
+    if protocol.startswith("openai"):
+        payload.update(protocol=protocol, cache_strategy="openai_stable_prefix_v1", requested_cache_ttl=None)
+        payload["capabilities"].update(cache_strategies=["openai_stable_prefix_v1"], cache_ttls=[])
+    selected = ModelProfile.from_dict(payload)
+    store = InMemoryActorMemoryToolStore()
+    # Real ACL: the fixture asks to write Jiao's memory while bound to Laoke.
+    context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="",
+        stable_history=(), dynamic_tail=("synthetic image discussion",), actor_prompt_version="actor.v1",
+        runtime_kernel_version="kernel.v1", room_policy_version="room.v1", tool_schema_hash="actor-memory-tools.v1",
+        actor_memory_context=ActorMemoryExecutionContext(actor_id="laoke", room_id="room_weiwei_laoke",
+            conversation_id="conversation-1", generation_request_id="generation-1", source_event_id=101,
+            execution_mode="private", profile_id=selected.profile_id))
+
+    class DeniedTransport(Transport):
+        async def open_stream(self, **kwargs):
+            self.calls.append(kwargs)
+            round_number = len(self.calls)
+            if round_number == 2:
+                body = kwargs["json_body"]
+                if protocol == "anthropic_messages_compatible":
+                    result = body["messages"][-1]["content"][0]
+                    assert result["is_error"] is True
+                    encoded = result["content"]
+                elif protocol == "openai_chat_completions":
+                    encoded = body["messages"][-1]["content"]
+                else:
+                    encoded = body["input"][-1]["output"]
+                assert json.loads(encoded)["error"]["code"] == "memory_permission_denied"
+            original = ToolResponse(round_number) if protocol == "anthropic_messages_compatible" else OpenAIToolResponse(protocol, round_number)
+            class Result(Response):
+                async def aiter_lines(self):
+                    async for line in original.aiter_lines():
+                        yield line.replace("已经记下。", "回复完成，未写入记忆。").replace('"saved"', '"reply completed; memory not written"')
+            class Context:
+                async def __aenter__(self): return Result()
+                async def __aexit__(self, *args): return False
+            return Context()
+
+    transport = DeniedTransport()
+    runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver(), memory_tools=ActorMemoryToolLibrary(store))
+    chunks = [item async for item in runner.run(profile=selected, request=request(), context=context, cache_namespace="denied-tool")]
+    assert len(transport.calls) == 2
+    assert len([item for item in chunks if item.event == "final" and item.data["text"]]) == 1
+    assert store.stages == {} and await store.list_active() == []
+
+
+@pytest.mark.anyio
 async def test_anthropic_runner_keeps_dynamic_tail_after_cache_breakpoint(monkeypatch):
     transport = Transport()
     runner = GatewayProviderRunner(transport=transport, credential_resolver=Resolver())

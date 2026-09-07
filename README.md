@@ -24,6 +24,13 @@ Gateway 不直接发布 final；Orchestrator 消费 Gateway stream 后仍需通�
 
 ### 2026-09-07 回复修复与手动摘要 TEST 部署
 
+后续本地修复（尚未部署）：07:30/07:32 UTC 的 Laoke 日志确认记忆工具
+PermissionError 导致已有流式文字后整条生成失败。权限拒绝现在返回明确的
+工具错误结果，由既有有界工具循环继续完成答复；不放宽 ACL、不将草稿
+冒充已保存回复。三个供应商协议真实 ACL 回归通过，禁止写入没有留下
+stage 或记忆。相关测试 55 passed / 4 PostgreSQL-gated skips；配对 Tidal
+新增跨服务合成验收通过，确认正式 final 落库且重读保留。无付费验证。
+
 基于 `bdd1b53`，功能提交 `8b4541e`、Docker 清单补充 `a9b20b4` 已推送并
 部署 TEST（`6a9e642e3aa3b4323a8b595a`，Running/数据库 ready）：
 记忆搜索日期转为 JSON 可序列化值；

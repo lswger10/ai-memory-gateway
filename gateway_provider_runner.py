@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 import anyio
 from typing import Any, AsyncIterator, Mapping
@@ -241,11 +242,21 @@ class GatewayProviderRunner:
                 calls = tool_item.data["calls"]
                 results = []
                 for call in calls:
-                    result = await self.memory_tools.call(
-                        context.actor_memory_context,
-                        f"{profile.profile_id}:{call['id']}",
-                        call["name"], call["arguments"],
-                    )
+                    try:
+                        result = await self.memory_tools.call(
+                            context.actor_memory_context,
+                            f"{profile.profile_id}:{call['id']}",
+                            call["name"], call["arguments"],
+                        )
+                    except PermissionError as exc:
+                        # ACL rejection is a tool result; it does not cancel the conversation.
+                        logging.getLogger(__name__).warning(
+                            "Memory tool denied generation=%s tool=%s reason=%s",
+                            request.generation_request_id, call["name"], str(exc),
+                        )
+                        result = {"is_error": True, "error": {
+                            "code": "memory_permission_denied", "message": str(exc),
+                        }}
                     results.append(result)
                 body = _continue_with_tool_results(profile.protocol, body, calls, results)
             raise ProviderRunUnavailable("provider tool loop exceeded limit")
@@ -447,7 +458,8 @@ def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, resu
             for call in calls
         ]})
         body["messages"].append({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
+            {"type": "tool_result", "tool_use_id": call["id"], "content": json.dumps(result, ensure_ascii=False),
+             **({"is_error": True} if result.get("is_error") is True else {})}
             for call, result in zip(calls, results, strict=True)
         ]})
     elif protocol == "openai_chat_completions":
