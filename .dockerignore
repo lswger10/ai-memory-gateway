@@ -61,6 +61,7 @@
 !contracts/group-room/v1/fixtures/publication-result-reaction.json
 !contracts/group-room/v1/group-room.schema.json
 !conversation_cache_pin.py
+!conversation_compression.py
 !conversation_partitions.py
 !conversation_sync.py
 !database.py
