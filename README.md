@@ -1,5 +1,15 @@
 # AI Memory Gateway
 
+## Dou Dizhu execution (local implementation, 2026-09-07)
+
+Private `POST /internal/doudizhu/decide` accepts only its independent
+`DOUDIZHU_SERVICE_KEY` bearer credential and bounded `{actor_id,payload}` JSON.
+Jiao/Laoke use existing private-room Profile bindings and versioned Persona;
+only card-table state is supplied. No chat history sync, memory/calendar tools,
+or provider credentials in the game/browser. One bounded provider attempt uses
+the existing runner and records `execution_purpose=doudizhu` usage. The game
+referee remains the sole rules/state owner. No automatic paid tests.
+
 ## Shared calendar integration (TEST deployment, 2026-09-07)
 
 Set `SHARED_PAGE_BASE_URL` to the private shared-page REST origin and

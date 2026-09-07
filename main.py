@@ -373,6 +373,7 @@ async def gateway_auth_middleware(request: Request, call_next):
         or path == "/internal/group/extraction/closed-bursts"
         or path.startswith("/internal/bedroom/")
         or path.startswith("/internal/model-execution/")
+        or path == "/internal/doudizhu/decide"
     ):
         return await call_next(request)
 
@@ -570,6 +571,30 @@ async def _get_cache_pin_service() -> CachePinService:
 @app.post("/internal/model-execution/probe")
 async def model_execution_probe(request: Request):
     return await _stream_gateway_execution(request, "probe")
+
+
+@app.post("/internal/doudizhu/decide")
+async def doudizhu_decide(request: Request):
+    expected = os.environ.get("DOUDIZHU_SERVICE_KEY", "")
+    if not expected or not secrets.compare_digest(_group_bearer(request), expected):
+        raise HTTPException(403, "principal_not_allowed")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 40000: raise HTTPException(413, "table_payload_too_large")
+    try:
+        value = json.loads(body)
+        if not isinstance(value, dict) or set(value) != {"actor_id", "payload"} or value["actor_id"] not in {"jiao", "laoke"} or not isinstance(value["payload"], dict):
+            raise ValueError()
+        await _refresh_actor_prompt_store()
+        await _get_model_execution_service()
+        from doudizhu_execution import decide
+        return await decide(**value, profiles=_model_profile_store,
+            group=_model_context_builder.group_context, runner=_model_provider_runner, usage_store=_model_usage_store)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "invalid_table_request") from exc
+    except (ProviderRunUnavailable, TimeoutError) as exc:
+        raise HTTPException(502, "table_model_unavailable") from exc
 
 
 @app.post("/internal/model-execution/stream")
