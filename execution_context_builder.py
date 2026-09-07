@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from actor_memory_tools import ACTOR_MEMORY_TOOL_SCHEMA_HASH, ActorMemoryExecutionContext
+from shared_page_client import CALENDAR_TOOL_SCHEMA_HASH
 from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
 from bedroom_memory import BedroomContextPackService, BedroomPackRequest
 from conversation_partitions import InMemoryConversationPartitionStore
@@ -28,7 +29,9 @@ class GatewayExecutionContextBuilder:
         conversation_store=None,
         conversation_sync: ConversationSyncService | None = None,
         bedroom_conversation_sync: ConversationSyncService | None = None,
+        calendar_client=None,
     ) -> None:
+        self.calendar_client = calendar_client
         self.group_context = group_context
         self.bedroom_context = bedroom_context
         self.history_store = history_store or InMemoryAnchoredHistoryStore()
@@ -158,7 +161,7 @@ class GatewayExecutionContextBuilder:
             partition_id = conversation_id
 
         tool_schema_hash = (
-            ACTOR_MEMORY_TOOL_SCHEMA_HASH
+            (CALENDAR_TOOL_SCHEMA_HASH if self.calendar_client else ACTOR_MEMORY_TOOL_SCHEMA_HASH)
             if profile.capabilities.tools else components["tool_schema_hash"]
         )
         namespace = build_cache_namespace(
@@ -237,7 +240,7 @@ class GatewayExecutionContextBuilder:
         through_stable_event_id: int,
     ) -> ContextBundle:
         tool_schema_hash = (
-            ACTOR_MEMORY_TOOL_SCHEMA_HASH
+            (CALENDAR_TOOL_SCHEMA_HASH if self.calendar_client else ACTOR_MEMORY_TOOL_SCHEMA_HASH)
             if request.execution_kind == "full" and profile.capabilities.tools
             else components["tool_schema_hash"]
         )
@@ -322,11 +325,16 @@ class GatewayExecutionContextBuilder:
                 if attachment_id not in seen_attachment_ids:
                     seen_attachment_ids.add(attachment_id)
                     current_media_references.append(reference)
+        calendar_tail = ()
+        if self.calendar_client and request.execution_kind == "full":
+            environment = await self.calendar_client.environment(request.actor_id)
+            if environment:
+                calendar_tail = (environment,)
         return ContextBundle(
             static_system=components["static_system"],
             stable_summary=state.summary,
             stable_history=stable_history,
-            dynamic_tail=components["dynamic_tail"],
+            dynamic_tail=components["dynamic_tail"] + calendar_tail,
             actor_prompt_version=components["actor_prompt_version"],
             runtime_kernel_version=components["runtime_kernel_version"],
             room_policy_version=components["room_policy_version"],

@@ -70,6 +70,7 @@ from bedroom_memory import (
 from model_execution import GatewayModelExecutionService
 from execution_context_builder import GatewayExecutionContextBuilder
 from gateway_provider_runner import GatewayProviderRunner
+from shared_page_client import SharedPageClient
 from media_materialization import RelayMediaReader
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
@@ -507,7 +508,11 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             else PostgresActorMemoryToolStore(get_pool)
         )
         _actor_memory_relay = RelayGroupClient(relay_url, relay_key)
+        calendar_url = os.environ.get("SHARED_PAGE_BASE_URL", "").strip()
+        calendar_token = os.environ.get("SHARED_PAGE_AGENT_TOKEN", "").strip()
+        calendar_client = SharedPageClient(calendar_url, calendar_token) if calendar_url and calendar_token else None
         _model_provider_runner = GatewayProviderRunner(
+            calendar_client=calendar_client,
             media_reader=(
                 RelayMediaReader(relay_url, relay_key)
                 if relay_url and relay_key
@@ -516,6 +521,7 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             memory_tools=_actor_memory_tools,
         )
         _model_context_builder = GatewayExecutionContextBuilder(
+            calendar_client=calendar_client,
             group_context=_get_group_context_service(),
             bedroom_context=_get_bedroom_context_service(),
             history_store=history_store,

@@ -89,3 +89,5 @@
 !static/css/main.css
 !static/js/dashboard.js
 !templates/dashboard.html
+
+!shared_page_client.py

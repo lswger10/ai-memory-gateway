@@ -6,6 +6,7 @@ import uuid
 from types import SimpleNamespace
 
 from actor_memory_tools import ACTOR_MEMORY_TOOL_SCHEMA_HASH
+from shared_page_client import CALENDAR_TOOL_SCHEMA_HASH
 from anchored_history import AnchoredHistoryError
 from model_execution import ContextBundle, ProviderRunUnavailable
 from model_usage_store import build_cache_namespace, execution_receipt_draft, record_provider_attempt
@@ -37,7 +38,7 @@ class ConversationCompressionService:
                 actor_prompt_version=components["actor_prompt_version"],
                 runtime_kernel_version=components["runtime_kernel_version"],
                 room_policy_version=components["room_policy_version"],
-                tool_schema_hash=ACTOR_MEMORY_TOOL_SCHEMA_HASH if profile.capabilities.tools else components["tool_schema_hash"],
+                tool_schema_hash=(CALENDAR_TOOL_SCHEMA_HASH if getattr(self.builder, "calendar_client", None) else ACTOR_MEMORY_TOOL_SCHEMA_HASH) if profile.capabilities.tools else components["tool_schema_hash"],
                 cache_strategy_version=profile.cache_strategy)
             namespace = build_cache_namespace(**identity)
             state = await self.builder.history_store.get_or_create(namespace, identity=identity)

@@ -8,6 +8,7 @@ import anyio
 from typing import Any, AsyncIterator, Mapping
 
 from actor_memory_tools import ActorMemoryToolLibrary, actor_memory_tool_definitions
+from shared_page_client import CALENDAR_TOOL, CALENDAR_TOOL_SCHEMA_HASH, tool_result_text, tool_result_images
 from cache_strategies import (
     AnthropicPrefixAnchoredV1,
     AnthropicPromptLayout,
@@ -49,11 +50,13 @@ class GatewayProviderRunner:
         credential_resolver: EnvironmentCredentialResolver | None = None,
         media_reader: RelayMediaReader | None = None,
         memory_tools: ActorMemoryToolLibrary | None = None,
+        calendar_client=None,
     ) -> None:
         self.transport = transport or PooledHttpTransport()
         self.credentials = credential_resolver or EnvironmentCredentialResolver()
         self.media_reader = media_reader
         self.memory_tools = memory_tools
+        self.calendar_client = calendar_client
 
     def _render(
         self,
@@ -85,9 +88,11 @@ class GatewayProviderRunner:
         tools = (
             actor_memory_tool_definitions()
             if profile.capabilities.tools
-            and context.tool_schema_hash == "actor-memory-tools.v1"
+            and context.tool_schema_hash in {"actor-memory-tools.v1", CALENDAR_TOOL_SCHEMA_HASH}
             else ()
         )
+        if tools and context.tool_schema_hash == CALENDAR_TOOL_SCHEMA_HASH:
+            tools += (CALENDAR_TOOL,)
         if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
             cache_enabled = profile.cache_strategy == "anthropic_prefix_anchored_v1"
             if cache_enabled:
@@ -237,11 +242,17 @@ class GatewayProviderRunner:
                         "provider_usage_received": provider_usage_received,
                     })
                     return
-                if self.memory_tools is None or context.actor_memory_context is None:
+                if context.actor_memory_context is None:
                     raise ProviderRunUnavailable("provider requested unavailable memory tools")
                 calls = tool_item.data["calls"]
                 results = []
                 for call in calls:
+                    if call["name"] == "calendar" and self.calendar_client is not None and context.tool_schema_hash == CALENDAR_TOOL_SCHEMA_HASH:
+                        results.append(await self.calendar_client.call(request.actor_id, call["arguments"],
+                            images_enabled="image" in profile.capabilities.input_modalities))
+                        continue
+                    if self.memory_tools is None:
+                        raise ProviderRunUnavailable("provider requested unavailable memory tools")
                     try:
                         result = await self.memory_tools.call(
                             context.actor_memory_context,
@@ -458,7 +469,7 @@ def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, resu
             for call in calls
         ]})
         body["messages"].append({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": call["id"], "content": json.dumps(result, ensure_ascii=False),
+            {"type": "tool_result", "tool_use_id": call["id"], "content": tool_result_text(result),
              **({"is_error": True} if result.get("is_error") is True else {})}
             for call, result in zip(calls, results, strict=True)
         ]})
@@ -468,7 +479,7 @@ def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, resu
             for call in calls
         ]})
         body["messages"].extend(
-            {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
+            {"role": "tool", "tool_call_id": call["id"], "content": tool_result_text(result)}
             for call, result in zip(calls, results, strict=True)
         )
     else:
@@ -477,9 +488,25 @@ def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, resu
             for call, result in zip(calls, results, strict=True)
             for item in (
                 {"type": "function_call", "call_id": call["id"], "name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False)},
-                {"type": "function_call_output", "call_id": call["id"], "output": json.dumps(result, ensure_ascii=False)},
+                {"type": "function_call_output", "call_id": call["id"], "output": tool_result_text(result)},
             )
         )
+    for call, result in zip(calls, results, strict=True):
+        images = tool_result_images(result)
+        if not images:
+            continue
+        if protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
+            block = next(b for b in body["messages"][-1]["content"] if b["tool_use_id"] == call["id"])
+            block["content"] = [{"type": "text", "text": tool_result_text(result)}] + [
+                {"type": "image", "source": {"type": "base64", "media_type": b["mimeType"], "data": b["data"]}} for b in images]
+        elif protocol == "openai_chat_completions":
+            body["messages"].append({"role": "user", "content": [
+                {"type": "text", "text": "Shared calendar page from tool " + call["id"]}] + [
+                {"type": "image_url", "image_url": {"url": "data:" + b["mimeType"] + ";base64," + b["data"]}} for b in images]})
+        else:
+            body["input"].append({"role": "user", "content": [
+                {"type": "input_text", "text": "Shared calendar page from tool " + call["id"]}] + [
+                {"type": "input_image", "image_url": "data:" + b["mimeType"] + ";base64," + b["data"]} for b in images]})
     return body
 
 

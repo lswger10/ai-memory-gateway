@@ -1,5 +1,26 @@
 # AI Memory Gateway
 
+## Shared calendar integration (local implementation, 2026-09-07)
+
+Set `SHARED_PAGE_BASE_URL` to the private shared-page REST origin and
+`SHARED_PAGE_AGENT_TOKEN` to its separate agent credential. Configuring both
+adds the calendar tool to tool-enabled Profiles; actor identity comes from the
+execution request. Calendar state remains solely in shared-page. Only information
+intended for every calendar participant belongs there. Each full turn reads the
+current calendar environment; failures do not abort chat. Tool write errors are
+explicit and never automatically retried, because a timeout may follow a commit.
+
+Calendar times use America/Los_Angeles; the Tidal web UI adds Beijing conversion.
+`see` page images use native Anthropic image blocks or OpenAI image input and
+respect Profile image capability. The combined tool schema namespace is shared
+by generation, keepalive and manual compression. No memory ACL or staging change.
+
+Local validation: 45 targeted Gateway tests; Tidal real-process synthetic-provider
+acceptance proves both actor tool writes, final publication and shared calendar
+persistence. No paid-provider probe. Deployment is recorded separately by Tidal;
+these local checks alone do not establish live-provider acceptance.
+
+
 Gateway 是“小家”的认知上下文与模型执行服务。它不拥有公开聊天事实，但持久保存由 Relay 已接受事实派生的 cognitive conversation partitions，并统一拥有 Memory ACL、Persona、Model Profile、供应商调用、Prompt Cache、摘要与 usage telemetry。
 
 ## 当前权责
