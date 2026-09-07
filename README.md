@@ -22,9 +22,11 @@ Orchestrator
 
 Gateway 不直接发布 final；Orchestrator 消费 Gateway stream 后仍需通过 Relay 的 fence/CAS publication 接口落定事实。
 
-### 2026-09-07 本地修复与手动摘要候选
+### 2026-09-07 回复修复与手动摘要 TEST 部署
 
-基于 `bdd1b53`，当前尚未提交/部署：记忆搜索日期转为 JSON 可序列化值；
+基于 `bdd1b53`，功能提交 `8b4541e`、Docker 清单补充 `a9b20b4` 已推送并
+部署 TEST（`6a9e642e3aa3b4323a8b595a`，Running/数据库 ready）：
+记忆搜索日期转为 JSON 可序列化值；
 供应商 delta 即时转发；空终态记为失败；失败日志只保留 generation/Profile、
 HTTP 状态和异常类型。未回复的图片延续到后续文字请求，直到对应 actor 回复。
 这修复了可复现缺陷，不代表已确定所有历史空回的具体异常。
@@ -39,8 +41,10 @@ Gateway 用当前主 Profile 为较早事实生成语义摘要，保留最近 48
 
 本地相关测试 63 passed / 4 skipped（未启用隔离 PostgreSQL DSN）；
 Tidal 本地跨服务测试 2 passed，包含新私聊窗口的发送、回复和历史隔离。
-摘要验证使用人工数据/模拟供应商，无新增付费调用。部署证据以配对
-Tidal 仓库 DEPLOYMENT.md 为准，ASR 验收仍延期。
+摘要验证使用人工数据/模拟供应商，无新增付费调用。线上摘要接口通过
+Relay 代理对空 payload 返回 422；运行文件 hash 与发布提交一致。
+完整部署证据以配对 Tidal 仓库 DEPLOYMENT.md 为准；真实付费回复/摘要
+质量未重新验收，ASR 验收仍延期。本段收尾记录为部署后的本地文档提交。
 
 ## 唯一配置 Source of Truth
 
