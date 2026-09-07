@@ -236,6 +236,69 @@ async def test_anthropic_runner_keeps_dynamic_tail_after_cache_breakpoint(monkey
 
 
 @pytest.mark.anyio
+async def test_text_delta_arrives_before_provider_finishes():
+    finished = False
+
+    class LiveResponse(Response):
+        async def aiter_lines(self):
+            nonlocal finished
+            yield "event: content_block_delta"
+            yield 'data: {"delta":{"type":"text_delta","text":"hi"}}'
+            yield ""
+            finished = True
+            yield "event: message_stop"
+            yield "data: {}"
+            yield ""
+
+    class LiveContext(StreamContext):
+        async def __aenter__(self): return LiveResponse()
+
+    class LiveTransport(Transport):
+        async def open_stream(self, **kwargs): return LiveContext()
+
+    runner = GatewayProviderRunner(transport=LiveTransport(), credential_resolver=Resolver())
+    context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="", stable_history=(),
+        dynamic_tail=("hello",), actor_prompt_version="v1", runtime_kernel_version="v1",
+        room_policy_version="v1", tool_schema_hash="none")
+    stream = runner.run(profile=profile(), request=request(), context=context, cache_namespace="test")
+    try:
+        first = await anext(stream)
+        assert first.event == "delta"
+        assert not finished
+        remaining = [chunk async for chunk in stream]
+        assert len([chunk for chunk in remaining if chunk.event == "final"]) == 1
+        assert not any(chunk.event == "delta" for chunk in remaining)
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.anyio
+async def test_empty_terminal_is_a_failed_attempt_not_a_successful_reply():
+    class EmptyResponse(Response):
+        async def aiter_lines(self):
+            yield "event: message_stop"
+            yield "data: {}"
+            yield ""
+
+    class EmptyContext(StreamContext):
+        async def __aenter__(self): return EmptyResponse()
+
+    class EmptyTransport(Transport):
+        async def open_stream(self, **kwargs): return EmptyContext()
+
+    statuses = []
+    async def on_attempt(_id, _usage, status, *_args): statuses.append(status)
+    runner = GatewayProviderRunner(transport=EmptyTransport(), credential_resolver=Resolver())
+    context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="", stable_history=(),
+        dynamic_tail=("hello",), actor_prompt_version="v1", runtime_kernel_version="v1",
+        room_policy_version="v1", tool_schema_hash="none")
+    with pytest.raises(ProviderRunUnavailable, match="without reply text"):
+        _ = [item async for item in runner.run(profile=profile(), request=request(),
+            context=context, cache_namespace="test", on_attempt=on_attempt)]
+    assert statuses == ["failed"]
+
+
+@pytest.mark.anyio
 async def test_anthropic_tool_call_is_private_staged_and_followed_by_tool_result():
     payload = profile().to_dict()
     payload["capabilities"]["tools"] = True

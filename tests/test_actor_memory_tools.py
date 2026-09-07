@@ -379,3 +379,23 @@ def test_dashboard_audit_exposes_coordinates_but_not_private_arguments():
         assert "arguments" not in rows[0]
         assert "content" not in rows[0]
     asyncio.run(run())
+@pytest.mark.anyio
+async def test_postgres_search_dates_are_serializable_provider_tool_results(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import json
+    import actor_memory_tools as module
+    from gateway_provider_runner import _continue_with_tool_results
+
+    async def search(*args, **kwargs):
+        return SimpleNamespace(memories=({"id": 1, "content": "synthetic memory",
+            "created_at": datetime(2026, 9, 7, tzinfo=timezone.utc),
+            "last_supported_at": None},))
+
+    monkeypatch.setattr(module, "search_authorized_memories", search)
+    results = await module.PostgresActorMemoryToolStore().search("synthetic", object(), 1)
+    for protocol in ("anthropic_messages", "openai_chat_completions", "openai_responses"):
+        body = _continue_with_tool_results(protocol, {"messages": [], "input": []},
+            [{"id": "call-1", "name": "search_memory", "arguments": {"query": "synthetic"}}],
+            [{"memories": results}])
+        assert "2026-09-07T00:00:00+00:00" in json.dumps(body)

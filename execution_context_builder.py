@@ -302,13 +302,17 @@ class GatewayExecutionContextBuilder:
             else None
         )
         generation_facts = (current_fact,) if current_fact is not None else ()
-        if current_fact is not None and current_fact.burst_id:
+        if current_fact is not None:
+            conversation_facts = await self.conversation_store.list_facts(
+                partition_id, through_event_id=request.current_event_id
+            )
+            last_reply_id = max((fact.source_event_id for fact in conversation_facts
+                if fact.actor_id == request.actor_id and fact.event_type == "agent_final"), default=0)
             generation_facts = tuple(
                 fact
-                for fact in await self.conversation_store.list_facts(
-                    partition_id, through_event_id=request.current_event_id
-                )
-                if fact.burst_id == current_fact.burst_id
+                for fact in conversation_facts
+                if (current_fact.burst_id and fact.burst_id == current_fact.burst_id)
+                or (fact.actor_id == "weiwei" and fact.source_event_id > last_reply_id)
             )
         current_media_references = []
         seen_attachment_ids: set[str] = set()

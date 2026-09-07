@@ -22,6 +22,26 @@ Orchestrator
 
 Gateway 不直接发布 final；Orchestrator 消费 Gateway stream 后仍需通过 Relay 的 fence/CAS publication 接口落定事实。
 
+### 2026-09-07 本地修复与手动摘要候选
+
+基于 `bdd1b53`，当前尚未提交/部署：记忆搜索日期转为 JSON 可序列化值；
+供应商 delta 即时转发；空终态记为失败；失败日志只保留 generation/Profile、
+HTTP 状态和异常类型。未回复的图片延续到后续文字请求，直到对应 actor 回复。
+这修复了可复现缺陷，不代表已确定所有历史空回的具体异常。
+
+`POST /api/conversation-compression` 复用管理鉴权及 Relay 管理代理，仅接受
+actor 的私聊 room/conversation/current_event。Relay 仍拥有完整聊天事实；
+Gateway 用当前主 Profile 为较早事实生成语义摘要，保留最近 48 条原文，
+通过现有 anchored history revision CAS 原子保存，不写长期记忆、不删除原记录。
+无新可压缩范围不调用模型；调用计入 `conversation_compression` usage，
+不自动重试、不调用记忆工具。单实例一次只运行一个手动摘要。原有免费的
+自动摘录压缩仍作长度保护；手动摘要只在用户点击并确认费用后调用模型。
+
+本地相关测试 63 passed / 4 skipped（未启用隔离 PostgreSQL DSN）；
+Tidal 本地跨服务测试 2 passed，包含新私聊窗口的发送、回复和历史隔离。
+摘要验证使用人工数据/模拟供应商，无新增付费调用。部署证据以配对
+Tidal 仓库 DEPLOYMENT.md 为准，ASR 验收仍延期。
+
 ## 唯一配置 Source of Truth
 
 - 模型、协议、provider route、key reference、capabilities、cache strategy：Model Profile。

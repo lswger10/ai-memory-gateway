@@ -73,7 +73,9 @@ from gateway_provider_runner import GatewayProviderRunner
 from media_materialization import RelayMediaReader
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
-from anchored_history import InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
+from anchored_history import AnchoredHistoryError, InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
+from conversation_compression import ConversationCompressionService
+from model_execution import ProviderRunUnavailable
 from conversation_partitions import (
     InMemoryConversationPartitionStore,
     PostgresConversationPartitionStore,
@@ -296,6 +298,7 @@ _actor_memory_tools: ActorMemoryToolLibrary | None = None
 _actor_memory_relay: RelayGroupClient | None = None
 _cache_probe_service: GatewayCacheProbeService | None = None
 _cache_pin_service: CachePinService | None = None
+_conversation_compression_service: ConversationCompressionService | None = None
 _actor_prompt_store = None
 _actor_prompt_mapping = None
 _model_runtime_lock = asyncio.Lock()
@@ -824,6 +827,29 @@ async def update_conversation_cache_pin(request: Request):
     except (CachePinError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=422, detail="invalid_cache_pin") from exc
     return _cache_pin_public(pin)
+
+
+@app.post("/api/conversation-compression")
+async def compress_conversation(request: Request):
+    global _conversation_compression_service
+    _require_model_management()
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or set(payload) != {"actor_id", "room_id", "conversation_id", "current_event_id"}:
+            raise ValueError("invalid compression target")
+        await _refresh_actor_prompt_store()
+        await _get_model_execution_service()
+        if _conversation_compression_service is None:
+            _conversation_compression_service = ConversationCompressionService(
+                builder=_model_context_builder, profiles=_model_profile_store,
+                runner=_model_provider_runner, usage_store=_model_usage_store)
+        return await _conversation_compression_service.compress(**payload)
+    except AnchoredHistoryError as exc:
+        raise HTTPException(status_code=409, detail="compression_state_conflict") from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_compression_target") from exc
+    except ProviderRunUnavailable as exc:
+        raise HTTPException(status_code=502, detail="compression_unavailable") from exc
 
 
 @app.put("/api/model-bindings")

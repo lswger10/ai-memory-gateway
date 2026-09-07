@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, AsyncIterator, Protocol
 
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
@@ -197,6 +198,11 @@ class GatewayModelExecutionService:
                 if not final_seen:
                     raise ProviderRunUnavailable("provider stream ended without final")
             except ProviderRunUnavailable as exc:
+                logging.getLogger(__name__).warning(
+                    "Model execution unavailable generation=%s profile=%s reason=%s cause=%s",
+                    request.generation_request_id, profile.profile_id, str(exc),
+                    type(exc.__cause__).__name__ if exc.__cause__ else "none",
+                )
                 last_unavailable = exc
                 continue
             finally:

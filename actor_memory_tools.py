@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from copy import deepcopy
 import hashlib
 import json
@@ -465,6 +466,9 @@ class PostgresActorMemoryToolStore:
     @staticmethod
     def _clean_row(row) -> dict[str, Any]:
         value = dict(row)
+        for field, item in value.items():
+            if isinstance(item, datetime):
+                value[field] = item.isoformat()
         for field in ("provenance", "evidence", "resulting_memory_ids"):
             if isinstance(value.get(field), str):
                 value[field] = json.loads(value[field])
@@ -472,7 +476,7 @@ class PostgresActorMemoryToolStore:
 
     async def search(self, query: str, policy, limit: int) -> list[dict[str, Any]]:
         result = await search_authorized_memories(query, policy, limit=max(1, min(limit, 100)))
-        return [dict(row) for row in result.memories]
+        return [self._clean_row(row) for row in result.memories]
 
     async def list(self, policy, status: str, limit: int) -> list[dict[str, Any]]:
         pool = await self.pool_factory()

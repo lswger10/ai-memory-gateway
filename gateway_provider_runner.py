@@ -201,15 +201,20 @@ class GatewayProviderRunner:
                         method=rendered.method, path=rendered.path, json_body=body)
                     async with stream_context as response:
                         if response.status_code >= 400:
-                            raise ProviderRunUnavailable("provider route rejected request")
+                            raise ProviderRunUnavailable(f"provider HTTP {response.status_code}")
                         parser = (self._anthropic if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}
                                   else self._openai_responses if profile.protocol == "openai_responses" else self._openai_chat)
                         async for item in parser(response, profile, request):
                             if item.event == "usage":
                                 attempt_usage = item.data["usage"]
                                 attempt_usage_received |= bool(item.data.get("provider_usage_received"))
+                            elif item.event == "delta":
+                                yield item
                             else:
                                 round_items.append(item)
+                    if any(item.event == "final" and not str(item.data.get("text", "")).strip()
+                           for item in round_items):
+                        raise ProviderRunUnavailable("provider completed without reply text")
                     attempt_status = "succeeded"
                 except (asyncio.CancelledError, GeneratorExit):
                     attempt_status = "cancelled"
