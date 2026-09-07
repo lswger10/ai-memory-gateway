@@ -24,7 +24,9 @@ Gateway 不直接发布 final；Orchestrator 消费 Gateway stream 后仍需通�
 
 ### 2026-09-07 回复修复与手动摘要 TEST 部署
 
-后续本地修复（尚未部署）：07:30/07:32 UTC 的 Laoke 日志确认记忆工具
+后续修复 `ab5d249` 已部署 TEST（`6a9e6b473aa3b4323a8b5ab8`，Running，
+数据库 ready，runner 运行时代码哈希匹配）；配对 Tidal 为 `42e955e`。
+07:30/07:32 UTC 的 Laoke 日志确认记忆工具
 PermissionError 导致已有流式文字后整条生成失败。权限拒绝现在返回明确的
 工具错误结果，由既有有界工具循环继续完成答复；不放宽 ACL、不将草稿
 冒充已保存回复。三个供应商协议真实 ACL 回归通过，禁止写入没有留下
