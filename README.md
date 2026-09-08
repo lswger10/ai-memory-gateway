@@ -1,5 +1,19 @@
 # AI Memory Gateway
 
+## JSON import preview repair (2026-09-07)
+
+The dashboard previously rendered the JSON preview and confirmation button, then
+immediately erased both through `clearImportResult()`. Clear the previous result
+before rendering the new preview instead. Imported preview fields are escaped as
+literal text using the existing HTML helper. The import API and memory scope
+semantics are unchanged; preview does not write memories.
+
+Both file upload and pasted JSON regressions reproduce the missing button on the
+previous code. The full dashboard browser suite passes (13 tests), including
+confirmation visibility and exactly one request with the original JSON only after
+the user clicks confirm. Tests use synthetic data and intercepted HTTP, not the
+live memory database. TEST deployment and online verification follow this commit.
+
 ## Dou Dizhu execution (TEST deployment, 2026-09-07)
 
 Private `POST /internal/doudizhu/decide` accepts only its independent

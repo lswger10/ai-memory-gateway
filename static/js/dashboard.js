@@ -1240,18 +1240,18 @@ async function previewJson() {
             return;
         }
         
+        clearImportResult();
         pendingJsonData = parsed;
         let html = '<p><b>预览：共 ' + mems.length + ' 条记忆</b></p>';
         const show = mems.slice(0, 10);
         show.forEach(m => {
-            html += '<div class="preview-item">权重 ' + (m.importance || '?') + ' | ' + (m.content || '').substring(0, 80) + '</div>';
+            html += '<div class="preview-item">权重 ' + escapeHtml(String(m.importance || '?')) + ' | ' + escapeHtml((m.content || '').substring(0, 80)) + '</div>';
         });
         if (mems.length > 10) {
             html += '<div class="preview-item" style="color:#999;">...还有 ' + (mems.length - 10) + ' 条</div>';
         }
         html += '<br><button class="btn btn-primary" onclick="confirmJsonImport()">确认导入</button>';
         preview.innerHTML = html;
-        clearImportResult();
     } catch(e) {
         showImportResult('error', '❌ JSON 格式错误：' + e.message);
         preview.innerHTML = '';

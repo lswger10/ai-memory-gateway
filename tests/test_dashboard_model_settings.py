@@ -61,6 +61,30 @@ def dashboard(browser):
     page.close()
 
 
+@pytest.mark.parametrize("source", ["file", "paste"])
+def test_json_preview_keeps_confirmation_and_imports_only_after_click(dashboard, source):
+    page, _, writes = dashboard
+    payload = {"memories": [{"content": "Synthetic memory <b>literal text</b>", "importance": 5}]}
+    page.locator('[data-section="import"]').click()
+    page.locator('[data-tab="json"]').click()
+    if source == "file":
+        page.locator("#jsonFile").set_input_files({
+            "name": "synthetic-memories.json", "mimeType": "application/json",
+            "buffer": json.dumps(payload).encode(),
+        })
+    else:
+        page.locator("#jsonInput").fill(json.dumps(payload))
+    page.get_by_role("button", name="预览内容").click()
+    confirm = page.get_by_role("button", name="确认导入", exact=True)
+    confirm.wait_for(state="visible", timeout=2000)
+    assert page.locator("#jsonPreview .preview-item").inner_text() == "权重 5 | " + payload["memories"][0]["content"]
+    assert page.locator("#jsonPreview b").count() == 1  # Heading only; file content is literal text.
+    assert writes == []
+    confirm.click()
+    page.wait_for_function("document.querySelector('#import-result').textContent.includes('导入完成')")
+    assert writes == [("/import/memories", payload)]
+
+
 def test_binding_form_displays_actual_default_and_saves_once(dashboard):
     page, _, writes = dashboard
     assert page.locator("#binding-default-profile").input_value() == "gpt"
