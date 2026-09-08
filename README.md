@@ -12,7 +12,21 @@ Both file upload and pasted JSON regressions reproduce the missing button on the
 previous code. The full dashboard browser suite passes (13 tests), including
 confirmation visibility and exactly one request with the original JSON only after
 the user clicks confirm. Tests use synthetic data and intercepted HTTP, not the
-live memory database. TEST deployment and online verification follow this commit.
+live memory database.
+
+Published fix `2d4ce45` and cache-version follow-up `bea3b6d` on
+`feat/group-model-execution-cache`. TEST Gateway deployment
+`6a9f74477b89d6943549e1d2` is Running; its predecessor deployment was
+`6a9f731d7b89d6943549e184`. Online public static readback returned the corrected
+preview function. Existing Edge initially retained the old script after reload;
+the template now requests `3.12-json-import-preview`. After this release and an
+ordinary reload, the authenticated Relay-proxied dashboard displayed the synthetic
+memory count, content and confirmation button. No live import was submitted;
+synthetic form content was cleared. Actual private-file database import remains
+user-operated, not claimed as tested. No migration, new branch or dependency.
+Release evidence is recorded in a local documentation commit after deployment;
+no extra service restart solely to publish this closing record. Rollback code is
+`f198760` (or revert the two fix commits), with no database rollback required.
 
 ## Dou Dizhu execution (TEST deployment, 2026-09-07)
 
