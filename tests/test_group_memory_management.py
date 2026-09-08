@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -153,6 +154,40 @@ def test_admin_can_create_typed_scoped_memory(admin_client):
     create_fn.assert_awaited_once_with(write, importance=8)
 
 
+@pytest.mark.parametrize("endpoint", ["/import/memories", "/import/text"])
+def test_import_uses_selected_relationship_and_perspective(admin_client, endpoint):
+    import main
+    classification = {"scope": "weiwei-laoke", "perspective": "laoke",
+                      "memory_type": "inference", "confidential": True}
+    payload = {"classification": classification, "memories": [{"content": "synthetic", "importance": 7}],
+               "lines": ["synthetic"], "skip_scoring": True}
+    persist = AsyncMock(return_value=[71])
+    with patch.object(main, "MEMORY_ENABLED", True), patch.object(main, "import_typed_memories", persist, create=True), patch.object(main, "get_pool", AsyncMock(side_effect=AssertionError("legacy writer used"))):
+        response = admin_client.post(endpoint, json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"status": "done", "processed": 1, "ids": [71]}
+    write, importance = persist.await_args.args[0][0]
+    assert (write.scope.value, write.perspective.value, write.memory_type.value, write.confidential) == ("weiwei-laoke", "laoke", "inference", True)
+    assert importance == (7 if endpoint.endswith("memories") else 5)
+    assert write.source_kind.value == "user_attested_memory"
+
+
+def test_json_import_preserves_each_rows_classification_and_validates_whole_batch(admin_client):
+    import main
+    one = {"content": "same words", "scope": "weiwei-jiao", "perspective": "jiao", "memory_type": "fact", "confidential": True}
+    two = {**one, "scope": "weiwei-laoke", "perspective": "laoke"}
+    persist = AsyncMock(return_value=[11, 12])
+    with patch.object(main, "MEMORY_ENABLED", True), patch.object(main, "import_typed_memories", persist, create=True), patch.object(main, "get_pool", AsyncMock(side_effect=AssertionError("legacy writer used"))):
+        response = admin_client.post("/import/memories", json={"memories": [one, two]})
+        assert response.status_code == 200 and response.json()["processed"] == 2
+        assert [w.scope.value for w, _ in persist.await_args.args[0]] == ["weiwei-jiao", "weiwei-laoke"]
+        persist.reset_mock()
+        for bad in ({"content": "unclassified"}, {**two, "scope": "legacy_unscoped"}, {**two, "scope": "group"}, {**two, "perspective": "unknown"}):
+            result = admin_client.post("/import/memories", json={"memories": [one, bad]})
+            assert result.status_code == 422
+        persist.assert_not_awaited()
+
+
 def test_admin_typed_memory_rejects_legacy_unscoped_and_group_confidential(admin_client):
     import main
 
@@ -226,3 +261,46 @@ def test_dashboard_delete_uses_the_existing_in_page_modal_pattern():
     assert "deleteArmed" not in script
     assert "confirm('确定删除 #" not in script
     assert "confirm('确定删除选中的" not in script
+
+
+def test_invalid_text_import_never_scores_or_writes(admin_client):
+    import main
+    with patch.object(main, "MEMORY_ENABLED", True), patch.object(main, "score_memories", AsyncMock()) as score, patch.object(main, "import_typed_memories", AsyncMock()) as persist:
+        response = admin_client.post("/import/text", json={"lines": ["synthetic"], "skip_scoring": False})
+        assert response.status_code == 422
+        score.assert_not_awaited()
+        persist.assert_not_awaited()
+
+
+def test_import_batch_transaction_rolls_back_on_later_failure():
+    from unittest.mock import MagicMock
+    import database
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    transaction = conn.transaction.return_value
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__.return_value = conn
+    first, second = object(), object()
+    persist = AsyncMock(side_effect=[71, RuntimeError("synthetic failure")])
+    with patch.object(database, "get_pool", AsyncMock(return_value=pool)), patch.object(database, "_persist_or_merge_group_memory", persist):
+        with pytest.raises(RuntimeError, match="synthetic failure"):
+            asyncio.run(database.import_typed_memories([(first, 7), (second, 5)]))
+    assert persist.await_args_list[0].args == (conn, first)
+    assert persist.await_args_list[1].args == (conn, second)
+    transaction.__aenter__.assert_awaited_once()
+    assert transaction.__aexit__.await_args.args[0] is RuntimeError
+    conn.execute.assert_awaited_once_with("UPDATE memories SET importance=$1,updated_at=NOW() WHERE id=$2", 7, 71)
+
+
+def test_export_keeps_classification_fields():
+    from unittest.mock import MagicMock
+    import database
+    row = {"content": "synthetic", "scope": "weiwei-jiao", "perspective": "jiao", "memory_type": "fact", "confidential": True}
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[row])
+    pool = MagicMock()
+    pool.acquire.return_value.__aenter__.return_value = conn
+    with patch.object(database, "get_pool", AsyncMock(return_value=pool)):
+        assert asyncio.run(database.get_all_memories()) == [row]
+    columns = conn.fetch.await_args.args[0].split("FROM")[0]
+    assert all(key in columns for key in row)

@@ -67,6 +67,8 @@ def test_json_preview_keeps_confirmation_and_imports_only_after_click(dashboard,
     payload = {"memories": [{"content": "Synthetic memory <b>literal text</b>", "importance": 5}]}
     page.locator('[data-section="import"]').click()
     page.locator('[data-tab="json"]').click()
+    page.select_option("#importScope", "weiwei-laoke")
+    page.select_option("#importPerspective", "laoke")
     if source == "file":
         page.locator("#jsonFile").set_input_files({
             "name": "synthetic-memories.json", "mimeType": "application/json",
@@ -82,7 +84,50 @@ def test_json_preview_keeps_confirmation_and_imports_only_after_click(dashboard,
     assert writes == []
     confirm.click()
     page.wait_for_function("document.querySelector('#import-result').textContent.includes('导入完成')")
+    assert writes == [("/import/memories", {**payload, "classification": {
+        "scope": "weiwei-laoke", "perspective": "laoke", "memory_type": "fact", "confidential": False}})]
+
+
+def test_json_import_requires_classification_and_invalidates_changed_preview(dashboard):
+    page, _, writes = dashboard
+    page.locator('[data-section="import"]').click()
+    page.locator('[data-tab="json"]').click()
+    page.locator("#jsonInput").fill('{"memories":[{"content":"synthetic","importance":5}]}')
+    page.get_by_role("button", name="预览内容").click()
+    assert page.get_by_role("button", name="确认导入", exact=True).count() == 0
+    page.select_option("#importScope", "weiwei-jiao")
+    page.select_option("#importPerspective", "jiao")
+    page.get_by_role("button", name="预览内容").click()
+    assert "薇薇—椒椒" in page.locator("#jsonPreview").inner_text()
+    assert "椒椒视角" in page.locator("#jsonPreview").inner_text()
+    page.select_option("#importPerspective", "weiwei")
+    assert page.get_by_role("button", name="确认导入", exact=True).count() == 0
+    assert writes == []
+
+
+def test_json_keeps_file_metadata_and_text_import_sends_selected_metadata(dashboard):
+    page, _, writes = dashboard
+    page.locator('[data-section="import"]').click()
+    page.locator('[data-tab="json"]').click()
+    page.locator("#jsonKeepClassification").check()
+    payload = {"memories": [{"content": "synthetic", "scope": "weiwei-laoke", "perspective": "laoke",
+                             "memory_type": "inference", "confidential": True}]}
+    page.locator("#jsonInput").fill(json.dumps(payload))
+    page.get_by_role("button", name="预览内容").click()
+    assert "薇薇—老克" in page.locator("#jsonPreview").inner_text()
+    assert "老克视角" in page.locator("#jsonPreview").inner_text()
+    page.get_by_role("button", name="确认导入", exact=True).click()
+    page.wait_for_function("document.querySelector('#import-result').textContent.includes('导入完成')")
     assert writes == [("/import/memories", payload)]
+    page.locator('[data-tab="text"]').click()
+    page.select_option("#importScope", "weiwei-jiao")
+    page.select_option("#importPerspective", "weiwei")
+    page.locator("#txtInput").fill("synthetic text")
+    page.locator("#skipScore").check()
+    page.get_by_role("button", name="开始导入", exact=True).click()
+    page.wait_for_function("document.querySelector('#import-result').textContent.includes('导入完成')")
+    assert writes[-1] == ("/import/text", {"lines": ["synthetic text"], "skip_scoring": True,
+        "classification": {"scope": "weiwei-jiao", "perspective": "weiwei", "memory_type": "fact", "confidential": False}})
 
 
 def test_binding_form_displays_actual_default_and_saves_once(dashboard):

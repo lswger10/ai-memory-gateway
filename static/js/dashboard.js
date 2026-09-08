@@ -447,7 +447,7 @@ function initTabs() {
             });
             
             // 清除消息
-            clearImportResult();
+            updateImportClassification();
         });
     });
 }
@@ -936,7 +936,7 @@ function showManageMsg(type, text) {
             ? MEMORY_MANAGEMENT_MESSAGES.memory_replacement_invalid : text);
     }
     const container = document.getElementById('manage-msg');
-    container.innerHTML = '<div class="msg msg-' + type + '">' + text + '</div>';
+    container.innerHTML = '<div class="msg msg-' + type + '">' + escapeHtml(text) + '</div>';
     setTimeout(() => {
         container.innerHTML = '';
     }, 4000);
@@ -1172,7 +1172,40 @@ async function cleanupOldFragments() {
 // ============================================
 // 导入功能
 // ============================================
+function updateImportClassification() {
+    document.getElementById('importClassification').disabled =
+        document.getElementById('tab-json').classList.contains('active') &&
+        document.getElementById('jsonKeepClassification').checked;
+    clearImportResult();
+}
+
+function importClassification() {
+    const value = {
+        scope: document.getElementById('importScope').value,
+        perspective: document.getElementById('importPerspective').value,
+        memory_type: document.getElementById('importMemoryType').value,
+        confidential: document.getElementById('importConfidential').checked
+    };
+    classificationLabel(value);
+    return value;
+}
+
+function classificationLabel(value) {
+    const labels = ['importScope', 'importPerspective', 'importMemoryType'].map((id, i) => {
+        const key = ['scope', 'perspective', 'memory_type'][i];
+        const option = Array.from(document.getElementById(id).options).find(o => o.value && o.value === value[key]);
+        if (!option) throw new Error('请为每条记忆指定有效的关系、视角和类型');
+        return option.textContent;
+    });
+    if (typeof value.confidential !== 'boolean') throw new Error('请指定私密状态');
+    if (value.scope === 'group' && value.confidential) throw new Error('小家共享不能标为私密');
+    return labels.join(' · ') + (value.confidential ? ' · 私密' : ' · 非私密');
+}
+
 async function doTextImport() {
+    let classification;
+    try { classification = importClassification(); }
+    catch (e) { showImportResult('error', e.message); return; }
     const file = document.getElementById('txtFile').files[0];
     const text = document.getElementById('txtInput').value.trim();
     const skip = document.getElementById('skipScore').checked;
@@ -1201,13 +1234,13 @@ async function doTextImport() {
         const resp = await fetch('/import/text', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({lines: lines, skip_scoring: skip})
+            body: JSON.stringify({lines: lines, skip_scoring: skip, classification})
         });
         const data = await resp.json();
-        if (data.error) {
-            showImportResult('error', '❌ ' + data.error);
+        if (!resp.ok || data.error) {
+            showImportResult('error', '❌ ' + (data.detail || data.error || '导入请求失败'));
         } else {
-            showImportResult('success', '✅ 导入完成！新增 ' + data.imported + ' 条，跳过 ' + data.skipped + ' 条（已存在），总计 ' + data.total + ' 条');
+            showImportResult('success', '✅ 导入完成！处理 ' + data.processed + ' 条（相同归属下的重复记忆会合并）');
             // 刷新记忆列表
             loadMemories();
         }
@@ -1217,6 +1250,7 @@ async function doTextImport() {
 }
 
 async function previewJson() {
+    clearImportResult();
     const file = document.getElementById('jsonFile').files[0];
     const text = document.getElementById('jsonInput').value.trim();
     const preview = document.getElementById('jsonPreview');
@@ -1234,17 +1268,21 @@ async function previewJson() {
     try {
         const parsed = JSON.parse(jsonStr);
         const mems = parsed.memories || [];
-        if (mems.length === 0) {
+        if (!Array.isArray(mems) || mems.length === 0 || mems.length > 10000) {
             showImportResult('error', '❌ 没有找到 memories 字段，请确认这是从导出功能导出的文件');
             preview.innerHTML = '';
             return;
         }
         
         clearImportResult();
-        pendingJsonData = parsed;
+        const keep = document.getElementById('jsonKeepClassification').checked;
+        const classification = keep ? null : importClassification();
+        const labels = mems.map(m => classificationLabel(classification || m));
+        pendingJsonData = keep ? {memories: mems} : {...parsed, classification};
         let html = '<p><b>预览：共 ' + mems.length + ' 条记忆</b></p>';
         const show = mems.slice(0, 10);
-        show.forEach(m => {
+        show.forEach((m, index) => {
+            html += '<div class="preview-classification">' + escapeHtml(labels[index]) + '</div>';
             html += '<div class="preview-item">权重 ' + escapeHtml(String(m.importance || '?')) + ' | ' + escapeHtml((m.content || '').substring(0, 80)) + '</div>';
         });
         if (mems.length > 10) {
@@ -1273,10 +1311,10 @@ async function confirmJsonImport() {
             body: JSON.stringify(pendingJsonData)
         });
         const data = await resp.json();
-        if (data.error) {
-            showImportResult('error', '❌ ' + data.error);
+        if (!resp.ok || data.error) {
+            showImportResult('error', '❌ ' + (data.detail || data.error || '导入请求失败'));
         } else {
-            showImportResult('success', '✅ 导入完成！新增 ' + data.imported + ' 条，跳过 ' + data.skipped + ' 条（已存在），总计 ' + data.total + ' 条');
+            showImportResult('success', '✅ 导入完成！处理 ' + data.processed + ' 条（相同归属下的重复记忆会合并）');
             loadMemories();
         }
         document.getElementById('jsonPreview').innerHTML = '';
@@ -1288,10 +1326,11 @@ async function confirmJsonImport() {
 
 function showImportResult(type, text) {
     const container = document.getElementById('import-result');
-    container.innerHTML = '<div class="msg msg-' + type + '">' + text + '</div>';
+    container.innerHTML = '<div class="msg msg-' + type + '">' + escapeHtml(text) + '</div>';
 }
 
 function clearImportResult() {
+    pendingJsonData = null;
     document.getElementById('import-result').innerHTML = '';
     document.getElementById('jsonPreview').innerHTML = '';
 }

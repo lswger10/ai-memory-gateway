@@ -1,5 +1,31 @@
 # AI Memory Gateway
 
+## Relationship-aware memory import (2026-09-07)
+
+JSON and text import now require explicit relationship, narrative perspective,
+memory type and confidentiality. The dashboard offers batch assignment, or for
+JSON only, preservation of each row's complete classification. No relationship or
+perspective is guessed. Preview displays the effective classification; changing
+its inputs invalidates confirmation. Old unclassified backups require assignment;
+already stored legacy rows are not automatically changed.
+
+Both import endpoints reuse typed-memory validation and the canonical scoped
+deduplication writer in one transaction. The whole batch is validated before
+writing (and before optional text scoring). Identical words in different scopes
+remain distinct. Existing retrieval/confidentiality policy is unchanged; perspective
+is narrative metadata, not a permission grant. Export now includes all four
+classification fields. Import responses report processed rows, including merges.
+The script URL is versioned `3.13-scoped-import` to refresh cached dashboards.
+
+Validation: 15 dashboard browser tests and 52 management, scoped candidate,
+retrieval ACL and policy tests pass with synthetic data. Transaction exception
+propagation is checked with a mock connection; actual PostgreSQL rollback and
+private-file import are not claimed as verified. No live memory writes, paid
+model calls, schema changes, new dependencies or branches. Local implementation
+is ready for TEST deployment; release and online preview evidence follows below.
+Rollback: revert this release; existing stored classification remains intact.
+
+
 ## JSON import preview repair (2026-09-07)
 
 The dashboard previously rendered the JSON preview and confirmation button, then

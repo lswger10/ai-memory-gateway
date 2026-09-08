@@ -27,7 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 from memory_policy import memory_replacement_boundary
 from database import RelayDerivedConversationError
-from database import init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, create_typed_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, replace_memory_batch, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
+from database import import_typed_memories, init_tables, close_pool, save_message, search_legacy_memories as search_memories, save_memory, create_typed_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, delete_single_message, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, replace_memory_batch, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, ensure_memory_extraction_cursor, get_memory_extraction_messages, save_memory_extraction_cursor, list_cold_archive_for_management, append_cold_archive_annotation
 import database as _db_module  # 用于 memory settings 热更新 database.py 全局变量
 from group_contracts import (
     CONTRACT_VERSION,
@@ -1525,12 +1525,7 @@ async def dashboard_page(request: Request):
 # 管理 API
 # ============================================================
 
-@app.post("/api/memories")
-async def api_create_memory(request: Request):
-    """Create one user-attested typed memory from the management page."""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    data = await request.json()
+def _dashboard_memory_write(data, *, source="gateway_dashboard"):
     expected = {
         "content", "scope", "memory_type", "perspective", "confidential", "importance"
     }
@@ -1551,12 +1546,21 @@ async def api_create_memory(request: Request):
             perspective=Perspective(data["perspective"]),
             confidential=data["confidential"],
             source_kind=SourceKind.USER_ATTESTED_MEMORY,
-            provenance={"source": "gateway_dashboard"},
+            provenance={"source": source},
         )
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="invalid typed memory payload") from exc
     if write.scope is MemoryScope.GROUP and write.confidential:
         raise HTTPException(status_code=422, detail="group memory cannot be confidential")
+    return write, importance
+
+
+@app.post("/api/memories")
+async def api_create_memory(request: Request):
+    """Create one user-attested typed memory from the management page."""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    write, importance = _dashboard_memory_write(await request.json())
     memory_id = await create_typed_memory(write, importance=importance)
     return {"status": "ok", "id": memory_id}
 
@@ -2090,108 +2094,61 @@ async def api_layer_statistics():
         return {"error": str(e)}
 
 
+def _classified_import_entries(memories, classification, *, source):
+    if not isinstance(memories, list) or not 1 <= len(memories) <= 10000:
+        raise HTTPException(status_code=422, detail="expected 1-10000 memory entries")
+    if classification is not None and (
+        not isinstance(classification, dict)
+        or set(classification) != {"scope", "perspective", "memory_type", "confidential"}
+    ):
+        raise HTTPException(status_code=422, detail="invalid import classification")
+    entries = []
+    for index, mem in enumerate(memories, 1):
+        if not isinstance(mem, dict):
+            raise HTTPException(status_code=422, detail=f"memory {index}: expected an object")
+        metadata = classification if classification is not None else mem
+        try:
+            entries.append(_dashboard_memory_write({
+                "content": mem.get("content"), "importance": mem.get("importance", 5),
+                **{key: metadata.get(key) for key in ("scope", "perspective", "memory_type", "confidential")},
+            }, source=source))
+        except HTTPException as exc:
+            raise HTTPException(status_code=422, detail=f"memory {index}: {exc.detail}") from exc
+    return entries
+
+
 @app.post("/import/text")
 async def import_text_memories(request: Request):
-    """从纯文本导入记忆（每行一条），可选自动评分"""
+    """Import text into the explicitly selected typed relationship."""
     if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用（设置 MEMORY_ENABLED=true 开启）"}
-    
-    try:
-        data = await request.json()
-        lines = data.get("lines", [])
-        skip_scoring = data.get("skip_scoring", False)
-        
-        if not lines:
-            return {"error": "没有找到记忆条目"}
-        
-        if skip_scoring:
-            scored = [{"content": t, "importance": 5} for t in lines]
-        else:
-            scored = await score_memories(lines)
-        
-        imported = 0
-        skipped = 0
-        
-        for mem in scored:
-            content = mem.get("content", "")
-            if not content:
-                continue
-            
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                existing = await conn.fetchval(
-                    "SELECT COUNT(*) FROM memories WHERE content = $1", content
-                )
-            
-            if existing > 0:
-                skipped += 1
-                continue
-            
-            await save_memory(
-                content=content,
-                importance=mem.get("importance", 5),
-                source_session="text-import",
-            )
-            imported += 1
-        
-        total = await get_all_memories_count()
-        return {
-            "status": "done",
-            "imported": imported,
-            "skipped": skipped,
-            "total": total,
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        return {"error": "记忆系统未启用"}
+    data = await request.json()
+    if not isinstance(data, dict) or not isinstance(data.get("lines"), list):
+        raise HTTPException(status_code=422, detail="invalid text import")
+    classification = data.get("classification")
+    memories = [{"content": line, "importance": 5} for line in data["lines"]]
+    entries = _classified_import_entries(memories, classification, source="text-import")
+    skip_scoring = data.get("skip_scoring", False)
+    if not isinstance(skip_scoring, bool):
+        raise HTTPException(status_code=422, detail="invalid skip_scoring flag")
+    if not skip_scoring:
+        scored = await score_memories(data["lines"])
+        entries = _classified_import_entries(scored, classification, source="text-import")
+    ids = await import_typed_memories(entries)
+    return {"status": "done", "processed": len(entries), "ids": ids}
 
 
 @app.post("/import/memories")
 async def import_memories(request: Request):
-    """从 JSON 导入记忆（用于迁移或恢复备份）"""
+    """Import classified JSON; never guess a missing relationship or perspective."""
     if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用（设置 MEMORY_ENABLED=true 开启）"}
-    
-    try:
-        data = await request.json()
-        memories = data.get("memories", [])
-        
-        if not memories:
-            return {"error": "没有找到记忆数据，请确认 JSON 格式正确"}
-        
-        imported = 0
-        skipped = 0
-        
-        for mem in memories:
-            content = mem.get("content", "")
-            if not content:
-                continue
-            
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                existing = await conn.fetchval(
-                    "SELECT COUNT(*) FROM memories WHERE content = $1", content
-                )
-            
-            if existing > 0:
-                skipped += 1
-                continue
-            
-            await save_memory(
-                content=content,
-                importance=mem.get("importance", 5),
-                source_session=mem.get("source_session", "json-import"),
-            )
-            imported += 1
-        
-        total = await get_all_memories_count()
-        return {
-            "status": "done",
-            "imported": imported,
-            "skipped": skipped,
-            "total": total,
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        return {"error": "记忆系统未启用"}
+    data = await request.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=422, detail="invalid JSON import")
+    entries = _classified_import_entries(data.get("memories"), data.get("classification"), source="json-import")
+    ids = await import_typed_memories(entries)
+    return {"status": "done", "processed": len(entries), "ids": ids}
 
 
 # ============================================================

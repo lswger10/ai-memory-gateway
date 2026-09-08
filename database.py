@@ -1248,6 +1248,22 @@ async def create_typed_memory(write, *, importance: int = 5) -> int:
     return memory_id
 
 
+async def import_typed_memories(entries) -> list[int]:
+    """One transaction for a validated batch, using the existing scoped dedupe owner."""
+    pool = await get_pool()
+    ids = []
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for write, importance in entries:
+                memory_id = await _persist_or_merge_group_memory(conn, write)
+                await conn.execute(
+                    "UPDATE memories SET importance=$1,updated_at=NOW() WHERE id=$2",
+                    importance, memory_id,
+                )
+                ids.append(memory_id)
+    return ids
+
+
 async def persist_group_memory_candidate(
     *,
     identity: tuple[str, str, int],
@@ -1998,7 +2014,8 @@ async def get_all_memories():
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT content, importance, source_session, created_at FROM memories ORDER BY id"
+            "SELECT content, importance, source_session, created_at, scope, perspective, "
+            "memory_type, confidential FROM memories ORDER BY id"
         )
         return [dict(r) for r in rows]
 

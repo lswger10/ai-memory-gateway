@@ -278,6 +278,37 @@
                 </div>
 
                 <div class="card">
+                    <fieldset id="importClassification" onchange="clearImportResult()">
+                        <legend>统一指定本次全部记忆的归属</legend>
+                        <div class="form-group">
+                            <label for="importScope">对哪段关系起作用</label>
+                            <select id="importScope" class="select-input" required>
+                                <option value="">请选择关系</option>
+                                <option value="weiwei-jiao">薇薇—椒椒</option>
+                                <option value="weiwei-laoke">薇薇—老克</option>
+                                <option value="jiao-laoke">椒椒—老克</option>
+                                <option value="group">小家共享</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="importPerspective">从谁的视角记述</label>
+                            <select id="importPerspective" class="select-input" required>
+                                <option value="">请选择视角</option>
+                                <option value="weiwei">薇薇视角</option>
+                                <option value="jiao">椒椒视角</option>
+                                <option value="laoke">老克视角</option>
+                                <option value="shared">共同事实</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="importMemoryType">记忆类型</label>
+                            <select id="importMemoryType" class="select-input">
+                                <option value="fact">事实</option><option value="inference">推断</option>
+                            </select>
+                            <label class="checkbox-label"><input id="importConfidential" type="checkbox">私密记忆</label>
+                        </div>
+                        <p>关系决定记忆的使用范围；视角表示谁在记述，不会改变可见权限。私密记忆不进入群聊，小家共享不能标为私密。包含不同关系的旧文件请分批导入。</p>
+                    </fieldset>
                     <div class="tabs">
                         <button class="tab active" data-tab="text">纯文本导入</button>
                         <button class="tab" data-tab="json">JSON 备份恢复</button>
@@ -304,13 +335,15 @@
 
                     <!-- JSON 导入 -->
                     <div id="tab-json" class="tab-panel">
+                        <label class="checkbox-label"><input id="jsonKeepClassification" type="checkbox" onchange="updateImportClassification()">保留 JSON 每条记忆已有的关系、视角、类型和私密状态</label>
+                        <p>仅适用于包含完整归属的备份；缺少归属时请取消勾选并在上方指定。</p>
                         <div class="form-group">
                             <label for="jsonFile" class="form-label">上传从导出功能保存的 .json 文件</label>
-                            <input type="file" id="jsonFile" accept=".json" class="file-input">
+                            <input type="file" id="jsonFile" onchange="clearImportResult()" accept=".json" class="file-input">
                         </div>
                         <div class="divider"><span>或者直接粘贴</span></div>
                         <div class="form-group">
-                            <textarea id="jsonInput" class="textarea" rows="8" placeholder="粘贴导出的 JSON"></textarea>
+                            <textarea id="jsonInput" oninput="clearImportResult()" class="textarea" rows="8" placeholder="粘贴导出的 JSON"></textarea>
                         </div>
                         <button class="btn btn-secondary" onclick="previewJson()">预览内容</button>
                         <div id="jsonPreview" class="preview-box"></div>
@@ -613,6 +646,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.12-json-import-preview"></script>
+    <script src="/static/js/dashboard.js?v=3.13-scoped-import"></script>
 </body>
 </html>
