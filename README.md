@@ -21,8 +21,15 @@ Validation: 15 dashboard browser tests and 52 management, scoped candidate,
 retrieval ACL and policy tests pass with synthetic data. Transaction exception
 propagation is checked with a mock connection; actual PostgreSQL rollback and
 private-file import are not claimed as verified. No live memory writes, paid
-model calls, schema changes, new dependencies or branches. Local implementation
-is ready for TEST deployment; release and online preview evidence follows below.
+model calls, schema changes, new dependencies or branches. Published code `a0a8926` on
+`feat/group-model-execution-cache`; TEST deployment
+`6a9f8fd67b89d6943549e923` succeeded and runs 1/1. Online static readback
+exactly matches the local script. Authenticated local Edge showed the new blank
+relationship/perspective selectors, then a synthetic JSON preview assigned to
+weiwei-laoke / laoke / fact / non-confidential. Changing perspective removed
+confirmation. No confirmation was submitted; synthetic input and selections were
+cleared by reload. The temporary deployment tab was closed. This closing evidence
+is a local docs-only commit, avoiding a deployment solely for its publication.
 Rollback: revert this release; existing stored classification remains intact.
 
 
