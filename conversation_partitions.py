@@ -195,7 +195,8 @@ class ConversationFact:
             "burst_id": self.burst_id,
             "actor_id": self.actor_id,
             "role": self.role,
-            "event_type": self.event_type,
+            "event_type": ("agent_final" if self.role == "agent" else "human_message")
+                if self.source_kind == "bedroom_turn" else self.event_type,
             "content": self.content,
             "reply_to_event_id": self.reply_to_event_id,
             "mentions": list(self.mentions),
@@ -253,6 +254,30 @@ class InMemoryConversationPartitionStore:
     async def latest_event_id(self, partition_id: str) -> int:
         facts = await self.list_facts(partition_id)
         return facts[-1].source_event_id if facts else 0
+
+    async def search_public_group_facts(
+        self, *, keywords: tuple[str, ...], before_event_id: int, include_recent: bool = False,
+    ) -> tuple[dict[str, Any], ...]:
+        if not keywords and not include_recent:
+            return ()
+        async with self._lock:
+            candidates = [fact for fact in self._facts.values()
+                if fact.room_id == "room_group_home" and fact.source_kind == "relay_event"
+                and fact.bedroom_session_id is None and fact.partition_id == fact.conversation_id
+                and fact.source_event_id < before_event_id
+                and ((fact.role == "human" and fact.actor_id == "weiwei" and fact.event_type == "human_message")
+                     or (fact.role == "agent" and fact.actor_id in {"jiao", "laoke"} and fact.event_type == "agent_final"))]
+        scored = [(sum(word.lower() in fact.content.lower() for word in keywords), fact) for fact in candidates]
+        ranked = sorted(((score, fact) for score, fact in scored if score or include_recent),
+                        key=lambda item: (item[0], item[1].source_event_id), reverse=True)[:4]
+        excerpts = []
+        for _, fact in ranked:
+            positions = [fact.content.lower().find(word.lower()) for word in keywords]
+            start = max(0, min((pos for pos in positions if pos >= 0), default=0) - 160)
+            excerpts.append({"room_id": fact.room_id, "conversation_id": fact.conversation_id,
+                "event_id": fact.source_event_id, "actor_id": fact.actor_id, "created_at": fact.created_at,
+                "content": fact.content[start:start + 600], "truncated": start > 0 or len(fact.content) > 600})
+        return tuple(excerpts)
 
     async def count_facts(self, partition_id: str) -> int:
         return len(await self.list_facts(partition_id))
@@ -431,6 +456,36 @@ class PostgresConversationPartitionStore:
                 partition_id,
             )
         return int(value or 0)
+
+    async def search_public_group_facts(
+        self, *, keywords: tuple[str, ...], before_event_id: int, include_recent: bool = False,
+    ) -> tuple[dict[str, Any], ...]:
+        if not keywords and not include_recent:
+            return ()
+        pool = await self._pool()
+        async with pool.acquire() as conn:
+            # ponytail: keyword scan of public rows; add an index only if measured latency warrants it.
+            rows = await conn.fetch("""
+                SELECT room_id, canonical_conversation_id AS conversation_id,
+                       source_event_id AS event_id, actor_id, created_at,
+                       SUBSTRING(content FROM GREATEST(1, COALESCE(matches.first_hit, 1) - 160) FOR 600) AS content,
+                       (COALESCE(matches.first_hit, 1) > 161 OR CHAR_LENGTH(content) > 600) AS truncated
+                FROM conversations
+                CROSS JOIN LATERAL (
+                    SELECT COUNT(*) AS hits, MIN(strpos(lower(content), lower(word))) AS first_hit
+                    FROM unnest($1::text[]) AS word
+                    WHERE strpos(lower(content), lower(word)) > 0
+                ) AS matches
+                WHERE room_id = 'room_group_home' AND source_kind = 'relay_event'
+                  AND fact_identity IS NOT NULL AND bedroom_session_id IS NULL
+                  AND session_id = canonical_conversation_id AND source_event_id < $2
+                  AND ((event_role = 'human' AND actor_id = 'weiwei' AND event_type = 'human_message')
+                    OR (event_role = 'agent' AND actor_id IN ('jiao', 'laoke') AND event_type = 'agent_final'))
+                  AND (matches.hits > 0 OR $3::boolean)
+                ORDER BY matches.hits DESC, source_event_id DESC
+                LIMIT 4
+                """, list(keywords), before_event_id, include_recent)
+        return tuple({**dict(row), "created_at": _timestamp_text(row["created_at"])} for row in rows)
 
     async def count_facts(self, partition_id: str) -> int:
         return len(await self.list_facts(partition_id))

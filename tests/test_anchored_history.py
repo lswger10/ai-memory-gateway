@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from anchored_history import (
@@ -124,11 +126,17 @@ async def test_compactor_overwrites_bounded_summary_advances_cursor_and_keeps_ta
         summary_token_limit=16,
     )
 
+    async def summarize(prior_summary, compressed_events):
+        assert prior_summary == ""
+        assert [event["event_id"] for event in compressed_events] == [1, 2, 3, 4]
+        return "fact-4 and the earlier agreement"
+
     updated, stable_tail = await compactor.maybe_compact(
         store=store,
         cache_namespace="namespace-1",
         state=state,
         events=events,
+        summarize=summarize,
     )
 
     assert updated.compressed_up_to_event_id == 4
@@ -157,3 +165,86 @@ async def test_compactor_does_not_move_cursor_during_normal_append():
 
     assert unchanged == state
     assert tail[0]["event_id"] == 1
+
+
+@pytest.mark.anyio
+async def test_no_summarizer_never_substitutes_lossy_tail_for_history():
+    store = InMemoryAnchoredHistoryStore()
+    state = await store.get_or_create("namespace-1")
+    events = tuple({"event_id": i, "actor_id": "weiwei", "content": str(i)} for i in range(1, 9))
+    compactor = AnchoredHistoryCompactor(compact_after_events=4, retain_raw_events=2)
+    after, tail = await compactor.maybe_compact(store=store, cache_namespace="namespace-1", state=state, events=events)
+    assert after == state
+    assert tail == events
+
+
+@pytest.mark.anyio
+async def test_summary_cut_preserves_complete_human_and_multi_actor_turn():
+    store = InMemoryAnchoredHistoryStore()
+    state = await store.get_or_create("namespace-1")
+    events = tuple({"event_id": i, "actor_id": actor, "content": str(i)} for i, actor in enumerate(
+        ["weiwei", "jiao", "laoke", "weiwei", "jiao", "laoke", "weiwei"], 1))
+    seen = []
+
+    async def summarize(prior_summary, compressed_events):
+        seen.extend(compressed_events)
+        return "A full earlier exchange, including both actors."
+
+    compactor = AnchoredHistoryCompactor(compact_after_events=5, retain_raw_events=2)
+    updated, tail = await compactor.maybe_compact(store=store, cache_namespace="namespace-1", state=state,
+        events=events, summarize=summarize)
+    assert [event["event_id"] for event in seen] == [1, 2, 3]
+    assert [event["event_id"] for event in tail] == [4, 5, 6, 7]
+    assert updated.compressed_up_to_event_id == 3
+
+
+@pytest.mark.anyio
+async def test_summary_failure_or_oversize_keeps_previous_summary_and_cursor():
+    store = InMemoryAnchoredHistoryStore()
+    state = await store.get_or_create("namespace-1")
+    state = await store.apply_compression("namespace-1", expected_revision=1,
+        replacement_summary="An important older correction", summary_token_count=10, compressed_up_to_event_id=1)
+    events = tuple({"event_id": i, "actor_id": "weiwei", "content": str(i)} for i in range(2, 9))
+    compactor = AnchoredHistoryCompactor(compact_after_events=4, retain_raw_events=2)
+
+    async def oversized(prior_summary, compressed_events):
+        assert prior_summary == "An important older correction"
+        return "x" * 5000
+
+    with pytest.raises(AnchoredHistoryError):
+        await compactor.maybe_compact(store=store, cache_namespace="namespace-1", state=state,
+            events=events, summarize=oversized)
+    assert await store.get_or_create("namespace-1") == state
+
+
+@pytest.mark.anyio
+async def test_concurrent_rooms_wait_and_stale_state_never_pays_twice():
+    store = InMemoryAnchoredHistoryStore()
+    first = await store.get_or_create("first")
+    second = await store.get_or_create("second")
+    events = tuple({"event_id": i, "actor_id": "weiwei", "content": str(i)} for i in range(1, 9))
+    compactor = AnchoredHistoryCompactor(compact_after_events=4, retain_raw_events=2)
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def summarize(prior_summary, compressed_events):
+        calls.append(compressed_events)
+        started.set()
+        await release.wait()
+        return "An accepted complete exchange."
+
+    async def compact(namespace, state):
+        return await compactor.maybe_compact(store=store, cache_namespace=namespace,
+            state=state, events=events, summarize=summarize)
+
+    first_task = asyncio.create_task(compact("first", first))
+    await started.wait()
+    second_task = asyncio.create_task(compact("second", second))
+    stale_task = asyncio.create_task(compact("first", first))
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(first_task, second_task, stale_task, return_exceptions=True)
+    assert not isinstance(results[0], BaseException)
+    assert not isinstance(results[1], BaseException)
+    assert isinstance(results[2], AnchoredHistoryError)
+    assert len(calls) == 2

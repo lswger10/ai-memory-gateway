@@ -2,11 +2,55 @@ import json
 
 import pytest
 
+from dataclasses import replace
+
 from actor_memory_tools import ACTOR_MEMORY_TOOL_NAMES, ActorMemoryExecutionContext, ActorMemoryToolLibrary, InMemoryActorMemoryToolStore
 from gateway_provider_runner import GatewayProviderRunner
 from model_execution import ContextBundle, ProviderRunUnavailable
 from model_execution_contracts import GatewayExecutionRequest
 from model_profiles import ModelProfile
+
+
+@pytest.mark.parametrize("protocol", ["anthropic_messages_compatible", "openai_chat_completions", "openai_responses"])
+@pytest.mark.parametrize("actor_id", ["jiao", "laoke"])
+def test_factual_history_uses_current_actor_assistant_role_only(protocol, actor_id):
+    payload = profile().to_dict()
+    if protocol.startswith("openai"):
+        payload.update(protocol=protocol, cache_strategy="openai_stable_prefix_v1", requested_cache_ttl=None)
+        payload["capabilities"].update(cache_strategies=["openai_stable_prefix_v1"], cache_ttls=[])
+    selected = ModelProfile.from_dict(payload)
+    events = [
+        {"event_id": 1, "actor_id": "weiwei", "role": "human", "event_type": "human_message", "content": "先别总结，继续刚才的约定。"},
+        {"event_id": 2, "actor_id": "jiao", "role": "agent", "event_type": "agent_final", "content": "椒椒的原话"},
+        {"event_id": 3, "actor_id": "laoke", "role": "agent", "event_type": "agent_final", "content": "老克的原话"},
+        {"event_id": 4, "actor_id": actor_id, "role": "agent", "event_type": "agent_reaction", "content": "❤️", "reply_to_event_id": 1},
+    ]
+    context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="an older summary",
+        stable_history=tuple(json.dumps(event, ensure_ascii=False) for event in events),
+        dynamic_tail=("fresh memory and current message",), actor_prompt_version="actor.v1",
+        runtime_kernel_version="kernel.v1", room_policy_version="room.v1", tool_schema_hash="tools.none.v1")
+    runner = GatewayProviderRunner()
+    body = runner._render(selected, replace(request(), actor_id=actor_id), context, "namespace").json_body
+    messages = body["input"] if protocol == "openai_responses" else body["messages"]
+    if protocol == "openai_chat_completions":
+        messages = messages[1:]  # static system
+    assert [item["role"] for item in messages] == [
+        "user", "user", "assistant" if actor_id == "jiao" else "user",
+        "assistant" if actor_id == "laoke" else "user", "user", "user"]
+    own = messages[2 if actor_id == "jiao" else 3]
+    own_text = own["content"] if protocol == "openai_chat_completions" else own["content"][0]["text"]
+    assert "椒椒的原话" in own_text if actor_id == "jiao" else "老克的原话" in own_text
+    other = messages[3 if actor_id == "jiao" else 2]
+    assert ("laoke" if actor_id == "jiao" else "jiao") in str(other["content"])
+    if protocol == "openai_responses":
+        assert own["content"][0]["type"] == "output_text"
+    if protocol == "anthropic_messages_compatible":
+        assert messages[-2]["content"][-1]["cache_control"]["ttl"] == "5m"
+        assert "cache_control" not in messages[-1]["content"][0]
+    changed = runner._render(selected, replace(request(), actor_id=actor_id),
+        replace(context, dynamic_tail=("different retrieval",)), "namespace").json_body
+    key = "input" if protocol == "openai_responses" else "messages"
+    assert body[key][:-1] == changed[key][:-1]
 
 
 def profile():
@@ -90,6 +134,30 @@ class Response:
         lines.extend(["event: message_stop", "data: {}", ""])
         for line in lines:
             yield line
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat"])
+async def test_provider_truncation_is_preserved_for_summary_validation(protocol):
+    class TruncatedResponse:
+        async def aiter_lines(self):
+            frames = ([
+                ("content_block_delta", {"delta": {"type": "text_delta", "text": "partial summary"}}),
+                ("message_delta", {"delta": {"stop_reason": "max_tokens"}}),
+                ("message_stop", {}),
+            ] if protocol == "anthropic" else [
+                ("", {"choices": [{"delta": {"content": "partial summary"}, "finish_reason": "length"}]}),
+            ])
+            for event, data in frames:
+                if event:
+                    yield f"event: {event}"
+                yield f"data: {json.dumps(data)}"
+                yield ""
+
+    parser = getattr(GatewayProviderRunner(), "_" + protocol)
+    chunks = [chunk async for chunk in parser(TruncatedResponse(), profile(), request())]
+    final = next(chunk for chunk in chunks if chunk.event == "final")
+    assert final.data.get("truncated") is True
 
 
 class StreamContext:
@@ -515,7 +583,7 @@ def test_openai_render_keeps_compressed_summary_before_anchored_history():
         openai, request(), context, "cache-openai"
     )
 
-    assert rendered.json_body["messages"][1]["content"] == "bounded compressed summary"
+    assert rendered.json_body["messages"][1]["content"].endswith("bounded compressed summary")
     assert rendered.json_body["messages"][2]["content"] == "anchored fact"
     assert rendered.json_body["messages"][3]["content"] == "current event"
 

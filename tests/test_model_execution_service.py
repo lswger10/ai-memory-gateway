@@ -144,6 +144,38 @@ async def _service(*, fail_profiles=(), fallbacks=()):
 
 
 @pytest.mark.anyio
+async def test_fallback_does_not_authorize_another_paid_compression():
+    service, _, _, _ = await _service(fail_profiles=("primary",), fallbacks=("backup",))
+    compression_permissions = []
+
+    class Builder(_ContextBuilder):
+        async def build(self, request, profile, **kwargs):
+            compression_permissions.append(kwargs.get("allow_compression"))
+            return await super().build(request)
+
+    service._context_builder = Builder()
+    events = [event async for event in service.stream(_request(binding_revision=None))]
+    assert any(event.event == "final" for event in events)
+    assert compression_permissions == [True, False]
+
+
+@pytest.mark.anyio
+async def test_internal_summary_truncation_marker_does_not_change_public_final_shape():
+    service, _, _, _ = await _service()
+
+    class Runner(_Runner):
+        async def run(self, **kwargs):
+            async for chunk in super().run(**kwargs):
+                if chunk.event == "final":
+                    chunk = ProviderChunk("final", {**chunk.data, "truncated": True})
+                yield chunk
+
+    service._provider_runner = Runner()
+    events = [event async for event in service.stream(_request())]
+    assert next(event.data for event in events if event.event == "final") == {"text": "hello"}
+
+
+@pytest.mark.anyio
 async def test_gateway_resolves_profile_without_orchestrator_model_input():
     service, _, runner, _ = await _service()
     events = [event async for event in service.stream(_request())]

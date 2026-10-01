@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 from typing import Any, Mapping
 
 from cache_strategies import AnthropicPromptLayout, PromptSegment
@@ -79,6 +80,24 @@ def _text(segment: PromptSegment) -> str:
     raise ProviderAdapterError(
         f"segment {segment.source_kind} requires provider-neutral text"
     )
+
+
+def render_history_message(text: str, actor_id: str | None) -> dict[str, str]:
+    """Project trusted cognitive facts, never a user's embedded JSON, into roles."""
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError:
+        return {"role": "user", "content": text}
+    if not isinstance(event, dict) or not {"event_id", "actor_id", "event_type", "content"} <= event.keys():
+        return {"role": "user", "content": text}
+    own_final = (actor_id in {"jiao", "laoke"} and event["actor_id"] == actor_id
+                 and event.get("role") == "agent" and event["event_type"] == "agent_final")
+    metadata = {key: event[key] for key in (
+        "event_id", "actor_id", "event_type", "reply_to_event_id", "mentions", "attachments", "message_kind"
+    ) if event.get(key) not in (None, [], "")}
+    return {"role": "assistant" if own_final else "user",
+            "content": "[accepted event " + json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+                       + "]\n" + event["content"]}
 
 
 def _anthropic_media(parts: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
@@ -161,6 +180,7 @@ class AnthropicMessagesAdapter:
         max_output_tokens: int,
         apply_cache_control: bool = True,
         media_parts: tuple[dict[str, Any], ...] = (),
+        history_actor_id: str | None = None,
     ) -> RenderedProviderRequest:
         if profile.protocol not in {"anthropic_messages", "anthropic_messages_compatible"}:
             raise ProviderAdapterError("Profile protocol is not Anthropic Messages")
@@ -176,13 +196,16 @@ class AnthropicMessagesAdapter:
         ]
         messages: list[dict[str, Any]] = []
         for segment in layout.stable_messages:
+            message = (render_history_message(_text(segment), history_actor_id)
+                       if segment.source_kind == "factual_history" else
+                       {"role": "user", "content": f"[{segment.source_kind}]\n{_text(segment)}"})
             messages.append(
                 {
-                    "role": "user",
+                    "role": message["role"],
                     "content": [
                         {
                             "type": "text",
-                            "text": f"[{segment.source_kind}]\n{_text(segment)}",
+                            "text": message["content"],
                         }
                     ],
                 }

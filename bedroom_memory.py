@@ -13,6 +13,7 @@ from group_memory import (
     _COMMON_RUNTIME_KERNEL,
     search_authorized_memories,
     search_authorized_summary_candidates,
+    bounded_context_rows,
 )
 from memory_policy import build_retrieval_policy, room_members
 
@@ -113,7 +114,7 @@ class BedroomContextPackService:
                 ),
             ),
             "actor_prompt_version": profile.prompt_version,
-            "runtime_kernel_version": "group-runtime-kernel.v1",
+            "runtime_kernel_version": "group-runtime-kernel.v2-native-history",
             "room_policy_version": f"{room_id}.bedroom.v1",
             "tool_schema_hash": "tools.none.v1",
         }
@@ -190,8 +191,8 @@ class BedroomContextPackService:
         query = next(
             turn["text"] for turn in facts["turns"] if turn["turn_id"] == request.turn_id
         )
-        memories = await self.search(query, policy, 10)
-        summaries = await self.summary_search(query, policy, 6)
+        memories = await self.search(query, policy, 8)
+        summaries = bounded_context_rows(await self.summary_search(query, policy, 4))
         profile = self.prompt_profiles[request.actor_id]
         stable = self.build_stable_execution_components(request.actor_id, room_id)
         dynamic: list[str] = [
@@ -201,7 +202,7 @@ class BedroomContextPackService:
         if memories.memories:
             dynamic.append(
                 "Authorized relationship and memory context:\n"
-                + "\n".join(f"- {row['content']}" for row in memories.memories)
+                + "\n".join(f"- {row['content']}" for row in bounded_context_rows(memories.memories))
             )
         if summaries:
             dynamic.append(

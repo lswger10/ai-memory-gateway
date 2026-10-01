@@ -11,7 +11,8 @@ from tests.test_execution_context_builder import _GroupContext, _event, _profile
 
 
 @pytest.mark.anyio
-async def test_manual_summary_is_atomic_scoped_and_does_not_delete_facts():
+@pytest.mark.parametrize("failure_mode", ["exception", "truncated"])
+async def test_manual_summary_is_atomic_scoped_and_does_not_delete_facts(failure_mode):
     from conversation_compression import ConversationCompressionService
 
     class Sync:
@@ -23,15 +24,18 @@ async def test_manual_summary_is_atomic_scoped_and_does_not_delete_facts():
     class Runner:
         calls = 0
         fail = True
+        inputs = []
 
         async def run(self, **kwargs):
             self.calls += 1
+            self.inputs.append(kwargs["context"].dynamic_tail)
             assert kwargs["context"].actor_memory_context is None
             assert kwargs["context"].current_media_references == ()
-            if self.fail:
+            if self.fail and failure_mode == "exception":
                 raise ProviderRunUnavailable("synthetic failure")
-            await kwargs["on_attempt"]("summary-attempt", ProviderUsage.from_provider_values(input_tokens=100, output_tokens=10), "succeeded", True, "unverified")
-            yield ProviderChunk("final", {"text": "The user and actor discussed synthetic events 1 through 16."})
+            await kwargs["on_attempt"](f"summary-attempt-{self.calls}", ProviderUsage.from_provider_values(input_tokens=100, output_tokens=10), "succeeded", True, "unverified")
+            yield ProviderChunk("final", {"text": "The user and actor discussed synthetic events 1 through 16.",
+                "truncated": self.fail and failure_mode == "truncated"})
 
     facts = InMemoryConversationPartitionStore()
     await facts.append_accepted_facts(tuple(ConversationFact.from_relay_event(_event(i)) for i in range(1, 65)))
@@ -54,6 +58,14 @@ async def test_manual_summary_is_atomic_scoped_and_does_not_delete_facts():
     receipts = await usage.list_receipts()
     assert receipts[0].execution_purpose == "conversation_compression"
     assert all(identity["actor_id"] == "jiao" for identity in history._identities.values())
+    await facts.append_accepted_facts(tuple(ConversationFact.from_relay_event(_event(i)) for i in range(65, 73)))
+    result = await service.compress(**{**target, "current_event_id": 72})
+    assert result["compressed_up_to_event_id"] == 24
+    import json
+    incremental = json.loads(runner.inputs[-1][0])
+    assert incremental["prior_summary"] == "The user and actor discussed synthetic events 1 through 16."
+    assert [event["event_id"] for event in incremental["new_events"]] == list(range(17, 25))
+    assert await facts.count_facts("conversation-1") == 72
 
 
 def test_compression_endpoint_requires_admin_and_rejects_extra_payload(monkeypatch):

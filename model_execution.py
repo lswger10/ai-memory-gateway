@@ -117,6 +117,7 @@ class GatewayModelExecutionService:
                     profile,
                     resolved_room_id=room_id,
                     resolved_conversation_id=conversation_id,
+                    allow_compression=index == 0,
                 )
             except TypeError:
                 # Transitional support for injected deterministic test builders.
@@ -191,6 +192,7 @@ class GatewayModelExecutionService:
                     if chunk.event == "final":
                         final_seen = True
                         final_data = dict(chunk.data)
+                        final_data.pop("truncated", None)  # Runner-only summary validation metadata.
                         continue
                     if chunk.event not in {"delta", "probe", "final"}:
                         raise ProviderRunUnavailable("provider emitted an unsupported event")

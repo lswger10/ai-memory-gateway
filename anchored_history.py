@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, replace
 
 
@@ -44,13 +45,7 @@ class AnchoredHistoryState:
 
 
 class AnchoredHistoryCompactor:
-    """Advance an anchored cursor only at a bounded, atomic compression event.
-
-    The replacement is deliberately deterministic and extractive. Long-term
-    semantic memory remains owned by the memory pipeline; this summary exists
-    only to keep the provider cache prefix bounded without a hidden paid model
-    call.
-    """
+    """Select complete exchanges; advance only after a bounded semantic summary."""
 
     def __init__(
         self,
@@ -72,45 +67,11 @@ class AnchoredHistoryCompactor:
         self.compact_after_events = compact_after_events
         self.retain_raw_events = retain_raw_events
         self.summary_token_limit = summary_token_limit
-
-    @staticmethod
-    def _event_line(event: dict) -> str:
-        event_id = event.get("event_id")
-        actor_id = event.get("actor_id")
-        content = event.get("content")
-        if (
-            isinstance(event_id, bool)
-            or not isinstance(event_id, int)
-            or event_id < 1
-            or not isinstance(actor_id, str)
-            or not actor_id
-            or not isinstance(content, str)
-        ):
-            raise AnchoredHistoryError("invalid factual event for compression")
-        normalized = " ".join(content.split())
-        return f"#{event_id} {actor_id}: {normalized}"
+        self._lock = asyncio.Lock()
 
     @staticmethod
     def _estimated_tokens(text: str) -> int:
         return max(1, (len(text) + 3) // 4)
-
-    def _replacement_summary(
-        self, prior_summary: str, compressed_events: tuple[dict, ...]
-    ) -> tuple[str, int]:
-        lines = [line for line in (prior_summary.strip(),) if line]
-        lines.extend(self._event_line(event) for event in compressed_events)
-        max_chars = self.summary_token_limit * 4
-        summary = "\n".join(lines)
-        if len(summary) > max_chars:
-            summary = summary[-max_chars:]
-            first_newline = summary.find("\n")
-            if first_newline >= 0:
-                summary = summary[first_newline + 1 :]
-            summary = "[older compressed facts omitted]\n" + summary
-            summary = summary[-max_chars:]
-        if not summary:
-            raise AnchoredHistoryError("compression produced an empty summary")
-        return summary, self._estimated_tokens(summary)
 
     async def maybe_compact(
         self,
@@ -119,22 +80,47 @@ class AnchoredHistoryCompactor:
         cache_namespace: str,
         state: AnchoredHistoryState,
         events: tuple[dict, ...],
+        summarize=None,
+        force: bool = False,
+        identity: dict | None = None,
     ) -> tuple[AnchoredHistoryState, tuple[dict, ...]]:
-        if len(events) <= self.compact_after_events:
+        if summarize is None or (not force and len(events) <= self.compact_after_events):
             return state, events
         cut = len(events) - self.retain_raw_events
+        # Retain the whole human-led exchange, including both Group actors.
+        while cut > 0 and events[cut]["actor_id"] != "weiwei":
+            cut -= 1
+        if cut <= 0:
+            return state, events
+        # Bound one paid summary without cutting a message or silently dropping a unit.
+        while cut > 0 and len(json.dumps({"prior_summary": state.summary,
+                "new_events": events[:cut]}, ensure_ascii=False)) > 16000:
+            cut -= 1
+            while cut > 0 and events[cut]["actor_id"] != "weiwei":
+                cut -= 1
+        if cut <= 0:
+            raise AnchoredHistoryError("one complete exchange exceeds summary input budget")
         compressed = events[:cut]
         tail = events[cut:]
-        replacement, token_count = self._replacement_summary(
-            state.summary, compressed
-        )
-        updated = await store.apply_compression(
-            cache_namespace,
-            expected_revision=state.state_revision,
-            replacement_summary=replacement,
-            summary_token_count=token_count,
-            compressed_up_to_event_id=int(compressed[-1]["event_id"]),
-        )
+        # ponytail: summaries queue within this single-replica Gateway. Multi-replica
+        # execution needs a DB claim to prevent paying twice (CAS protects state only).
+        async with self._lock:
+            latest = await store.get_or_create(cache_namespace, identity=identity)
+            if latest.state_revision != state.state_revision:
+                raise AnchoredHistoryError("cache state revision conflict before summary")
+            replacement = await summarize(state.summary, compressed)
+            if not isinstance(replacement, str) or not replacement.strip():
+                raise AnchoredHistoryError("compression produced an empty summary")
+            token_count = self._estimated_tokens(replacement)
+            if token_count > self.summary_token_limit:
+                raise AnchoredHistoryError("replacement summary exceeds token limit")
+            updated = await store.apply_compression(
+                cache_namespace,
+                expected_revision=state.state_revision,
+                replacement_summary=replacement,
+                summary_token_count=token_count,
+                compressed_up_to_event_id=int(compressed[-1]["event_id"]),
+            )
         return updated, tail
 
 

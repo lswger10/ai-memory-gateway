@@ -1,4 +1,5 @@
 import pytest
+import json
 from dataclasses import replace
 
 from anchored_history import AnchoredHistoryState
@@ -179,6 +180,77 @@ def _request():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("actor_id", ["jiao", "laoke"])
+@pytest.mark.parametrize("query", ["缓存保活还记得吗？", "刚才在客厅聊了什么？",
+    "还记得客厅的聊天吗？", "客厅里刚刚说了什么？"])
+async def test_private_recall_adds_public_excerpts_only_to_dynamic_tail(actor_id, query):
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+    from gateway_provider_runner import GatewayProviderRunner
+
+    room_id = f"room_weiwei_{actor_id}"
+    group = _GroupContext()
+    group.relay_client = _Relay()
+    group.relay_client.events = [_event(i, room_id=room_id) for i in (1, 9)]
+    group.relay_client.events[-1]["content"] = query
+    store = InMemoryConversationPartitionStore()
+    builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=object(), conversation_store=store)
+    prior = _request()
+    request = replace(prior, actor_id=actor_id, room_id=room_id, current_event_id=9,
+        fence=replace(prior.fence, room_id=room_id, trigger_event_id=9))
+    before = await builder.build(request, _profile(), resolved_room_id=room_id, resolved_conversation_id="conversation-1")
+    public = _event(3, actor_id="laoke", room_id="room_group_home", conversation_id="public-group")
+    public["content"] = "缓存保活每50分钟一次，不代表永久命中。"
+    await store.append_accepted_facts((ConversationFact.from_relay_event(public),))
+    after = await builder.build(request, _profile(), resolved_room_id=room_id, resolved_conversation_id="conversation-1")
+    recall = next(tail for tail in after.dynamic_tail if "public_group_recall" in tail)
+    payload = json.loads(recall)
+    assert payload["public_group_recall"][0]["actor_id"] == "laoke"
+    assert payload["public_group_recall"][0]["event_id"] == 3
+    assert payload["public_group_recall"][0]["conversation_id"] == "public-group"
+    assert after.static_system == before.static_system
+    assert after.stable_history == before.stable_history
+    assert after.stable_prefix_hash == before.stable_prefix_hash
+    assert after.summary_version == before.summary_version
+    assert await store.count_facts("conversation-1") == 2
+    assert await store.count_facts("public-group") == 1
+    rendered = GatewayProviderRunner()._render(_profile(), request, after, "test").json_body
+    assert public["content"] in json.dumps(rendered, ensure_ascii=False)
+    probe = await builder.build(replace(request, execution_kind="probe"), _profile(),
+        resolved_room_id=room_id, resolved_conversation_id="conversation-1")
+    assert all("public_group_recall" not in tail for tail in probe.dynamic_tail)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["private", "group", "bedroom", "wrong_actor"])
+async def test_recall_does_not_inject_unrelated_or_non_private_context(mode):
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+
+    group = _GroupContext()
+    group.relay_client = _Relay()
+    request = _request()
+    if mode == "group":
+        request = replace(request, execution_mode="group", room_id="room_group_home",
+            fence=replace(request.fence, room_id="room_group_home"))
+    elif mode == "bedroom":
+        request = replace(request, execution_mode="bedroom", room_id=None, conversation_id=None,
+            fence=None, bedroom_session_id="bedroom-1", bedroom_turn_epoch=2)
+    elif mode == "wrong_actor":
+        request = replace(request, actor_id="laoke")
+    room_id = request.room_id or "room_weiwei_jiao"
+    group.relay_client.events = [_event(i, room_id=room_id) for i in (1, 2)]
+    group.relay_client.events[-1]["content"] = "晚饭吃火锅" if mode == "private" else "缓存保活"
+    store = InMemoryConversationPartitionStore()
+    public = _event(1, room_id="room_group_home", conversation_id="public-group")
+    public["content"] = "缓存保活"
+    await store.append_accepted_facts((ConversationFact.from_relay_event(public),))
+    bedroom = _BedroomContext()
+    bedroom.relay_client.payload["turns"][-1]["text"] = "缓存保活"
+    builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=bedroom, conversation_store=store)
+    bundle = await builder.build(request, _profile(), resolved_room_id=room_id, resolved_conversation_id="conversation-1")
+    assert all("public_group_recall" not in tail for tail in bundle.dynamic_tail)
+
+
+@pytest.mark.anyio
 async def test_context_builder_persists_complete_cache_identity_before_history_read():
     history = _HistoryStore()
     builder = GatewayExecutionContextBuilder(
@@ -308,17 +380,65 @@ async def test_compressed_cursor_never_deletes_complete_conversation_partition()
             compact_after_events=3, retain_raw_events=1, summary_token_limit=128
         ),
     )
+    class Summary:
+        calls = 0
+        async def summarize(self, **kwargs):
+            self.calls += 1
+            assert kwargs["actor_id"] == "jiao"
+            assert [event["event_id"] for event in kwargs["events"]] == [1, 2, 3]
+            return "Events one through three, without changing the factual record."
+    summary = Summary()
+    builder.summary_service = summary
     prior = _request()
     request = replace(
         prior, current_event_id=5, fence=replace(prior.fence, trigger_event_id=5)
     )
+    selected = replace(_profile(), capabilities=replace(_profile().capabilities, tools=True))
     bundle = await builder.build(
-        request, _profile(), resolved_room_id="room_weiwei_jiao",
+        request, selected, resolved_room_id="room_weiwei_jiao",
         resolved_conversation_id="conversation-1",
     )
     assert bundle.stable_summary
+    assert summary.calls == 1
+    probe = await builder.build(replace(request, execution_kind="probe"), selected,
+        resolved_room_id="room_weiwei_jiao", resolved_conversation_id="conversation-1")
+    assert probe.stable_summary == bundle.stable_summary
+    assert probe.compressed_up_to_event_id == bundle.compressed_up_to_event_id
+    assert probe.stable_history == bundle.stable_history
+    assert probe.actor_memory_context is None
+    assert probe.tool_schema_hash != bundle.tool_schema_hash
+    assert summary.calls == 1
     assert await conversations.count_facts("conversation-1") == 5
     assert [fact.source_event_id for fact in await conversations.list_facts("conversation-1")] == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.anyio
+async def test_probe_and_keepalive_never_trigger_paid_summary_or_advance_cursor():
+    from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+    relay = _Relay()
+    relay.events = [_event(i) for i in range(1, 7)]
+    group = _GroupContext()
+    group.relay_client = relay
+    conversations, history = InMemoryConversationPartitionStore(), InMemoryAnchoredHistoryStore()
+    await conversations.append_accepted_facts(tuple(ConversationFact.from_relay_event(event) for event in relay.events))
+    builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=object(),
+        conversation_store=conversations, history_store=history,
+        history_compactor=AnchoredHistoryCompactor(compact_after_events=3, retain_raw_events=1))
+    class ForbiddenSummary:
+        async def summarize(self, **kwargs):
+            raise AssertionError("paid summary outside full chat")
+    builder.summary_service = ForbiddenSummary()
+    prior = _request()
+    probe = replace(prior, execution_kind="probe", current_event_id=6, fence=replace(prior.fence, trigger_event_id=6))
+    result = await builder.build(probe, _profile(), resolved_room_id="room_weiwei_jiao", resolved_conversation_id="conversation-1")
+    assert result.compressed_up_to_event_id == 0
+    assert len(result.stable_history) == 5
+    maintenance = await builder.build_cache_keepalive(actor_id="jiao", room_id="room_weiwei_jiao",
+        conversation_id="conversation-1", execution_mode="private", bedroom_session_id=None,
+        cache_conversation_id="conversation-1", profile=_profile())
+    assert maintenance.compressed_up_to_event_id == 0
+    assert len(maintenance.stable_history) == 6
 
 
 @pytest.mark.anyio
@@ -351,6 +471,10 @@ async def test_bedroom_build_uses_session_partition_and_prior_accepted_turns():
     assert '"event_id":1' in "".join(bundle.stable_history)
     assert '"event_id":2' not in "".join(bundle.stable_history)
     assert await store.count_facts("bedroom:bedroom-1") == 2
+    from gateway_provider_runner import GatewayProviderRunner
+    rendered = GatewayProviderRunner()._render(_profile(), request, bundle, "bedroom-test").json_body
+    assert rendered["messages"][1]["role"] == "assistant"
+    assert "prior" in rendered["messages"][1]["content"]
 
 
 @pytest.mark.anyio

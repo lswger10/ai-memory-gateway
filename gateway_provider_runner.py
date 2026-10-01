@@ -29,6 +29,7 @@ from provider_adapters import (
     OpenAIChatCompletionsAdapter,
     OpenAIResponsesAdapter,
     resolve_profile_headers,
+    render_history_message,
 )
 from provider_transport import EnvironmentCredentialResolver, PooledHttpTransport
 
@@ -121,16 +122,15 @@ class GatewayProviderRunner:
                 max_output_tokens=maximum,
                 apply_cache_control=cache_enabled,
                 media_parts=media_parts,
+                history_actor_id=getattr(request, "actor_id", None),
             )
 
         instructions = "\n\n".join(context.static_system)
-        stable_text = (
-            *((context.stable_summary,) if context.stable_summary else ()),
-            *context.stable_history,
-        )
-        messages = tuple(
-            {"role": "user", "content": text}
-            for text in (*stable_text, *context.dynamic_tail)
+        messages = (
+            *(({"role": "user", "content": "[compressed summary]\n" + context.stable_summary},)
+              if context.stable_summary else ()),
+            *(render_history_message(text, getattr(request, "actor_id", None)) for text in context.stable_history),
+            *({"role": "user", "content": text} for text in context.dynamic_tail),
         )
         cache_key = (
             cache_namespace
@@ -139,7 +139,7 @@ class GatewayProviderRunner:
         )
         if profile.protocol == "openai_responses":
             input_items = tuple(
-                {"role": item["role"], "content": [{"type": "input_text", "text": item["content"]}]}
+                {"role": item["role"], "content": [{"type": "output_text" if item["role"] == "assistant" else "input_text", "text": item["content"]}]}
                 for item in messages
             )
             return OpenAIResponsesAdapter().render(
@@ -288,11 +288,14 @@ class GatewayProviderRunner:
         usage_values: dict[str, Any] = {}
         calls: dict[int, dict[str, Any]] = {}
         terminal_seen = False
+        truncated = False
         async for event, data in _sse_json(response):
             if event == "error" or data.get("error"):
                 raise ProviderRunUnavailable("provider stream reported an error")
             if event == "message_stop":
                 terminal_seen = True
+            if event == "message_delta":
+                truncated |= data.get("delta", {}).get("stop_reason") == "max_tokens"
             if event == "content_block_start":
                 block = data.get("content_block", {})
                 if isinstance(block, Mapping) and block.get("type") == "tool_use":
@@ -323,7 +326,7 @@ class GatewayProviderRunner:
         elif request.execution_kind == "probe":
             yield ProviderChunk("probe", _parse_probe(text))
         if not calls:
-            yield ProviderChunk("final", {"text": text})
+            yield ProviderChunk("final", {"text": text, **({"truncated": True} if truncated else {})})
         usage = adapter.parse_usage(usage_values)
         yield ProviderChunk(
             "usage",
@@ -340,6 +343,7 @@ class GatewayProviderRunner:
         usage_values: dict[str, Any] = {}
         calls: dict[int, dict[str, Any]] = {}
         terminal_seen = False
+        truncated = False
         async for event, data in _sse_json(response):
             if event == "done":
                 terminal_seen = True
@@ -348,6 +352,7 @@ class GatewayProviderRunner:
             choices = data.get("choices")
             if isinstance(choices, list) and choices:
                 terminal_seen |= choices[0].get("finish_reason") is not None
+                truncated |= choices[0].get("finish_reason") in {"length", "content_filter"}
                 delta = choices[0].get("delta", {})
                 value = delta.get("content") if isinstance(delta, Mapping) else None
                 if isinstance(value, str):
@@ -371,7 +376,7 @@ class GatewayProviderRunner:
         elif request.execution_kind == "probe":
             yield ProviderChunk("probe", _parse_probe(text))
         if not calls:
-            yield ProviderChunk("final", {"text": text})
+            yield ProviderChunk("final", {"text": text, **({"truncated": True} if truncated else {})})
         usage = adapter.parse_usage(usage_values)
         yield ProviderChunk(
             "usage",

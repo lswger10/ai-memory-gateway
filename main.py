@@ -482,6 +482,7 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
     global _model_execution_service, _model_profile_store, _model_usage_store
     global _model_provider_runner, _model_context_builder
     global _actor_memory_tools, _actor_memory_relay
+    global _conversation_compression_service
     if _model_execution_service is not None:
         return _model_execution_service
     async with _model_runtime_lock:
@@ -529,6 +530,10 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             history_store=history_store,
             conversation_store=conversation_store,
         )
+        _conversation_compression_service = ConversationCompressionService(
+            builder=_model_context_builder, profiles=_model_profile_store,
+            runner=_model_provider_runner, usage_store=_model_usage_store)
+        _model_context_builder.summary_service = _conversation_compression_service
         _model_execution_service = GatewayModelExecutionService(
             profiles=_model_profile_store,
             context_builder=_model_context_builder,

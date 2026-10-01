@@ -433,6 +433,7 @@ class CachePinService:
                         f"cache-pin:{pin.pin_id}:{actor_id}:{uuid.uuid4()}"
                     )
                     request = SimpleNamespace(
+                        actor_id=actor_id,
                         execution_kind="full",
                         generation_request_id=generation_request_id,
                     )

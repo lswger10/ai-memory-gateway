@@ -1,5 +1,97 @@
 # AI Memory Gateway
 
+## TEST release preparation (2026-10-01)
+
+The two local changes below are being integrated on the existing TEST branches;
+their earlier local-only notes are historical checkpoints, not deployment claims.
+Fresh Gateway regression: 422 passed, 59 skipped. PostgreSQL opt-in tests are not
+counted as passed. Relay/Gateway live read-only checks found the reported Laoke
+history gap in the Web first-page-only loader: both stores retained 238 scoped
+facts while the browser showed 200 old rows plus five live rows. Compression did
+not delete those facts. The Web pagination repair belongs to Tidal, not Gateway.
+No schema migration or provider probe is part of this deployment preparation.
+Actual deployed versions and post-restart evidence belong in Tidal DEPLOYMENT.md.
+
+## Public Living Room recall in private chat (2026-09-30, local only)
+
+Full private generation for jiao/laoke now reuses the persisted shared Group
+transcript for bounded lexical recall. The existing Chinese keyword extractor
+selects up to ten terms from the current human message (first 2,000 characters).
+A generic explicit Living Room question can select recent public excerpts instead.
+At most four excerpts, each up to 600 characters around a match, carry speaker,
+room/conversation/event identity, timestamp and a truncation flag. This is selected
+evidence, not a complete transcript or guaranteed semantic recall.
+
+Only accepted Relay human messages/actor finals in room_group_home are eligible,
+with global Relay event IDs earlier than the current private event. Private,
+Bedroom, legacy, draft and future facts are excluded. Excerpts are quoted dynamic
+tail data, never private timeline rows, native assistant history, Memory writes or
+stable-prefix content. Group, Bedroom, probe and keepalive builds do not invoke
+this recall. No provider/embedding/summary calls, new schema, endpoint or storage
+were added. Existing accepted-final sync remains responsible for freshness; this
+read cannot recover a missing Group partition or guarantee its completeness.
+
+Local regression includes both actors, source isolation, late-match excerpts,
+unchanged cache prefix and a real HTTP Relay/Orchestrator/Gateway round trip using
+fake providers. PostgreSQL execution/restart acceptance is opt-in and remains
+unverified without an isolated test DSN. Changes are not committed, pushed or
+deployed; no live provider requests were made for this task.
+
+Final local Gateway suite: 422 passed, 59 skipped. Cross-service targeted regression:
+3 passed plus 2 subtests (public Group to both private actors, cross-protocol actor
+identity, serial two-actor Group context). Read-only review's two findings—late
+matches lost by prefix clipping and common generic-question wording—were reproduced
+then fixed. Frozen v1/v1.1 schema hashes still match across both repositories.
+
+## Continuity and bounded semantic compression (2026-09-30, local only)
+
+Provider history now uses native assistant roles only for the current actor's
+Relay-accepted finals. Human messages, other actors and reactions remain named
+external context. Bedroom uses the same projection inside its session partition.
+Persona Markdown and ACL are unchanged; the runtime kernel is versioned
+`group-runtime-kernel.v2-native-history`, so deploying this change rebuilds affected
+prefixes once. This does not establish new provider cache capabilities.
+
+The existing manual `ConversationCompressionService` is reused for full-generation
+threshold compression (over 128 uncompressed events, retain at least 48 events,
+backing up to a human-led exchange boundary). It reads the old summary plus only
+the new accepted range, then atomically replaces summary/cursor. It never deletes
+conversation rows or writes long-term Memory. Each attempt uses the selected
+primary Profile, at most 16,000 serialized input characters and 1,024 output tokens,
+no tools/retry/fallback. These are bounds, not a price guarantee. Oversized units,
+empty/truncated summaries, transport failures or stale revisions do not advance
+the cursor; compression errors are surfaced, not replaced with a clipped history.
+Existing summary_token_count remains an approximate storage measure, not billing.
+
+Probe, keepalive and fallback builds cannot initiate paid summaries. Probes read
+the matching full-generation cognitive summary, retaining their own no-tool
+provider cache namespace. Summary attempts queue in this single-process Gateway;
+revision is checked before paying and again by storage CAS. Multiple replicas
+would require a shared claim to prevent duplicate paid attempts and are not
+verified here. Usage retains the separate `conversation_compression` purpose.
+
+Normal execution selects up to two authorized memories and two relationship
+summaries (each class at most 2,000 content characters, whole rows, ranked and
+deduplicated). Its dynamic tail no longer repeats the last twenty factual events.
+That compression change alone did not add cross-room transcript recall; the
+bounded public recall described above is a separate dynamic-tail read. Existing
+authorized non-confidential Group memory/summary retrieval remains unchanged.
+
+Local Gateway suite: 407 passed, 58 skipped. Cross-service HTTP/SSE/subprocess
+regression with fake providers: 22 passed plus 5 subtests; after the final fixes,
+ordered fallback and the two-actor shared-timeline cases were rerun: 2 passed.
+Read-only review found and drove fixes for cross-room lock rejection, truncated
+summary acceptance, fallback duplicate summaries, and probe full-history reload.
+The runner's truncation flag stays internal; public final shape is unchanged.
+
+Tidal non-acceptance suite: 456 passed plus 31 subtests, with the same three
+pre-existing failures in test_household_ui_cleanup, test_legacy_ui and
+test_model_profile_pwa. The combined project is not declared fully green. This
+change remains uncommitted locally, not pushed/deployed or evaluated with paid
+provider calls. Conversational quality and actual savings need a later bounded
+comparison. Cache Pin settings/lifecycle, media storage, frozen Group contracts
+and production remain unchanged; no new branch, worktree or dependency was added.
+
 ## Accepted-final cognitive history repair (2026-09-30)
 
 Generation-time read-repair alone left the latest Relay-accepted assistant final

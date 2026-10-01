@@ -33,6 +33,34 @@ async def history_db(monkeypatch, isolated_postgres):
 
 
 @pytest.mark.anyio
+async def test_public_group_recall_sql_filters_sources_and_survives_recreation(history_db):
+    from dataclasses import replace
+    from test_conversation_partitions import relay_event as event
+    pool, store, _, _ = history_db
+    public = ConversationFact.from_relay_event(event(10, room_id="room_group_home",
+        actor_id="laoke", content="长" * 700 + "缓存保活" + "尾" * 700))
+    await store.append_accepted_facts((public,
+        ConversationFact.from_relay_event(event(11, room_id="room_weiwei_jiao", content="缓存私聊")),
+        ConversationFact.from_relay_event(event(12, room_id="room_weiwei_laoke", content="缓存私聊")),
+        replace(public, fact_identity="bedroom:x:13", partition_id="bedroom:x", source_kind="bedroom_turn",
+            bedroom_session_id="x", source_event_id=13, content="缓存卧室"),
+        replace(public, fact_identity="legacy:14", source_event_id=14, source_kind="legacy_unscoped"),
+        replace(public, fact_identity="draft:15", source_event_id=15, event_type="agent_draft"),
+        replace(public, fact_identity="future:21", source_event_id=21),
+    ))
+    recreated = PostgresConversationPartitionStore(lambda: pool)
+    result = await recreated.search_public_group_facts(keywords=("缓存", "保活"), before_event_id=20)
+    assert [row["event_id"] for row in result] == [10]
+    assert result[0]["actor_id"] == "laoke" and result[0]["conversation_id"] == "group-1"
+    assert result[0]["truncated"] and len(result[0]["content"]) == 600
+    assert "缓存保活" in result[0]["content"]
+    assert await recreated.search_public_group_facts(keywords=("%", "_"), before_event_id=20) == ()
+    assert await recreated.search_public_group_facts(keywords=(), before_event_id=20) == ()
+    recent = await recreated.search_public_group_facts(keywords=(), before_event_id=20, include_recent=True)
+    assert [row["event_id"] for row in recent] == [10, 2, 1]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("mutation", ["edit", "single_delete", "delete", "batch_delete", "merge_source", "merge_target"])
 async def test_legacy_http_mutations_reject_derived_rows_without_partial_writes(history_db, mutation):
     pool, store, derived, legacy = history_db

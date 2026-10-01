@@ -54,6 +54,26 @@ class FakeContextService:
 
 
 class GroupContextPackServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execution_tail_has_current_fact_once_and_bounded_distinct_memories(self):
+        from group_contracts import ContextPackRequest
+        from group_memory import GroupContextPackService
+        facts = json.loads(json.dumps(FACTS))
+        old = {**facts["trigger_event"], "event_id": 90, "content": "OLD HISTORY ONLY"}
+        facts["recent_public_events"] = [old]
+        rows = tuple({"id": i, "scope": "group", "content": content} for i, content in enumerate(
+            ["Repeated memory", "Repeated memory", "Second relevant memory", "NO THIRD MEMORY", "x" * 5000], 1))
+        search = AsyncMock(return_value=AuthorizedMemorySearchResult(rows, (1, 2, 3, 4, 5), CandidateAudit()))
+        service = GroupContextPackService(FakeRelayClient(facts), search=search)
+        components = await service.build_execution_components(ContextPackRequest.from_dict(PACK_REQUEST))
+        tail = "\n".join(components["dynamic_tail"])
+        self.assertNotIn("OLD HISTORY ONLY", tail)
+        self.assertEqual(tail.count("Repeated memory"), 1)
+        self.assertIn("Second relevant memory", tail)
+        self.assertNotIn("NO THIRD MEMORY", tail)
+        self.assertIn(facts["trigger_event"]["content"], tail)
+        self.assertNotIn("Repeated memory", "\n".join(components["static_system"]))
+        self.assertEqual(search.await_args.args[1].room_id, "room_group_home")
+
     async def test_synthetic_fixture_search_filters_before_candidate_creation(self):
         from group_memory import build_synthetic_scoped_search
         from memory_policy import build_retrieval_policy, room_members

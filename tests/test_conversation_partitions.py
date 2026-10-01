@@ -1,4 +1,5 @@
 import pytest
+from dataclasses import replace
 
 
 def relay_event(event_id, *, room_id="room_weiwei_jiao", actor_id="weiwei", content=None):
@@ -115,4 +116,59 @@ async def test_bedroom_partition_is_session_scoped_and_deletable():
     assert [fact.content for fact in await store.list_facts("bedroom:bedroom-1")] == ["private scene"]
     await store.delete_bedroom_partition("bedroom-1")
     assert await store.list_facts("bedroom:bedroom-1") == ()
+
+
+@pytest.mark.anyio
+async def test_public_group_recall_excludes_private_bedroom_legacy_future_and_drafts():
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+
+    store = InMemoryConversationPartitionStore()
+    public = ConversationFact.from_relay_event(relay_event(10,
+        room_id="room_group_home", actor_id="laoke", content="缓存保活每50分钟续期"))
+    await store.append_accepted_facts((public,
+        ConversationFact.from_relay_event(relay_event(11, content="缓存私聊秘密")),
+        ConversationFact.from_relay_event(relay_event(12, room_id="room_weiwei_laoke", content="缓存另一私聊")),
+        replace(public, fact_identity="bedroom:x:13", partition_id="bedroom:x",
+            source_event_id=13, source_kind="bedroom_turn", bedroom_session_id="x", content="缓存卧室秘密"),
+        replace(public, fact_identity="legacy:14", source_event_id=14, source_kind="legacy_unscoped"),
+        replace(public, fact_identity="draft:15", source_event_id=15, event_type="agent_draft"),
+        replace(public, fact_identity="future:30", source_event_id=30),
+    ))
+    results = await store.search_public_group_facts(keywords=("缓存",), before_event_id=20)
+    assert results == ({"room_id": "room_group_home", "conversation_id": "group-1",
+        "event_id": 10, "actor_id": "laoke", "created_at": "2026-08-30T00:00:10Z",
+        "content": "缓存保活每50分钟续期", "truncated": False},)
+    assert await store.search_public_group_facts(keywords=("火锅",), before_event_id=20) == ()
+    assert await store.search_public_group_facts(keywords=(), before_event_id=20) == ()
+
+
+@pytest.mark.anyio
+async def test_public_group_recall_is_ranked_bounded_and_never_rewrites_facts():
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+
+    store = InMemoryConversationPartitionStore()
+    facts = tuple(ConversationFact.from_relay_event(relay_event(i,
+        room_id="room_group_home", content="缓存" + "长" * 900)) for i in range(1, 7))
+    strongest = ConversationFact.from_relay_event(relay_event(7,
+        room_id="room_group_home", content="缓存保活方案"))
+    await store.append_accepted_facts((*facts, strongest))
+    results = await store.search_public_group_facts(keywords=("缓存", "保活"), before_event_id=20)
+    assert [row["event_id"] for row in results] == [7, 6, 5, 4]
+    assert results[1]["truncated"] is True
+    assert len(results[1]["content"]) == 600
+    assert await store.list_facts("group-1") == (*facts, strongest)
+    recent = await store.search_public_group_facts(keywords=(), before_event_id=6, include_recent=True)
+    assert [row["event_id"] for row in recent] == [5, 4, 3, 2]
+
+
+@pytest.mark.anyio
+async def test_public_group_recall_excerpt_contains_late_keyword_not_just_message_start():
+    from conversation_partitions import ConversationFact, InMemoryConversationPartitionStore
+    store = InMemoryConversationPartitionStore()
+    await store.append_accepted_facts((ConversationFact.from_relay_event(relay_event(1,
+        room_id="room_group_home", content="开场" * 500 + "缓存保活每50分钟一次。")),))
+    results = await store.search_public_group_facts(keywords=("缓存",), before_event_id=2)
+    assert "缓存保活每50分钟一次。" in results[0]["content"]
+    assert results[0]["truncated"] is True
+    assert len(results[0]["content"]) <= 600
 

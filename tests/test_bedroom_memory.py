@@ -63,6 +63,20 @@ class FakeHistoryStore:
 
 
 class BedroomMemoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execution_memory_tail_is_bounded_without_altering_scene_or_private_acl(self):
+        from bedroom_memory import BedroomContextPackService, BedroomPackRequest
+        rows = tuple({"id": i, "scope": "weiwei-jiao", "content": content} for i, content in enumerate(
+            ["important correction", "important correction", "unfinished topic", "excess memory"], 1))
+        search = AsyncMock(return_value=AuthorizedMemorySearchResult(rows, (1, 2, 3, 4), CandidateAudit()))
+        service = BedroomContextPackService(FakeRelay(facts()), search=search, summary_search=AsyncMock(return_value=()))
+        result = await service.build_execution_components(BedroomPackRequest("bedroom-1", 1, 1, "jiao"))
+        tail = "\n".join(result["dynamic_tail"])
+        self.assertEqual(tail.count("important correction"), 1)
+        self.assertIn("unfinished topic", tail)
+        self.assertNotIn("excess memory", tail)
+        self.assertIn("雨夜暖灯", tail)
+        self.assertEqual(search.await_args.args[1].confidential_scopes, ("weiwei-jiao",))
+
     async def test_private_pack_uses_actor_prompt_scene_and_private_acl(self):
         from bedroom_memory import BedroomContextPackService, BedroomPackRequest
 
