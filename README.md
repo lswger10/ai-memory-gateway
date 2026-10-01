@@ -35,7 +35,21 @@ already been saved: asyncpg returns `resulting_memory_ids` JSONB as text, while
 the committed-stage replay treated it as a list. Reusing the store's existing
 JSON row decoder fixes this without reapplying memory mutations. The regression
 failed with the real string shape and passes for both string and decoded-list
-shapes. This follow-up still needs its TEST deployment/replay verification.
+shapes. Follow-up code `543f15e` is pushed and deployed to TEST as
+`6abde65606dfd0f87850b08c`; its runtime file SHA matches local code. After this
+second container replacement, all 817 conversation rows have the same full-table
+fingerprint as before restart, and Persona/Profile/memory fingerprints are also
+unchanged. Replaying both original notifications now returns 200; repeating the
+complete comparison still yields 173/173, 228/228 and 100/100 with no duplicate
+facts or changed memory rows. No provider requests, new public messages or secrets
+changes were needed. Deployment health is ready and Orchestrator has zero active
+bursts. Both repositories retain identical frozen v1/v1.1 contract SHA values.
+
+Cross-repository real HTTP/SSE/subprocess regression with fake provider:
+23 passed plus 5 subtests, covering execution ownership, private/Group media,
+ordered fallback, preemption and the Group fault matrix. Tidal code remains at
+`6db1d26`; no Tidal product/test files were changed. Final closing evidence is a
+local docs-only commit, avoiding another restart solely to publish this receipt.
 
 Tidal non-acceptance regression: 456 passed plus 31 subtests; three existing
 UI/fixture failures remain in `test_household_ui_cleanup`, `test_legacy_ui` and
