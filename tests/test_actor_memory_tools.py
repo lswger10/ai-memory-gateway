@@ -23,6 +23,33 @@ def context(actor="jiao", room="room_weiwei_jiao", generation="gen-1", profile="
     )
 
 
+@pytest.mark.parametrize("stored_ids", ['[83, 84]', [83, 84]])
+def test_postgres_accepted_replay_decodes_ids_without_reapplying_memory(stored_ids):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from actor_memory_tools import PostgresActorMemoryToolStore
+
+    @asynccontextmanager
+    async def acquire():
+        yield conn
+
+    conn = SimpleNamespace(
+        transaction=acquire, execute=AsyncMock(),
+        fetch=AsyncMock(return_value=[{
+            "status": "committed", "accepted_event_id": 102,
+            "resulting_memory_ids": stored_ids,
+        }]),
+    )
+    store = PostgresActorMemoryToolStore(AsyncMock(return_value=SimpleNamespace(acquire=acquire)))
+    store._apply = AsyncMock()
+    receipt = asyncio.run(store.commit(context(), 102))
+    assert receipt["status"] == "committed"
+    assert receipt["resulting_memory_ids"] == [83, 84]
+    store._apply.assert_not_called()
+    assert conn.execute.await_count == 1  # Advisory lock only; no memory writes.
+
+
 def test_all_actor_memory_tools_are_provider_neutral_and_never_accept_actor_identity():
     definitions = actor_memory_tool_definitions()
     assert {item["name"] for item in definitions} == ACTOR_MEMORY_TOOL_NAMES

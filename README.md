@@ -14,12 +14,32 @@ no new endpoint, table, cache strategy or history authority is introduced.
 
 Local regression: eight newly exercised persistence/failure cases failed before
 the fix; the API suite now passes all 16 cases, including replay idempotency and
-rejection of unaccepted/wrong-actor finals. Full Gateway suite: 387 passed,
-58 skipped (external/opt-in gates are not claimed as passed). Deployment and
-existing missing-final repair still require live TEST verification. If the
+rejection of unaccepted/wrong-actor finals. Full Gateway suite: 389 passed,
+58 skipped (external/opt-in gates are not claimed as passed). If the
 callback cannot complete, it must report failure; generation-time read-repair
 remains the existing recovery path, not proof that an idle partition is current.
 Rollback is a Git revert; no database migration or destructive change is needed.
+
+TEST code `b2052eb` was deployed as `6abde35006dfd0f87850b023`; the running
+`main.py` bytes matched local code and health was ready. Before/after deployment,
+PostgreSQL storage identity and complete table fingerprints matched for 815
+conversation rows, Persona versions/bindings, Model Profiles and memories.
+Replaying the existing accepted-final notifications restored Jiao event 721 and
+Laoke event 729 without provider calls or new Relay messages. Full factual ID/text
+comparison and Dashboard reads now show Jiao 173/173, Laoke 228/228 and Group
+100/100, with no missing, extra or changed content. Legacy 316 rows stay separate.
+Compression did not delete the older transcript; cache/compression is unchanged.
+
+The Laoke replay exposed a separate callback idempotency bug after history had
+already been saved: asyncpg returns `resulting_memory_ids` JSONB as text, while
+the committed-stage replay treated it as a list. Reusing the store's existing
+JSON row decoder fixes this without reapplying memory mutations. The regression
+failed with the real string shape and passes for both string and decoded-list
+shapes. This follow-up still needs its TEST deployment/replay verification.
+
+Tidal non-acceptance regression: 456 passed plus 31 subtests; three existing
+UI/fixture failures remain in `test_household_ui_cleanup`, `test_legacy_ui` and
+`test_model_profile_pwa`. They are not claimed fixed by this Gateway change.
 
 ## Relationship-aware memory import (2026-09-07)
 

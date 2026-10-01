@@ -587,7 +587,7 @@ class PostgresActorMemoryToolStore:
                     prior = {row["accepted_event_id"] for row in stages}
                     if prior != {accepted_event_id}:
                         raise ValueError("accepted final identity conflict")
-                    ids = sorted({int(item) for row in stages for item in (row["resulting_memory_ids"] or [])})
+                    ids = sorted({int(item) for row in stages for item in (self._clean_row(row)["resulting_memory_ids"] or [])})
                     return {"status": "committed", "actor_id": context.actor_id, "generation_request_id": context.generation_request_id, "accepted_event_id": accepted_event_id, "resulting_memory_ids": ids}
                 if any(
                     row["room_id"] != context.room_id
