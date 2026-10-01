@@ -92,10 +92,13 @@ def render_history_message(text: str, actor_id: str | None) -> dict[str, str]:
         return {"role": "user", "content": text}
     own_final = (actor_id in {"jiao", "laoke"} and event["actor_id"] == actor_id
                  and event.get("role") == "agent" and event["event_type"] == "agent_final")
+    if own_final:
+        # Assistant history teaches output format: only its actual words belong here.
+        return {"role": "assistant", "content": event["content"]}
     metadata = {key: event[key] for key in (
         "event_id", "actor_id", "event_type", "reply_to_event_id", "mentions", "attachments", "message_kind"
     ) if event.get(key) not in (None, [], "")}
-    return {"role": "assistant" if own_final else "user",
+    return {"role": "user",
             "content": "[accepted event " + json.dumps(metadata, ensure_ascii=False, sort_keys=True)
                        + "]\n" + event["content"]}
 

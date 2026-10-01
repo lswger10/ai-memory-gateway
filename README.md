@@ -1,5 +1,37 @@
 # AI Memory Gateway
 
+## Summary truncation and assistant history envelope repair (2026-10-01, local)
+
+TEST logs showed `summary was truncated; history unchanged` before Laoke's
+normal generation: the shared automatic/manual summary request allowed 3,000
+characters but only 1,024 provider output tokens. The storage `chars / 4`
+estimate is not a safe multilingual generation budget. The request now aims for
+1,500 characters (still at most 3,000) with a bounded 4,096-token output ceiling.
+This increases the maximum possible cost of one summary, not its required output.
+There is still one attempt, no retry/fallback, and no acceptance of truncated,
+empty or oversized summaries. A failed compression still surfaces an error and
+leaves summary/cursor/history unchanged; this is not a guarantee against all
+provider failures or truncation. No full-history clipping fallback was added.
+
+`render_history_message` now puts only the current actor's original final text
+in native assistant messages. Previously, adding `[accepted event {...}]` there
+taught the model an internal metadata prefix as its own reply format. External
+speakers/reactions retain their labeled metadata; actor selection, stored facts,
+Persona and ACL are unchanged. This is shared by all three provider protocols,
+private/Group/Bedroom/keepalive rendering. No UI regex or historical-content
+rewrite was added; literal text already in a stored message is preserved.
+Changed provider prefixes naturally rebuild cache; no cursor/namespace reset or
+new cache strategy is required. Live deployment and model-output verification
+remain separate from the local regression evidence.
+
+Local validation: the old code failed eight focused checks (summary truncation
+and assistant envelope content). After the repair, Gateway full regression is
+425 passed / 59 skipped. Tidal's real-process HTTP/SSE model-execution acceptance
+against this checkout is 5 passed plus 2 subtests, using fake providers only.
+Automatic and manual Chinese compression exercise the real request renderer and
+SSE parser with one synthetic provider call, unchanged full facts and actual
+returned usage values. No live paid request or TEST deployment was performed.
+
 ## TEST release preparation (2026-10-01)
 
 The two local changes below are being integrated on the existing TEST branches;

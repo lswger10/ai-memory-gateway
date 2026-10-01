@@ -39,7 +39,7 @@ def test_factual_history_uses_current_actor_assistant_role_only(protocol, actor_
         "assistant" if actor_id == "laoke" else "user", "user", "user"]
     own = messages[2 if actor_id == "jiao" else 3]
     own_text = own["content"] if protocol == "openai_chat_completions" else own["content"][0]["text"]
-    assert "椒椒的原话" in own_text if actor_id == "jiao" else "老克的原话" in own_text
+    assert own_text == ("椒椒的原话" if actor_id == "jiao" else "老克的原话")
     other = messages[3 if actor_id == "jiao" else 2]
     assert ("laoke" if actor_id == "jiao" else "jiao") in str(other["content"])
     if protocol == "openai_responses":
@@ -51,6 +51,16 @@ def test_factual_history_uses_current_actor_assistant_role_only(protocol, actor_
         replace(context, dynamic_tail=("different retrieval",)), "namespace").json_body
     key = "input" if protocol == "openai_responses" else "messages"
     assert body[key][:-1] == changed[key][:-1]
+
+
+def test_history_projection_does_not_strip_literal_envelopes_from_message_text():
+    from provider_adapters import render_history_message
+
+    content = '[accepted event {"event_id": 12}]\nThis was literally said.'
+    event = {"event_id": 13, "actor_id": "laoke", "role": "agent",
+             "event_type": "agent_final", "content": content}
+    assert render_history_message(json.dumps(event), "laoke") == {
+        "role": "assistant", "content": content}
 
 
 def profile():
