@@ -69,6 +69,7 @@ from bedroom_memory import (
 )
 from model_execution import GatewayModelExecutionService
 from execution_context_builder import GatewayExecutionContextBuilder
+from conversation_sync import ConversationSyncIncomplete
 from gateway_provider_runner import GatewayProviderRunner
 from shared_page_client import SharedPageClient
 from media_materialization import RelayMediaReader
@@ -639,9 +640,10 @@ async def model_execution_memory_accepted(request: Request):
         if isinstance(accepted_event_id, bool) or not isinstance(accepted_event_id, int) or accepted_event_id < 1:
             raise ValueError("invalid accepted event")
         context = await _actor_memory_lifecycle_context(execution)
-        if _actor_memory_tools is None or _actor_memory_relay is None:
+        if _actor_memory_tools is None or _actor_memory_relay is None or _model_context_builder is None:
             await _get_model_execution_service()
         assert _actor_memory_tools is not None and _actor_memory_relay is not None
+        assert _model_context_builder is not None
         await _actor_memory_relay.verify_accepted_execution_final(
             actor_id=context.actor_id, room_id=context.room_id,
             conversation_id=context.conversation_id, accepted_event_id=accepted_event_id,
@@ -649,11 +651,26 @@ async def model_execution_memory_accepted(request: Request):
             execution_mode=context.execution_mode,
             bedroom_session_id=execution.bedroom_session_id,
         )
+        # Accepted facts belong in cognitive history even without memory tools
+        # or another user turn. Never persist the unaccepted provider draft.
+        if execution.execution_mode == "bedroom":
+            await _model_context_builder.bedroom_conversation_sync.ensure_bedroom_synced(
+                bedroom_session_id=execution.bedroom_session_id,
+                current_turn_id=accepted_event_id,
+                actor_id=context.actor_id,
+            )
+        else:
+            await _model_context_builder.conversation_sync.ensure_relay_synced(
+                actor_id=context.actor_id, room_id=context.room_id,
+                conversation_id=context.conversation_id, current_event_id=accepted_event_id,
+            )
         return await _actor_memory_tools.commit_accepted(context, accepted_event_id=accepted_event_id)
     except (ExecutionContractError, KeyError, TypeError, ValueError):
         return _model_execution_error(422, "invalid_execution_payload")
     except RelayGroupError as exc:
         return _model_execution_error(exc.status_code, exc.code)
+    except ConversationSyncIncomplete:
+        return _model_execution_error(503, "conversation_sync_incomplete")
 
 
 @app.post("/internal/model-execution/memory/discarded")

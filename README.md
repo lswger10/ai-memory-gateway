@@ -1,5 +1,26 @@
 # AI Memory Gateway
 
+## Accepted-final cognitive history repair (2026-09-30)
+
+Generation-time read-repair alone left the latest Relay-accepted assistant final
+absent from Gateway until another user turn. The existing authenticated
+`/internal/model-execution/memory/accepted` callback now verifies the accepted
+final against Relay, then reuses conversation sync through that final before
+committing staged memory mutations. It runs even when no memory tools were used.
+Private rooms and the shared Group transcript retain complete accepted facts;
+Bedroom facts stay in their session partition under the existing retention policy.
+No provider draft becomes a fact, no compression cursor deletes transcript, and
+no new endpoint, table, cache strategy or history authority is introduced.
+
+Local regression: eight newly exercised persistence/failure cases failed before
+the fix; the API suite now passes all 16 cases, including replay idempotency and
+rejection of unaccepted/wrong-actor finals. Full Gateway suite: 387 passed,
+58 skipped (external/opt-in gates are not claimed as passed). Deployment and
+existing missing-final repair still require live TEST verification. If the
+callback cannot complete, it must report failure; generation-time read-repair
+remains the existing recovery path, not proof that an idle partition is current.
+Rollback is a Git revert; no database migration or destructive change is needed.
+
 ## Relationship-aware memory import (2026-09-07)
 
 JSON and text import now require explicit relationship, narrative perspective,
