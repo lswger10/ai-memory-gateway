@@ -61,6 +61,25 @@ class RelayGroupClient:
             raise RelayGroupError(response.status_code, "bedroom_facts_rejected")
         return payload
 
+    async def fetch_interaction_context(self, **coordinates) -> dict[str, Any]:
+        body = {"contract_version": "room-interaction.v1.0", **coordinates}
+        headers = {"Authorization": f"Bearer {self.service_key}"}
+        url = f"{self.base_url}/internal/interaction-context"
+        try:
+            if self.http_client is not None:
+                response = await self.http_client.post(url, headers=headers, json=body)
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                    response = await client.post(url, headers=headers, json=body)
+        except httpx.HTTPError as exc:
+            raise RelayGroupError(503, "dependency_unavailable") from exc
+        if response.status_code != 200:
+            raise RelayGroupError(response.status_code, "interaction_context_rejected")
+        payload = response.json()
+        if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in body.items()):
+            raise RelayFactsMismatch()
+        return payload
+
     async def fetch_context_facts(
         self, request: ContextPackRequest
     ) -> PublicContextFacts:

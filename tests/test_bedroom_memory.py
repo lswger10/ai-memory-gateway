@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 import unittest
 from unittest.mock import AsyncMock
 
@@ -70,7 +71,7 @@ class BedroomMemoryTests(unittest.IsolatedAsyncioTestCase):
         search = AsyncMock(return_value=AuthorizedMemorySearchResult(rows, (1, 2, 3, 4), CandidateAudit()))
         service = BedroomContextPackService(FakeRelay(facts()), search=search, summary_search=AsyncMock(return_value=()))
         result = await service.build_execution_components(BedroomPackRequest("bedroom-1", 1, 1, "jiao"))
-        tail = "\n".join(result["dynamic_tail"])
+        tail = "\n".join(segment.content for segment in result["dynamic_tail"])
         self.assertEqual(tail.count("important correction"), 1)
         self.assertIn("unfinished topic", tail)
         self.assertNotIn("excess memory", tail)
@@ -170,7 +171,7 @@ class BedroomMemoryTests(unittest.IsolatedAsyncioTestCase):
         components = await service.build_execution_components(
             BedroomPackRequest("bedroom-1", 2, 2, "jiao")
         )
-        dynamic = "\n".join(components["dynamic_tail"])
+        dynamic = "\n".join(segment.content for segment in components["dynamic_tail"])
         self.assertIn("current turn", dynamic)
         self.assertNotIn("prior accepted", dynamic)
 

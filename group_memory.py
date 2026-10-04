@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from cache_strategies import PromptSegment
 import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -818,24 +819,30 @@ def _query_text(facts: dict, current_event_id: int) -> str:
     events = _ordered_public_events(facts)
     current = next(
         (event for event in events if event["event_id"] == current_event_id),
-        facts["trigger_event"],
+        None,
     )
+    if current is None:
+        raise ValueError("Relay context is missing the requested current event")
     return current["content"]
 
 
 def _render_public_context(facts: dict, *, maximum_events: int, current_event_id: int | None = None) -> str:
-    events = _ordered_public_events(facts)[-maximum_events:]
+    events = _ordered_public_events(facts)
     if current_event_id is not None:
-        events = [next((event for event in events if event["event_id"] == current_event_id), facts["trigger_event"])]
+        events = [event for event in events if event["event_id"] == current_event_id]
+        if not events:
+            raise ValueError("Relay context is missing the requested current event")
+    else:
+        events = events[-maximum_events:]
     lines = [
         f"{_ACTOR_NAMES.get(event['actor_id'], event['actor_id'])}: {event['content']}"
         for event in events
     ]
-    mentions = facts["trigger_event"]["mentions"]
+    mentions = (events[0]["mentions"] if current_event_id is not None else facts["trigger_event"]["mentions"])
     if mentions:
         lines.append("Relay-normalized strong mentions: " + ", ".join(mentions))
     reactions = facts["reactions_by_event"]
-    if reactions:
+    if reactions and current_event_id is None:
         lines.append(
             "Current actor-scoped reactions: "
             + json.dumps(reactions, ensure_ascii=False, sort_keys=True)
@@ -900,21 +907,35 @@ def bounded_context_rows(rows, *, maximum_rows: int = 2, maximum_chars: int = 20
     return tuple(selected)
 
 
-def _dynamic_context_segments(memories, summaries, actor_private_stance, facts, current_event_id) -> tuple[str, ...]:
-    segments: list[str] = []
+def _dynamic_context_segments(memories, summaries, actor_private_stance, facts, current_event_id) -> tuple[PromptSegment, ...]:
+    segments: list[PromptSegment] = []
     if memories:
-        segments.append(
+        segments.append(PromptSegment("retrieved_memory",
             "Authorized relationship and memory context:\n"
-            + "\n".join(f"- {row['content']}" for row in memories)
-        )
+            + "\n".join(f"- [{row['scope']}] {row['content']}" for row in memories)
+        ))
     if summaries:
-        segments.append(
+        segments.append(PromptSegment("relationship_summary",
             "Authorized relationship summaries:\n"
             + "\n".join(f"- [{row['scope']}] {row['content']}" for row in summaries)
-        )
+        ))
     if actor_private_stance:
-        segments.append("Your private burst stance: " + actor_private_stance)
-    segments.append(_render_public_context(facts, maximum_events=20, current_event_id=current_event_id))
+        segments.append(PromptSegment("burst_stance", "Your private burst stance: " + actor_private_stance))
+    if facts["trigger_event"]["event_id"] != current_event_id or facts["reactions_by_event"]:
+        segments.append(PromptSegment("request_metadata", json.dumps({
+            "context_note": "Burst trigger and reactions to their explicit target events; not the current message.",
+            "room_id": facts["room_id"], "conversation_id": facts["conversation_id"],
+            "trigger_event_id": facts["trigger_event"]["event_id"],
+            "trigger_mentions": facts["trigger_event"]["mentions"],
+            "reactions_by_event": facts["reactions_by_event"],
+        }, ensure_ascii=False, sort_keys=True)))
+    segments.append(PromptSegment("current_event",
+        "Current conversation coordinates (historical recall does not change this room): "
+        + json.dumps({"room_id": facts["room_id"],
+                      "room_type": "group" if facts["room_id"] == "room_group_home" else "private",
+                      "conversation_id": facts["conversation_id"],
+                      "event_id": current_event_id}, sort_keys=True)
+        + "\n" + _render_public_context(facts, maximum_events=20, current_event_id=current_event_id)))
     return tuple(segment for segment in segments if segment)
 
 
@@ -1060,7 +1081,7 @@ class GroupContextPackService:
             requested["current_event_id"],
         )
         if pack_kind == "probe":
-            dynamic_tail = (*dynamic_tail, _PROBE_RESPONSE_CONTRACT.strip())
+            dynamic_tail = (*dynamic_tail, PromptSegment("request_metadata", _PROBE_RESPONSE_CONTRACT.strip()))
         stable = self.build_stable_execution_components(
             requested["actor_id"], requested["room_id"]
         )

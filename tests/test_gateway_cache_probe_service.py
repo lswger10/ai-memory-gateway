@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 from model_usage_store import InMemoryModelUsageStore
 import pytest
 from dataclasses import replace
@@ -8,6 +9,33 @@ from model_execution_contracts import ProviderUsage
 from model_profile_store import InMemoryModelProfileStore
 from model_profile_store import ProfileStoreError
 from model_profiles import ModelProfile
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("evidence", [True, False])
+async def test_search_probe_is_one_small_call_and_requires_provider_search_evidence(evidence):
+    store = InMemoryModelProfileStore()
+    original = _profile()
+    profile = replace(original, capabilities=replace(original.capabilities, web_search="anthropic_web_search_20250305"))
+    await store.put_profile(profile)
+    class SearchRunner(_Runner):
+        async def run(self, **kwargs):
+            yield ProviderChunk("web_search", {"verified": evidence})
+            async for item in super().run(**kwargs):
+                yield item
+    runner = SearchRunner([ProviderUsage.from_provider_values(input_tokens=40, output_tokens=15)])
+    service = GatewayCacheProbeService(profiles=store, provider_runner=runner, usage_store=InMemoryModelUsageStore())
+    result = await service.run_search(profile_id=profile.profile_id, profile_revision=1,
+        actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="synthetic")
+    assert len(runner.calls) == 1
+    assert runner.calls[0][2].web_search_enabled
+    assert len(str(runner.calls[0][2].static_system)) < 1000
+    assert result["status"] == ("verified" if evidence else "unverified")
+    assert await store.has_verified_probe(profile.profile_id, 1, "native_web_search") == evidence
+    assert (await store.get_profile(profile.profile_id)).test_status == ("passed" if evidence else profile.test_status)
+    assert not await store.has_verified_probe(profile.profile_id, 1, "frozen_double_send_cache")
+    await store.put_profile(replace(profile, revision=2))
+    assert not await store.has_verified_probe(profile.profile_id, 2, "native_web_search")
 
 
 @pytest.mark.anyio
@@ -142,7 +170,7 @@ async def test_double_send_probe_freezes_every_input_and_promotes_verified_cache
     assert first[1] == second[1]
     assert first[2] == second[2]
     assert first[3] == second[3]
-    assert first[2].dynamic_tail == ("cache-probe-dynamic-tail-v1",)
+    assert first[2].dynamic_tail == (PromptSegment("request_metadata", "cache-probe-dynamic-tail-v1"),)
     assert (await store.get_profile("profile-1")).test_status == "passed"
 
 

@@ -31,6 +31,9 @@ def request_and_facts(actor_id):
     request = dict(PACK_REQUEST)
     request["actor_id"] = actor_id
     facts = json.loads(json.dumps(FACTS))
+    # The frozen examples are independent; this runtime scenario uses event 101.
+    request["current_event_id"] = facts["trigger_event"]["event_id"]
+    facts["current_event_id"] = request["current_event_id"]
     return request, facts
 
 

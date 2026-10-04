@@ -1,6 +1,7 @@
 """One bounded card-table decision using Gateway-owned profiles and accounting."""
 import asyncio
 import json
+from cache_strategies import PromptSegment
 import uuid
 from types import SimpleNamespace
 from model_execution import ContextBundle, ProviderRunUnavailable
@@ -26,7 +27,7 @@ async def decide(*, actor_id, payload, profiles, group, runner, usage_store):
         'Choose bid value from bid_options; play legal cards in hand that beat to_beat, or pass when allowed. '
         'For chat/interaction use chat action; for dissolve use vote_dissolve. No memory or calendar tools are available.')
     context = ContextBundle(static_system=(rules, parts['static_system'][1], rules),
-        stable_summary='', stable_history=(), dynamic_tail=(text,),
+        stable_summary='', stable_history=(), dynamic_tail=(PromptSegment('current_event', text),),
         actor_prompt_version=parts['actor_prompt_version'], runtime_kernel_version='doudizhu.v1',
         room_policy_version='doudizhu.v1', tool_schema_hash='doudizhu.v1')
     generation = 'doudizhu:' + str(uuid.uuid4())

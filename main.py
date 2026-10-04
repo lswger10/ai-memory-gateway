@@ -524,6 +524,7 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
             memory_tools=_actor_memory_tools,
         )
         _model_context_builder = GatewayExecutionContextBuilder(
+            profiles=_model_profile_store,
             calendar_client=calendar_client,
             group_context=_get_group_context_service(),
             bedroom_context=_get_bedroom_context_service(),
@@ -731,7 +732,9 @@ async def list_model_profiles():
     await _get_model_execution_service()
     assert _model_profile_store is not None
     profiles = await _model_profile_store.list_profiles()
-    return {"profiles": [_safe_profile(profile) for profile in profiles]}
+    return {"profiles": [{**_safe_profile(profile), "web_search_verified": bool(
+        profile.capabilities.web_search and await _model_profile_store.has_verified_probe(
+            profile.profile_id, profile.revision, "native_web_search"))} for profile in profiles]}
 
 
 @app.put("/api/model-profiles")
@@ -1221,6 +1224,11 @@ async def run_cache_probe(request: Request):
                 provider_runner=_model_provider_runner,
                 usage_store=_model_usage_store,
             )
+        probe_kind = body.get("probe_kind", "cache")
+        if probe_kind == "native_web_search":
+            return await _cache_probe_service.run_search(**values)
+        if probe_kind != "cache":
+            raise ValueError("unknown probe kind")
         result = await _cache_probe_service.run(**values)
     except HTTPException:
         raise

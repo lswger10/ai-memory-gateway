@@ -484,6 +484,7 @@
                         <div class="settings-field"><label for="model-profile-headers">Header templates (JSON)</label><input id="model-profile-headers" class="input" value='{"Authorization":"Bearer ${credential}"}'><small class="form-hint">只写模板，不粘贴真实 Key。Anthropic 可用 {"x-api-key":"${credential}","anthropic-version":"2023-06-01"}</small></div>
                         <div class="settings-field"><label for="model-profile-cache-strategy">Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option></select></div>
                         <div class="settings-field"><label for="model-profile-cache-ttl">请求 TTL</label><select id="model-profile-cache-ttl" class="input"><option value="">不请求</option><option value="5m">5m</option><option value="1h">1h（必须由真实探针验证）</option></select></div>
+                        <div class="settings-field"><label for="model-profile-web-search">原生搜索协议（保存不代表验证通过）</label><select id="model-profile-web-search" class="input"><option value="">不配置</option><option value="anthropic_web_search_20250305">Anthropic web_search_20250305</option><option value="openai_web_search">OpenAI Responses web_search</option></select></div>
                     </div>
                     <div style="display:flex;gap:14px;flex-wrap:wrap;margin:12px 0;">
                         <label class="checkbox-label"><input type="checkbox" id="model-profile-enabled" checked> enabled</label>
@@ -513,6 +514,7 @@
                         <div class="settings-field"><label for="probe-conversation">Canonical conversation ID</label><input id="probe-conversation" class="input" placeholder="从 Relay /app/rooms 取得"></div>
                     </div>
                     <button id="cache-probe-run" class="btn btn-warning" onclick="runCacheProbe()">确认产生两次调用并运行</button>
+                    <button id="search-probe-run" class="btn btn-warning" onclick="runCacheProbe('native_web_search')">确认产生一次搜索探针调用并运行</button>
                     <pre id="cache-probe-result" class="form-hint" style="white-space:pre-wrap;margin-top:12px;"></pre>
                 </div>
 
@@ -646,6 +648,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.13-scoped-import"></script>
+    <script src="/static/js/dashboard.js?v=3.14-native-search"></script>
 </body>
 </html>

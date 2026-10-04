@@ -161,6 +161,7 @@ function _profilePayload() {
             cache_strategies: [strategy],
             cache_ttls: ttl ? [ttl] : [],
             usage_fields: _editingModelProfile?.capabilities.usage_fields || [],
+            web_search: _modelField('model-profile-web-search').value || null,
             input_modalities: [
                 'text',
                 ...(_modelField('model-cap-image').checked ? ['image'] : []),
@@ -221,6 +222,7 @@ function editModelProfile(profileId = '') {
         _modelField('model-cap-' + id).checked = !!p?.capabilities[key];
     }
     for (const kind of ['image', 'document']) _modelField('model-cap-' + kind).checked = !!p?.capabilities.input_modalities.includes(kind);
+    _modelField('model-profile-web-search').value = p?.capabilities.web_search || '';
 }
 
 function _cacheOutcomeLabel(value) {
@@ -234,6 +236,7 @@ function _renderModelProfiles() {
             <div class="memory-item" style="margin-bottom:10px;">
                 <strong>${escapeHtml(profile.display_name)}</strong>
                 <span class="badge">${escapeHtml(profile.test_status)}</span>
+                <span class="badge">web search: ${profile.web_search_verified === true ? 'verified' : 'unverified'}</span>
                 <div class="form-hint">${escapeHtml(profile.provider)} · ${escapeHtml(profile.protocol)} · ${escapeHtml(profile.model)}</div>
                 <div class="form-hint">${escapeHtml(profile.cache_strategy)} · TTL ${escapeHtml(profile.requested_cache_ttl || 'none')} · key ${profile.credential_configured ? 'configured' : 'missing'}</div>
                 <button class="btn btn-secondary" data-profile-id="${escapeHtml(profile.profile_id)}" onclick="editModelProfile(this.dataset.profileId)">编辑</button>
@@ -372,11 +375,11 @@ async function loadModelProfilesAndUsage() {
     if (errors.length) _modelMessage(errors.join(' · '), true);
 }
 
-async function runCacheProbe() {
+async function runCacheProbe(probeKind = 'cache') {
     const conversationId = _modelField('probe-conversation').value.trim();
     if (!conversationId) return _modelMessage('请填写 Relay 返回的 canonical conversation ID。', true);
     const profile = _gatewayModelProfiles.find(p => p.profile_id === _modelField('probe-profile').value);
-    const button = _modelField('cache-probe-run');
+    const button = _modelField(probeKind === 'native_web_search' ? 'search-probe-run' : 'cache-probe-run');
     if (!profile || button.disabled) return;
     button.disabled = true;
     try {
@@ -385,6 +388,7 @@ async function runCacheProbe() {
             body: JSON.stringify({
                 profile_id: profile.profile_id,
                 profile_revision: profile.revision,
+                probe_kind: probeKind,
                 actor_id: _modelField('probe-actor').value,
                 room_id: _modelField('probe-room').value,
                 conversation_id: conversationId,

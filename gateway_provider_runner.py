@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+from urllib.parse import quote, urlsplit
 import anyio
 from typing import Any, AsyncIterator, Mapping
 
@@ -41,6 +42,20 @@ def _observed_cache_support(usage: ProviderUsage) -> str:
     if all(value is None for value in values) and usage.cache_creation_input_tokens is None:
         return "unavailable"
     return "unverified"
+
+
+def _web_citation(value):
+    """Only provider-returned public HTTP(S) citations become clickable text."""
+    url = value.get("url") if isinstance(value, Mapping) else None
+    if not isinstance(url, str):
+        return ""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            return ""
+    except ValueError:
+        return ""
+    return " [来源](" + quote(url, safe=":/?=&%#@+;,~!$*") + ")"
 
 
 class GatewayProviderRunner:
@@ -83,17 +98,25 @@ class GatewayProviderRunner:
         stable += tuple(
             PromptSegment("factual_history", text) for text in context.stable_history
         )
-        dynamic = tuple(
-            PromptSegment("current_event", text) for text in context.dynamic_tail
-        )
+        dynamic = context.dynamic_tail
+        base_tool_hash = context.tool_schema_hash.split("+web-search:", 1)[0]
         tools = (
             actor_memory_tool_definitions()
             if profile.capabilities.tools
-            and context.tool_schema_hash in {"actor-memory-tools.v1", CALENDAR_TOOL_SCHEMA_HASH}
+            and base_tool_hash in {"actor-memory-tools.v1", CALENDAR_TOOL_SCHEMA_HASH}
             else ()
         )
-        if tools and context.tool_schema_hash == CALENDAR_TOOL_SCHEMA_HASH:
+        if tools and base_tool_hash == CALENDAR_TOOL_SCHEMA_HASH:
             tools += (CALENDAR_TOOL,)
+        search_mode = profile.capabilities.web_search if context.web_search_enabled else None
+        if context.web_search_enabled and (
+            request.execution_kind != "full" or not search_mode
+            or (search_mode == "openai_web_search" and profile.protocol != "openai_responses")
+            or (search_mode == "anthropic_web_search_20250305" and not profile.protocol.startswith("anthropic_messages"))
+        ):
+            raise ValueError("web_search_not_supported_for_request")
+        if search_mode == "anthropic_web_search_20250305":
+            tools += ({"type": "web_search_20250305", "name": "web_search", "max_uses": 1},)
         if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
             cache_enabled = profile.cache_strategy == "anthropic_prefix_anchored_v1"
             if cache_enabled:
@@ -130,7 +153,8 @@ class GatewayProviderRunner:
             *(({"role": "user", "content": "[compressed summary]\n" + context.stable_summary},)
               if context.stable_summary else ()),
             *(render_history_message(text, getattr(request, "actor_id", None)) for text in context.stable_history),
-            *({"role": "user", "content": text} for text in context.dynamic_tail),
+            *({"role": "user", "content": f"[{segment.source_kind}]\n{segment.content}"}
+              for segment in dynamic),
         )
         cache_key = (
             cache_namespace
@@ -150,6 +174,7 @@ class GatewayProviderRunner:
                 max_output_tokens=maximum,
                 media_parts=media_parts,
                 tools=tools,
+                web_search_enabled=context.web_search_enabled,
             )
         if profile.protocol == "openai_chat_completions":
             return OpenAIChatCompletionsAdapter().render(
@@ -247,7 +272,7 @@ class GatewayProviderRunner:
                 calls = tool_item.data["calls"]
                 results = []
                 for call in calls:
-                    if call["name"] == "calendar" and self.calendar_client is not None and context.tool_schema_hash == CALENDAR_TOOL_SCHEMA_HASH:
+                    if call["name"] == "calendar" and self.calendar_client is not None and context.tool_schema_hash.split("+web-search:", 1)[0] == CALENDAR_TOOL_SCHEMA_HASH:
                         results.append(await self.calendar_client.call(request.actor_id, call["arguments"],
                             images_enabled="image" in profile.capabilities.input_modalities))
                         continue
@@ -269,7 +294,8 @@ class GatewayProviderRunner:
                             "code": "memory_permission_denied", "message": str(exc),
                         }}
                     results.append(result)
-                body = _continue_with_tool_results(profile.protocol, body, calls, results)
+                body = _continue_with_tool_results(profile.protocol, body, calls, results,
+                    assistant_content=tool_item.data.get("assistant_content"))
             raise ProviderRunUnavailable("provider tool loop exceeded limit")
         except (ProviderRunUnavailable, UsageRecordingError, asyncio.CancelledError, GeneratorExit):
             if self.memory_tools is not None and context.actor_memory_context is not None:
@@ -289,6 +315,12 @@ class GatewayProviderRunner:
         calls: dict[int, dict[str, Any]] = {}
         terminal_seen = False
         truncated = False
+        search_seen = False
+        search_results = False
+        search_citations = False
+        server_tool_indexes = set()
+        blocks = {}
+        block_json = {}
         async for event, data in _sse_json(response):
             if event == "error" or data.get("error"):
                 raise ProviderRunUnavailable("provider stream reported an error")
@@ -296,8 +328,20 @@ class GatewayProviderRunner:
                 terminal_seen = True
             if event == "message_delta":
                 truncated |= data.get("delta", {}).get("stop_reason") == "max_tokens"
+                if data.get("delta", {}).get("stop_reason") == "pause_turn":
+                    raise ProviderRunUnavailable("provider server tool paused before completion")
             if event == "content_block_start":
                 block = data.get("content_block", {})
+                index = int(data.get("index", 0))
+                blocks[index] = dict(block)
+                if isinstance(block, Mapping) and block.get("type") == "server_tool_use":
+                    server_tool_indexes.add(int(data.get("index", 0)))
+                    search_seen |= block.get("name") == "web_search"
+                if isinstance(block, Mapping) and block.get("type") == "web_search_tool_result":
+                    results = block.get("content")
+                    if isinstance(results, Mapping) and results.get("type") == "web_search_tool_result_error":
+                        raise ProviderRunUnavailable("provider web search failed")
+                    search_results |= isinstance(results, list) and any(item.get("type") == "web_search_result" for item in results if isinstance(item, Mapping))
                 if isinstance(block, Mapping) and block.get("type") == "tool_use":
                     calls[int(data.get("index", 0))] = {
                         "id": str(block.get("id", "")), "name": str(block.get("name", "")),
@@ -305,12 +349,24 @@ class GatewayProviderRunner:
                     }
             if event == "content_block_delta":
                 delta = data.get("delta", {})
+                index = int(data.get("index", 0))
                 value = delta.get("text") if isinstance(delta, Mapping) else None
                 if isinstance(value, str):
+                    block = blocks.setdefault(index, {"type": "text", "text": ""})
+                    block["text"] = block.get("text", "") + value
                     text += value
                     yield ProviderChunk("delta", {"text": value})
                 if isinstance(delta, Mapping) and delta.get("type") == "input_json_delta":
-                    calls[int(data.get("index", 0))]["json"] += str(delta.get("partial_json", ""))
+                    block_json[index] = block_json.get(index, "") + str(delta.get("partial_json", ""))
+                    if index not in server_tool_indexes:
+                        calls[index]["json"] += str(delta.get("partial_json", ""))
+                if isinstance(delta, Mapping) and delta.get("type") == "citations_delta":
+                    blocks.setdefault(index, {"type": "text", "text": ""}).setdefault("citations", []).append(delta.get("citation"))
+                    link = _web_citation(delta.get("citation"))
+                    if link:
+                        search_citations = True
+                        text += link
+                        yield ProviderChunk("delta", {"text": link})
             if event == "message_start":
                 message = data.get("message", {})
                 if isinstance(message, Mapping) and isinstance(message.get("usage"), Mapping):
@@ -321,8 +377,14 @@ class GatewayProviderRunner:
                 yield _usage_chunk(adapter, usage_values)
         if not terminal_seen:
             raise ProviderRunUnavailable("provider stream omitted its terminal event")
+        if search_seen:
+            yield ProviderChunk("web_search", {"verified": bool(search_results and search_citations)})
         if calls:
-            yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls)})
+            for index, raw in block_json.items():
+                if index in blocks:
+                    blocks[index]["input"] = json.loads(raw)
+            yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls),
+                "assistant_content": [blocks[index] for index in sorted(blocks)]})
         elif request.execution_kind == "probe":
             yield ProviderChunk("probe", _parse_probe(text))
         if not calls:
@@ -393,6 +455,10 @@ class GatewayProviderRunner:
         usage_values: dict[str, Any] = {}
         calls: dict[int, dict[str, Any]] = {}
         terminal_seen = False
+        search_completed = False
+        search_citations = False
+        output = None
+        citation_links = set()
         async for event, data in _sse_json(response):
             if event == "error" or data.get("error"):
                 raise ProviderRunUnavailable("provider stream reported an error")
@@ -401,6 +467,15 @@ class GatewayProviderRunner:
                 if isinstance(value, str):
                     text += value
                     yield ProviderChunk("delta", {"text": value})
+            if event == "response.web_search_call.completed":
+                search_completed = True
+            if event == "response.output_text.annotation.added":
+                link = _web_citation(data.get("annotation"))
+                if link and link not in citation_links:
+                    citation_links.add(link)
+                    search_citations = True
+                    text += link
+                    yield ProviderChunk("delta", {"text": link})
             if event == "response.output_item.added":
                 item = data.get("item", {})
                 if isinstance(item, Mapping) and item.get("type") == "function_call":
@@ -422,10 +497,23 @@ class GatewayProviderRunner:
                 raise ProviderRunUnavailable("provider response did not complete")
             if event == "response.completed":
                 terminal_seen = True
+                output = response_value.get("output") if isinstance(response_value, Mapping) else None
+                for item in output or ():
+                    search_completed |= item.get("type") == "web_search_call" and item.get("status") == "completed"
+                    for block in item.get("content", ()):
+                        for annotation in block.get("annotations", ()):
+                            link = _web_citation(annotation)
+                            if link and link not in citation_links:
+                                citation_links.add(link)
+                                search_citations = True
+                                text += link
+                                yield ProviderChunk("delta", {"text": link})
         if not terminal_seen:
             raise ProviderRunUnavailable("provider stream omitted its terminal event")
+        if search_completed:
+            yield ProviderChunk("web_search", {"verified": search_citations})
         if calls:
-            yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls)})
+            yield ProviderChunk("tool_calls", {"calls": _finish_calls(calls), "assistant_content": output})
         elif request.execution_kind == "probe":
             yield ProviderChunk("probe", _parse_probe(text))
         if not calls:
@@ -466,10 +554,10 @@ def _add_usage(left: ProviderUsage, right: ProviderUsage) -> ProviderUsage:
     )
 
 
-def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, results) -> dict[str, Any]:
+def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, results, *, assistant_content=None) -> dict[str, Any]:
     body = json.loads(json.dumps(body))
     if protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
-        body["messages"].append({"role": "assistant", "content": [
+        body["messages"].append({"role": "assistant", "content": assistant_content or [
             {"type": "tool_use", "id": call["id"], "name": call["name"], "input": call["arguments"]}
             for call in calls
         ]})
@@ -488,13 +576,15 @@ def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, resu
             for call, result in zip(calls, results, strict=True)
         )
     else:
+        if assistant_content:
+            body["input"].extend(assistant_content)
         body["input"].extend(
             item
             for call, result in zip(calls, results, strict=True)
-            for item in (
+            for item in ((
                 {"type": "function_call", "call_id": call["id"], "name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False)},
-                {"type": "function_call_output", "call_id": call["id"], "output": tool_result_text(result)},
-            )
+            ) if not assistant_content else ()) + (
+                {"type": "function_call_output", "call_id": call["id"], "output": tool_result_text(result)},)
         )
     for call, result in zip(calls, results, strict=True):
         images = tool_result_images(result)

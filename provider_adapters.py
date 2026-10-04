@@ -243,7 +243,7 @@ class AnthropicMessagesAdapter:
             "stream": True,
         }
         if layout.tools:
-            if not profile.capabilities.tools:
+            if not profile.capabilities.tools and any(tool.get("type") != "web_search_20250305" for tool in layout.tools):
                 raise ProviderAdapterError("Profile does not support tools")
             body["tools"] = list(layout.tools)
         return RenderedProviderRequest(method="POST", path="/v1/messages", json_body=body)
@@ -271,6 +271,7 @@ class OpenAIResponsesAdapter:
         max_output_tokens: int,
         media_parts: tuple[dict[str, Any], ...] = (),
         tools: tuple[dict[str, Any], ...] = (),
+        web_search_enabled: bool = False,
     ) -> RenderedProviderRequest:
         if profile.protocol != self.protocol:
             raise ProviderAdapterError("Profile protocol is not OpenAI Responses")
@@ -303,6 +304,11 @@ class OpenAIResponsesAdapter:
             if profile.cache_strategy != "openai_stable_prefix_v1":
                 raise ProviderAdapterError("prompt_cache_key requires OpenAI cache strategy")
             body["prompt_cache_key"] = prompt_cache_key
+        if web_search_enabled:
+            if profile.capabilities.web_search != "openai_web_search":
+                raise ProviderAdapterError("Profile has no native Responses search")
+            body.setdefault("tools", []).append({"type": "web_search", "search_context_size": "low"})
+            body["max_tool_calls"] = 1
         return RenderedProviderRequest(method="POST", path="/v1/responses", json_body=body)
 
     def parse_usage(self, payload: Mapping[str, Any]) -> ProviderUsage:

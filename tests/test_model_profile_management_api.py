@@ -139,6 +139,40 @@ def _client_with_store(monkeypatch, store):
     return TestClient(main.app, headers={"X-Gateway-Key": "test-admin"})
 
 
+def test_native_search_probe_requires_confirmation_and_exposes_revision_bound_proof(monkeypatch):
+    class ListingStore(InMemoryModelProfileStore):
+        async def list_profiles(self):
+            return (await self.get_profile("ofox-claude"),)
+
+    store = ListingStore()
+    payload = _profile_payload()
+    payload["capabilities"]["web_search"] = "anthropic_web_search_20250305"
+    asyncio.run(store.put_profile(ModelProfile.from_dict(payload)))
+    client = _client_with_store(monkeypatch, store)
+    calls = []
+
+    class ProbeService:
+        async def run_search(self, **values):
+            calls.append(values)
+            await store.record_probe_result(profile_id=values["profile_id"],
+                profile_revision=values["profile_revision"], probe_kind="native_web_search",
+                status="verified", observed_capabilities={})
+            return {"status": "verified"}
+
+    monkeypatch.setattr(main, "_cache_probe_service", ProbeService())
+    body = {"profile_id": payload["profile_id"], "profile_revision": 1,
+            "actor_id": "jiao", "room_id": "room_weiwei_jiao",
+            "conversation_id": "synthetic", "probe_kind": "native_web_search"}
+    assert client.get("/api/model-profiles").json()["profiles"][0]["web_search_verified"] is False
+    assert client.post("/api/cache-probes", json=body).status_code == 409
+    assert calls == []
+    assert client.post("/api/cache-probes", json={**body, "confirm_provider_charges": True}).status_code == 200
+    assert len(calls) == 1
+    assert client.get("/api/model-profiles").json()["profiles"][0]["web_search_verified"] is True
+    assert client.put("/api/model-profiles", json={**payload, "revision": 2}).status_code == 200
+    assert client.get("/api/model-profiles").json()["profiles"][0]["web_search_verified"] is False
+
+
 def test_profile_edit_preserves_hidden_credentials_and_rejects_stale_save(monkeypatch):
     store = InMemoryModelProfileStore()
     original = ModelProfile.from_dict(_profile_payload())

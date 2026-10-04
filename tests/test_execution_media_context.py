@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 import pytest
 
 from tests.test_conversation_media_partitions import media_event
@@ -71,7 +72,7 @@ async def test_current_media_reference_is_dynamic_and_never_enters_stable_histor
         resolved_conversation_id="group-media",
     )
     assert "photo-1.png" in bundle.stable_history[0]
-    assert "photo-1.png" not in "".join(bundle.dynamic_tail)
+    assert "photo-1.png" not in "".join(segment.content for segment in bundle.dynamic_tail)
     assert bundle.current_media_references[0]["attachment_id"] == "photo-1.png"
     assert all("data_url" not in item for item in bundle.current_media_references)
 

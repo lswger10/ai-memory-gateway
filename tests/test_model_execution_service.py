@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 import asyncio
 
 import pytest
@@ -87,7 +88,7 @@ class _ContextBuilder:
             static_system=("kernel", "actor", "room"),
             stable_summary="summary",
             stable_history=("history",),
-            dynamic_tail=("memory", "current"),
+            dynamic_tail=(PromptSegment("retrieved_memory", "memory"), PromptSegment("current_event", "current")),
             actor_prompt_version="jiao.v1",
             runtime_kernel_version="kernel.v1",
             room_policy_version="group.v1",
@@ -141,6 +142,63 @@ async def _service(*, fail_profiles=(), fallbacks=()):
         runner,
         usage,
     )
+
+
+@pytest.mark.anyio
+async def test_native_search_real_runner_reaches_public_final_without_new_stream_event():
+    import httpx
+    import json
+    from dataclasses import replace
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    profiles = InMemoryModelProfileStore()
+    profile = _profile("primary")
+    await profiles.put_profile(replace(profile, capabilities=replace(profile.capabilities, web_search="anthropic_web_search_20250305")))
+    await profiles.set_actor_default("jiao", "primary")
+    class Builder(_ContextBuilder):
+        async def build(self, request):
+            return replace(await super().build(request), web_search_enabled=True)
+    frames = [
+        ("message_start", {"message": {"usage": {"input_tokens": 50}}}),
+        ("content_block_start", {"index": 0, "content_block": {"type": "server_tool_use", "name": "web_search", "id": "s1"}}),
+        ("content_block_start", {"index": 1, "content_block": {"type": "web_search_tool_result", "content": [{"type": "web_search_result", "url": "https://docs.python.org/"}]}}),
+        ("content_block_delta", {"index": 2, "delta": {"type": "text_delta", "text": "Python docs."}}),
+        ("content_block_delta", {"index": 2, "delta": {"type": "citations_delta", "citation": {"url": "https://docs.python.org/"}}}),
+        ("message_stop", {}),
+    ]
+    response_text = "".join("event: " + event + "\ndata: " + json.dumps(data) + "\n\n" for event, data in frames)
+    transport = PooledHttpTransport(client_factory=lambda **kw: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, text=response_text)), **kw))
+    usage = InMemoryModelUsageStore()
+    service = GatewayModelExecutionService(profiles=profiles, context_builder=Builder(), usage_store=usage,
+        provider_runner=GatewayProviderRunner(transport=transport, credential_resolver=Resolver()))
+    try:
+        events = [event async for event in service.stream(_request())]
+        final = next(event for event in events if event.event == "final")
+        assert "https://docs.python.org/" in final.data["text"]
+        assert not any(event.event == "web_search" for event in events)
+        assert events[-1].event == "done"
+        assert len(await usage.list_receipts()) == 1
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
+async def test_search_ineligible_fallback_is_skipped_without_paid_call_or_silent_downgrade():
+    from dataclasses import replace
+    from model_execution import SearchCapabilityUnavailable
+    service, _, runner, _ = await _service(fail_profiles=("primary",), fallbacks=("no-search", "search-ok"))
+    class Builder(_ContextBuilder):
+        async def build(self, request, profile, **kwargs):
+            if profile.profile_id == "no-search":
+                raise SearchCapabilityUnavailable("web_search_unverified_for_profile")
+            return replace(await super().build(request), web_search_enabled=True)
+    service._context_builder = Builder()
+    events = [event async for event in service.stream(_request(binding_revision=None))]
+    assert [call[0] for call in runner.calls] == ["primary", "search-ok"]
+    assert all(call[2].web_search_enabled for call in runner.calls)
+    assert any(event.event == "final" for event in events)
 
 
 @pytest.mark.anyio

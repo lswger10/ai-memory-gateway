@@ -36,6 +36,7 @@ _CAPABILITY_FIELDS = {
     "cache_ttls",
     "usage_fields",
     "input_modalities",
+    "web_search",
 }
 _TEST_STATUSES = {"unverified", "passed", "failed", "unsupported"}
 _CACHE_STRATEGIES = {
@@ -82,6 +83,7 @@ class ProfileCapabilities:
     cache_ttls: tuple[str, ...]
     usage_fields: tuple[str, ...]
     input_modalities: tuple[str, ...]
+    web_search: str | None = None
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ProfileCapabilities":
@@ -121,6 +123,9 @@ class ProfileCapabilities:
             for value in input_modalities
         ):
             raise ProfileContractError("input modalities require text and known values")
+        web_search = payload.get("web_search")
+        if web_search not in {None, "anthropic_web_search_20250305", "openai_web_search"}:
+            raise ProfileContractError("unsupported native web search mode")
         return cls(
             **booleans,
             cache_strategies=cache_strategies,
@@ -129,6 +134,7 @@ class ProfileCapabilities:
                 payload.get("usage_fields"), "capabilities.usage_fields"
             ),
             input_modalities=input_modalities,
+            web_search=web_search,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,6 +185,13 @@ class ModelProfile:
         if not isinstance(capabilities_value, Mapping):
             raise ProfileContractError("capabilities must be an object")
         capabilities = ProfileCapabilities.from_dict(capabilities_value)
+        protocol = _required_string(payload.get("protocol"), "protocol")
+        search_protocols = {
+            "anthropic_web_search_20250305": {"anthropic_messages", "anthropic_messages_compatible"},
+            "openai_web_search": {"openai_responses"},
+        }
+        if capabilities.web_search and protocol not in search_protocols[capabilities.web_search]:
+            raise ProfileContractError("native web search mode does not match protocol")
         strategy = _required_string(payload.get("cache_strategy"), "cache_strategy")
         if strategy not in _CACHE_STRATEGIES:
             raise ProfileContractError("unsupported cache_strategy")
@@ -208,7 +221,7 @@ class ModelProfile:
             enabled=enabled,
             test_status=test_status,
             provider=_required_string(payload.get("provider"), "provider"),
-            protocol=_required_string(payload.get("protocol"), "protocol"),
+            protocol=protocol,
             base_url=_required_string(payload.get("base_url"), "base_url"),
             route_id=_required_string(payload.get("route_id"), "route_id"),
             model=_required_string(payload.get("model"), "model"),

@@ -3,12 +3,34 @@ import json
 import pytest
 
 from dataclasses import replace
+from cache_strategies import PromptSegment
 
 from actor_memory_tools import ACTOR_MEMORY_TOOL_NAMES, ActorMemoryExecutionContext, ActorMemoryToolLibrary, InMemoryActorMemoryToolStore
 from gateway_provider_runner import GatewayProviderRunner
 from model_execution import ContextBundle, ProviderRunUnavailable
 from model_execution_contracts import GatewayExecutionRequest
 from model_profiles import ModelProfile
+
+
+@pytest.mark.parametrize("protocol,mode", [("anthropic_messages_compatible", "anthropic_web_search_20250305"), ("openai_responses", "openai_web_search")])
+def test_native_search_is_mounted_only_for_opted_in_full_generation(protocol, mode):
+    payload = profile().to_dict()
+    payload["protocol"] = protocol
+    payload["capabilities"]["web_search"] = mode
+    if protocol == "openai_responses":
+        payload.update(cache_strategy="openai_stable_prefix_v1", requested_cache_ttl=None)
+        payload["capabilities"].update(cache_strategies=["openai_stable_prefix_v1"], cache_ttls=[])
+    selected = ModelProfile.from_dict(payload)
+    context = ContextBundle(("kernel", "actor", "room"), "", (), (PromptSegment("current_event", "question"),),
+                            "actor.v1", "runtime.v1", "room.v1", "tools.none.v1")
+    runner = GatewayProviderRunner()
+    off = runner._render(selected, request(), context, "namespace").json_body
+    assert "web_search" not in json.dumps(off)
+    on = runner._render(selected, request(), replace(context, web_search_enabled=True), "search-namespace").json_body
+    assert len(on["tools"]) == 1
+    assert on["tools"][0]["type"] == ("web_search_20250305" if mode.startswith("anthropic") else "web_search")
+    with pytest.raises(ValueError):
+        runner._render(profile(), request(), replace(context, web_search_enabled=True), "namespace")
 
 
 @pytest.mark.parametrize("protocol", ["anthropic_messages_compatible", "openai_chat_completions", "openai_responses"])
@@ -27,7 +49,7 @@ def test_factual_history_uses_current_actor_assistant_role_only(protocol, actor_
     ]
     context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="an older summary",
         stable_history=tuple(json.dumps(event, ensure_ascii=False) for event in events),
-        dynamic_tail=("fresh memory and current message",), actor_prompt_version="actor.v1",
+        dynamic_tail=(PromptSegment("retrieved_memory", "fresh memory and current message"),), actor_prompt_version="actor.v1",
         runtime_kernel_version="kernel.v1", room_policy_version="room.v1", tool_schema_hash="tools.none.v1")
     runner = GatewayProviderRunner()
     body = runner._render(selected, replace(request(), actor_id=actor_id), context, "namespace").json_body
@@ -48,7 +70,7 @@ def test_factual_history_uses_current_actor_assistant_role_only(protocol, actor_
         assert messages[-2]["content"][-1]["cache_control"]["ttl"] == "5m"
         assert "cache_control" not in messages[-1]["content"][0]
     changed = runner._render(selected, replace(request(), actor_id=actor_id),
-        replace(context, dynamic_tail=("different retrieval",)), "namespace").json_body
+        replace(context, dynamic_tail=(PromptSegment("current_event", "different retrieval"),)), "namespace").json_body
     key = "input" if protocol == "openai_responses" else "messages"
     assert body[key][:-1] == changed[key][:-1]
 
@@ -61,6 +83,46 @@ def test_history_projection_does_not_strip_literal_envelopes_from_message_text()
              "event_type": "agent_final", "content": content}
     assert render_history_message(json.dumps(event), "laoke") == {
         "role": "assistant", "content": content}
+
+
+@pytest.mark.parametrize("protocol", ["anthropic_messages_compatible", "openai_chat_completions", "openai_responses"])
+def test_auxiliary_context_preserves_its_type_in_provider_input(protocol):
+    recall = json.dumps({"public_group_recall": [{
+        "room_id": "room_group_home", "event_id": 1,
+        "actor_id": "jiao", "content": "A past public board-game plan",
+    }]})
+    context = ContextBundle(
+        static_system=("kernel", "actor", "private room policy"),
+        stable_summary="Older private summary", stable_history=(),
+        dynamic_tail=(PromptSegment("current_time", "2026-10-04T09:01:00Z"),
+                      PromptSegment("context_recall", recall),
+                      PromptSegment("retrieved_memory", "A remembered preference"),
+                      PromptSegment("relationship_summary", "A relationship summary"),
+                      PromptSegment("current_event", "Current private question")),
+        actor_prompt_version="actor.v1", runtime_kernel_version="kernel.v1",
+        room_policy_version="private.v1", tool_schema_hash="tools.none.v1",
+    )
+    runner = GatewayProviderRunner()
+    selected = profile().to_dict()
+    if protocol.startswith("openai"):
+        selected.update(protocol=protocol, cache_strategy="openai_stable_prefix_v1", requested_cache_ttl=None)
+        selected["capabilities"].update(cache_strategies=["openai_stable_prefix_v1"], cache_ttls=[])
+    selected = ModelProfile.from_dict(selected)
+    body = runner._render(selected, request(), context, "namespace").json_body
+    key = "input" if protocol == "openai_responses" else "messages"
+    tail = body[key][-5:]
+    texts = [message["content"] if protocol == "openai_chat_completions"
+             else message["content"][0]["text"] for message in tail]
+    assert [text.split("\n", 1)[0] for text in texts] == [
+        "[current_time]", "[context_recall]", "[retrieved_memory]", "[relationship_summary]", "[current_event]"]
+    assert recall in texts[1]
+    assert "Current private question" in texts[-1]
+    assert "cache_control" not in json.dumps(tail)
+    changed = runner._render(selected, request(),
+        replace(context, dynamic_tail=(PromptSegment("current_time", "2026-10-04T09:02:00Z"),
+                                       PromptSegment("current_event", "Another private question"))),
+        "namespace").json_body
+    assert body[key][:-5] == changed[key][:-2]
 
 
 def profile():
@@ -124,6 +186,56 @@ def request():
 class Resolver:
     def resolve(self, credential_ref):
         return "secret"
+
+
+@pytest.mark.anyio
+async def test_anthropic_server_search_is_not_mistaken_for_client_tool_and_preserves_citation():
+    class SearchResponse:
+        async def aiter_lines(self):
+            frames = [
+                ("content_block_start", {"index": 0, "content_block": {"type": "server_tool_use", "name": "web_search", "id": "search-1"}}),
+                ("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+                ("content_block_start", {"index": 1, "content_block": {"type": "web_search_tool_result", "content": [{"type": "web_search_result", "url": "https://example.org/"}]}}),
+                ("content_block_delta", {"index": 2, "delta": {"type": "text_delta", "text": "Found it."}}),
+                ("content_block_delta", {"index": 2, "delta": {"type": "citations_delta", "citation": {"type": "web_search_result_location", "url": "https://example.org/", "title": "Example"}}}),
+                ("message_stop", {}),
+            ]
+            for event, data in frames:
+                yield f"event: {event}"
+                yield "data: " + json.dumps(data)
+                yield ""
+    chunks = [item async for item in GatewayProviderRunner()._anthropic(SearchResponse(), profile(), request())]
+    assert not any(item.event == "tool_calls" for item in chunks)
+    assert "https://example.org/" in next(item.data["text"] for item in chunks if item.event == "final")
+    assert any(item.event == "web_search" and item.data["verified"] for item in chunks)
+
+
+@pytest.mark.anyio
+async def test_responses_search_output_and_citations_survive_client_tool_continuation():
+    from gateway_provider_runner import _continue_with_tool_results
+    output = [
+        {"type": "web_search_call", "id": "ws-1", "status": "completed", "action": {"type": "search", "query": "Python"}},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Found.",
+            "annotations": [{"type": "url_citation", "url": "https://docs.python.org/", "title": "Python", "start_index": 0, "end_index": 6}]}]},
+        {"type": "function_call", "call_id": "f-1", "name": "memory_search", "arguments": '{"query":"Python"}'},
+    ]
+    class SearchResponse:
+        async def aiter_lines(self):
+            for event, data in [
+                ("response.output_item.added", {"output_index": 2, "item": output[2]}),
+                ("response.output_text.delta", {"delta": "Found."}),
+                ("response.completed", {"response": {"output": output, "usage": {"input_tokens": 10}}}),
+            ]:
+                yield "event: " + event
+                yield "data: " + json.dumps(data)
+                yield ""
+    items = [item async for item in GatewayProviderRunner()._openai_responses(SearchResponse(), profile(), request())]
+    tools = next(item.data for item in items if item.event == "tool_calls")
+    assert any(item.event == "web_search" and item.data["verified"] for item in items)
+    assert any("https://docs.python.org/" in item.data.get("text", "") for item in items if item.event == "delta")
+    continued = _continue_with_tool_results("openai_responses", {"input": []}, tools["calls"], [{"ok": True}], assistant_content=tools["assistant_content"])
+    assert continued["input"][:3] == output
+    assert continued["input"][3]["type"] == "function_call_output"
 
 
 class Response:
@@ -296,7 +408,7 @@ async def test_denied_memory_tool_returns_error_and_still_completes_reply(protoc
     store = InMemoryActorMemoryToolStore()
     # Real ACL: the fixture asks to write Jiao's memory while bound to Laoke.
     context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="",
-        stable_history=(), dynamic_tail=("synthetic image discussion",), actor_prompt_version="actor.v1",
+        stable_history=(), dynamic_tail=(PromptSegment("current_event", "synthetic image discussion"),), actor_prompt_version="actor.v1",
         runtime_kernel_version="kernel.v1", room_policy_version="room.v1", tool_schema_hash="actor-memory-tools.v1",
         actor_memory_context=ActorMemoryExecutionContext(actor_id="laoke", room_id="room_weiwei_laoke",
             conversation_id="conversation-1", generation_request_id="generation-1", source_event_id=101,
@@ -343,7 +455,7 @@ async def test_anthropic_runner_keeps_dynamic_tail_after_cache_breakpoint(monkey
         static_system=("kernel", "actor", "room"),
         stable_summary="summary",
         stable_history=("old fact",),
-        dynamic_tail=("retrieved memory", "current event"),
+        dynamic_tail=(PromptSegment("retrieved_memory", "retrieved memory"), PromptSegment("current_event", "current event")),
         actor_prompt_version="actor.v1",
         runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1",
@@ -387,7 +499,7 @@ async def test_text_delta_arrives_before_provider_finishes():
 
     runner = GatewayProviderRunner(transport=LiveTransport(), credential_resolver=Resolver())
     context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="", stable_history=(),
-        dynamic_tail=("hello",), actor_prompt_version="v1", runtime_kernel_version="v1",
+        dynamic_tail=(PromptSegment("current_event", "hello"),), actor_prompt_version="v1", runtime_kernel_version="v1",
         room_policy_version="v1", tool_schema_hash="none")
     stream = runner.run(profile=profile(), request=request(), context=context, cache_namespace="test")
     try:
@@ -419,7 +531,7 @@ async def test_empty_terminal_is_a_failed_attempt_not_a_successful_reply():
     async def on_attempt(_id, _usage, status, *_args): statuses.append(status)
     runner = GatewayProviderRunner(transport=EmptyTransport(), credential_resolver=Resolver())
     context = ContextBundle(static_system=("kernel", "actor", "room"), stable_summary="", stable_history=(),
-        dynamic_tail=("hello",), actor_prompt_version="v1", runtime_kernel_version="v1",
+        dynamic_tail=(PromptSegment("current_event", "hello"),), actor_prompt_version="v1", runtime_kernel_version="v1",
         room_policy_version="v1", tool_schema_hash="none")
     with pytest.raises(ProviderRunUnavailable, match="without reply text"):
         _ = [item async for item in runner.run(profile=profile(), request=request(),
@@ -446,7 +558,7 @@ async def test_anthropic_tool_call_is_private_staged_and_followed_by_tool_result
     )
     context = ContextBundle(
         static_system=("kernel", "actor", "room"), stable_summary="",
-        stable_history=(), dynamic_tail=("current event",),
+        stable_history=(), dynamic_tail=(PromptSegment("current_event", "current event"),),
         actor_prompt_version="actor.v1", runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1", tool_schema_hash="actor-memory-tools.v1",
         actor_memory_context=memory_context,
@@ -482,7 +594,7 @@ async def test_openai_tool_call_is_private_staged_and_followed_by_native_tool_re
     )
     context = ContextBundle(
         static_system=("kernel", "actor", "room"), stable_summary="",
-        stable_history=(), dynamic_tail=("current event",),
+        stable_history=(), dynamic_tail=(PromptSegment("current_event", "current event"),),
         actor_prompt_version="actor.v1", runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1", tool_schema_hash="actor-memory-tools.v1",
         actor_memory_context=memory_context,
@@ -521,7 +633,7 @@ async def test_provider_failure_after_tool_call_discards_private_staged_mutation
     )
     context = ContextBundle(
         static_system=("kernel", "actor", "room"), stable_summary="",
-        stable_history=(), dynamic_tail=("current event",),
+        stable_history=(), dynamic_tail=(PromptSegment("current_event", "current event"),),
         actor_prompt_version="actor.v1", runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1", tool_schema_hash="actor-memory-tools.v1",
         actor_memory_context=memory_context,
@@ -549,7 +661,7 @@ async def test_anthropic_no_cache_profile_sends_no_cache_control():
         static_system=("kernel", "actor", "room"),
         stable_summary="summary",
         stable_history=("old fact",),
-        dynamic_tail=("current event",),
+        dynamic_tail=(PromptSegment("current_event", "current event"),),
         actor_prompt_version="actor.v1",
         runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1",
@@ -582,7 +694,7 @@ def test_openai_render_keeps_compressed_summary_before_anchored_history():
         static_system=("kernel", "actor", "room"),
         stable_summary="bounded compressed summary",
         stable_history=("anchored fact",),
-        dynamic_tail=("current event",),
+        dynamic_tail=(PromptSegment("current_event", "current event"),),
         actor_prompt_version="actor.v1",
         runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1",
@@ -595,7 +707,7 @@ def test_openai_render_keeps_compressed_summary_before_anchored_history():
 
     assert rendered.json_body["messages"][1]["content"].endswith("bounded compressed summary")
     assert rendered.json_body["messages"][2]["content"] == "anchored fact"
-    assert rendered.json_body["messages"][3]["content"] == "current event"
+    assert rendered.json_body["messages"][3]["content"] == "[current_event]\ncurrent event"
 
 
 def test_openai_chat_render_includes_actor_memory_tools_when_profile_allows_them():
@@ -611,7 +723,7 @@ def test_openai_chat_render_includes_actor_memory_tools_when_profile_allows_them
     openai = ModelProfile.from_dict(payload)
     context = ContextBundle(
         static_system=("kernel", "actor", "room"), stable_summary="",
-        stable_history=(), dynamic_tail=("current event",),
+        stable_history=(), dynamic_tail=(PromptSegment("current_event", "current event"),),
         actor_prompt_version="actor.v1", runtime_kernel_version="kernel.v1",
         room_policy_version="room.v1", tool_schema_hash="actor-memory-tools.v1",
     )

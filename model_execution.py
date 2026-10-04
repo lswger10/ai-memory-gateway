@@ -5,6 +5,7 @@ import logging
 from typing import Any, AsyncIterator, Protocol
 
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
+from cache_strategies import PromptSegment
 from model_profile_store import InMemoryModelProfileStore
 from model_usage_store import (
     execution_receipt_draft,
@@ -20,12 +21,16 @@ class ProviderRunUnavailable(RuntimeError):
     """A sanitized, retryable provider-attempt failure."""
 
 
+class SearchCapabilityUnavailable(ValueError):
+    """Skip this approved candidate without spending or disabling search."""
+
+
 @dataclass(frozen=True, slots=True)
 class ContextBundle:
     static_system: tuple[str, ...]
     stable_summary: str
     stable_history: tuple[str, ...]
-    dynamic_tail: tuple[str, ...]
+    dynamic_tail: tuple[PromptSegment, ...]
     actor_prompt_version: str
     runtime_kernel_version: str
     room_policy_version: str
@@ -36,6 +41,7 @@ class ContextBundle:
     compressed_up_to_event_id: int | None = None
     current_media_references: tuple[dict[str, Any], ...] = ()
     actor_memory_context: Any | None = None
+    web_search_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +125,9 @@ class GatewayModelExecutionService:
                     resolved_conversation_id=conversation_id,
                     allow_compression=index == 0,
                 )
+            except SearchCapabilityUnavailable as exc:
+                last_unavailable = ProviderRunUnavailable(str(exc))
+                continue
             except TypeError:
                 # Transitional support for injected deterministic test builders.
                 context = await self._context_builder.build(request)
@@ -167,6 +176,10 @@ class GatewayModelExecutionService:
             )
             try:
                 async for chunk in provider_stream:
+                    if chunk.event == "web_search":
+                        # Native-search capability evidence is Gateway-internal,
+                        # not a new event in the frozen Orchestrator stream.
+                        continue
                     if chunk.event == "usage":
                         candidate = chunk.data.get("usage")
                         if not isinstance(candidate, ProviderUsage):

@@ -17,6 +17,7 @@ _STABLE_MESSAGE_KINDS = {
     "older_image_description",
 }
 _DYNAMIC_KINDS = {
+    "context_recall",
     "current_time",
     "request_metadata",
     "retrieved_memory",

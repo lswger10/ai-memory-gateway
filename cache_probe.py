@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 import uuid
+from cache_strategies import PromptSegment
 from typing import Protocol
 
 from model_execution import ContextBundle
@@ -115,32 +116,35 @@ class GatewayCacheProbeService:
             ),
             stable_summary="gateway-cache-probe-summary-v1",
             stable_history=("gateway-cache-probe-history-v1",),
-            dynamic_tail=("cache-probe-dynamic-tail-v1",),
+            dynamic_tail=(PromptSegment("request_metadata", "cache-probe-dynamic-tail-v1"),),
             actor_prompt_version="cache-probe.actor.v1",
             runtime_kernel_version="cache-probe.runtime.v1",
             room_policy_version="cache-probe.room.v1",
             tool_schema_hash="cache-probe.tools.v1",
         )
 
-    async def _once(self, *, profile, request, context, cache_namespace) -> ProviderUsage:
+    async def _once(self, *, profile, request, context, cache_namespace,
+                    execution_purpose="cache_probe", max_output_tokens=32, search_evidence=None) -> ProviderUsage:
         usage = ProviderUsage.from_provider_values()
         final_seen = False
         draft = execution_receipt_draft(profile=profile,
             generation_request_id=request.generation_request_id, actor_id=request.actor_id,
             room_id=request.room_id, conversation_id=request.conversation_id,
-            context=context, cache_namespace=cache_namespace, execution_purpose="cache_probe")
+            context=context, cache_namespace=cache_namespace, execution_purpose=execution_purpose)
         stream = self.provider_runner.run(
             profile=profile,
             request=request,
             context=context,
             cache_namespace=cache_namespace,
-            max_output_tokens=32,
+            max_output_tokens=max_output_tokens,
             on_attempt=partial(record_provider_attempt, self.usage_store, draft),
         )
         try:
             async for chunk in stream:
                 if chunk.event == "final":
                     final_seen = True
+                elif chunk.event == "web_search" and search_evidence is not None:
+                    search_evidence.append(chunk.data.get("verified") is True)
                 elif chunk.event == "usage":
                     candidate = chunk.data.get("usage")
                     if isinstance(candidate, ProviderUsage):
@@ -152,6 +156,42 @@ class GatewayCacheProbeService:
             close = getattr(stream, "aclose", None)
             if close is not None:
                 await close()
+
+    async def run_search(self, *, profile_id, actor_id, room_id, conversation_id,
+                         profile_revision=None):
+        """One explicit native-tool probe; never a chat fact or automatic retry."""
+        profile = await self.profiles.get_profile(profile_id)
+        if profile_revision is not None and profile.revision != profile_revision:
+            raise ProfileStoreError("Profile revision conflict before probe")
+        if not profile.capabilities.web_search:
+            raise ValueError("native web search mode is not configured")
+        request = self._request(actor_id=actor_id, room_id=room_id,
+            conversation_id=conversation_id, profile_id=profile_id)
+        context = ContextBundle(static_system=("Use the web search tool once and cite the source URL.",),
+            stable_summary="", stable_history=(),
+            dynamic_tail=(PromptSegment("current_event", "Search for the official Python documentation website. Reply with its URL and one short sentence."),),
+            actor_prompt_version="search-probe.v1", runtime_kernel_version="search-probe.v1",
+            room_policy_version="search-probe.v1", tool_schema_hash="search-probe.v1",
+            web_search_enabled=True)
+        evidence = []
+        usage = ProviderUsage.from_provider_values()
+        try:
+            usage = await self._once(profile=profile, request=request, context=context,
+                cache_namespace=f"native-search-probe:{profile_id}:{profile.revision}",
+                execution_purpose="web_search_probe", max_output_tokens=512, search_evidence=evidence)
+            status = "verified" if any(evidence) else "unverified"
+        except UsageRecordingError:
+            raise
+        except Exception:
+            status = "failed"
+        await self.profiles.record_probe_result(profile_id=profile_id,
+            profile_revision=profile.revision, probe_kind="native_web_search", status=status,
+            observed_capabilities={"web_search": profile.capabilities.web_search,
+                                   "provider_search_and_citation": any(evidence)})
+        if status == "verified":
+            await self.profiles.set_test_status(profile_id, "passed", expected_revision=profile.revision)
+        return {"status": status, "profile_id": profile_id, "profile_revision": profile.revision,
+                "usage": asdict(usage)}
 
     async def run(
         self,

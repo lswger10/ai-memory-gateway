@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 import pytest
 import json
 from dataclasses import replace
@@ -11,6 +12,11 @@ from model_profiles import ModelProfile
 class _Relay:
     def __init__(self):
         self.events = [_event(1), _event(2)]
+
+
+
+    async def fetch_interaction_context(self, **kwargs):
+        return {"context": None, "accepted_at": "2026-10-04T09:01:00Z"}
 
     async def fetch_model_history_facts(self, **kwargs):
         return tuple(
@@ -42,13 +48,100 @@ def _event(
     }
 
 
+@pytest.mark.anyio
+async def test_live_clock_changes_only_dynamic_tail(monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+    clock = Mock()
+    clock.now.return_value = datetime(2026, 10, 4, 9, 1, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("execution_context_builder.datetime", clock, raising=False)
+    builder = GatewayExecutionContextBuilder(group_context=_GroupContext(), bedroom_context=object())
+    args = dict(resolved_room_id="room_weiwei_jiao", resolved_conversation_id="conversation-1")
+    before = await builder.build(_request(), _profile(), **args)
+    clock.now.return_value = datetime(2026, 10, 4, 9, 2, 1, tzinfo=timezone.utc)
+    after = await builder.build(_request(), _profile(), **args)
+    first = json.loads(next(s.content for s in before.dynamic_tail if s.source_kind == "current_time"))
+    second = json.loads(next(s.content for s in after.dynamic_tail if s.source_kind == "current_time"))
+    assert first["now_utc"] == "2026-10-04T09:01:00+00:00"
+    assert second["now_utc"] == "2026-10-04T09:02:01+00:00"
+    assert first["current_event_created_at"] == _event(2)["created_at"]
+    assert first["timezone"] == "UTC"
+    assert before.static_system == after.static_system
+    assert before.stable_history == after.stable_history
+    assert before.stable_summary == after.stable_summary
+    assert before.stable_prefix_hash == after.stable_prefix_hash
+    assert before.summary_version == after.summary_version
+    assert await builder.conversation_store.count_facts("conversation-1") == 2
+
+
+@pytest.mark.anyio
+async def test_device_clock_uses_original_trigger_and_only_changes_dynamic_tail(monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock, AsyncMock
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 10, 4, 9, 2, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("execution_context_builder.datetime", clock)
+    group = _GroupContext()
+    group.relay_client = _Relay()
+    group.relay_client.fetch_interaction_context = AsyncMock(return_value={
+        "accepted_at": "2026-10-04T09:01:00Z", "context": {
+            "device_time": "2026-10-04T09:00:00Z", "timezone": "Asia/Shanghai",
+            "utc_offset_minutes": 480, "web_search_enabled": False}})
+    builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=object())
+    args = dict(resolved_room_id="room_weiwei_jiao", resolved_conversation_id="conversation-1")
+    before = await builder.build(_request(), _profile(), **args)
+    stamp = json.loads(before.dynamic_tail[0].content)
+    assert stamp["now_local"] == "2026-10-04T17:01:00+08:00"
+    assert stamp["timezone"] == "Asia/Shanghai"
+    assert group.relay_client.fetch_interaction_context.call_args.kwargs["trigger_event_id"] == _request().fence.trigger_event_id
+    clock.now.return_value = datetime(2026, 10, 4, 9, 3, 0, tzinfo=timezone.utc)
+    after = await builder.build(_request(), _profile(), **args)
+    assert before.stable_prefix_hash == after.stable_prefix_hash
+    assert before.static_system == after.static_system
+    assert before.dynamic_tail != after.dynamic_tail
+
+
+@pytest.mark.anyio
+async def test_search_requires_opt_in_and_current_revision_probe_without_forking_summary():
+    from unittest.mock import AsyncMock
+    from model_profile_store import InMemoryModelProfileStore
+    group = _GroupContext()
+    group.relay_client = _Relay()
+    device = {"device_time": "2026-10-04T09:00:00Z", "timezone": "UTC",
+              "utc_offset_minutes": 0, "web_search_enabled": True}
+    group.relay_client.fetch_interaction_context = AsyncMock(return_value={
+        "context": device, "accepted_at": "2026-10-04T09:00:00Z"})
+    profiles = InMemoryModelProfileStore()
+    profile = _profile()
+    profile = replace(profile, capabilities=replace(profile.capabilities, web_search="anthropic_web_search_20250305"))
+    await profiles.put_profile(profile)
+    builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=object(), profiles=profiles)
+    args = dict(resolved_room_id="room_weiwei_jiao", resolved_conversation_id="conversation-1")
+    with pytest.raises(ValueError, match="web_search_unverified"):
+        await builder.build(_request(), profile, **args)
+    await profiles.record_probe_result(profile_id=profile.profile_id, profile_revision=profile.revision,
+        probe_kind="native_web_search", status="verified", observed_capabilities={})
+    enabled = await builder.build(_request(), profile, **args)
+    assert enabled.web_search_enabled
+    assert "+web-search:" in enabled.tool_schema_hash
+    device["web_search_enabled"] = False
+    disabled = await builder.build(_request(), profile, **args)
+    assert not disabled.web_search_enabled
+    assert "+web-search:" not in disabled.tool_schema_hash
+    assert enabled.stable_history == disabled.stable_history
+    assert enabled.summary_version == disabled.summary_version
+    device["web_search_enabled"] = True
+    with pytest.raises(ValueError, match="web_search_unverified"):
+        await builder.build(_request(), replace(profile, revision=profile.revision+1), **args)
+
+
 class _GroupContext:
     relay_client = _Relay()
 
     async def build_execution_components(self, request, *, pack_kind):
         return {
             "static_system": ("runtime", "actor", "room"),
-            "dynamic_tail": ("dynamic",),
+            "dynamic_tail": (PromptSegment("current_event", "dynamic"),),
             "actor_prompt_version": "actor.v1",
             "runtime_kernel_version": "runtime.v1",
             "room_policy_version": "room.v1",
@@ -66,6 +159,9 @@ class _GroupContext:
 
 
 class _BedroomRelay:
+    async def fetch_interaction_context(self, **kwargs):
+        return {"context": None, "accepted_at": "2026-10-04T09:01:00Z"}
+
     def __init__(self):
         self.payload = {
             "session": {
@@ -93,7 +189,7 @@ class _BedroomContext:
     async def build_execution_components(self, request):
         return {
             "static_system": ("runtime", "actor", "room"),
-            "dynamic_tail": ("current",),
+            "dynamic_tail": (PromptSegment("current_event", "current"),),
             "actor_prompt_version": "actor.v1",
             "runtime_kernel_version": "runtime.v1",
             "room_policy_version": "bedroom.v1",
@@ -202,7 +298,7 @@ async def test_private_recall_adds_public_excerpts_only_to_dynamic_tail(actor_id
     public["content"] = "缓存保活每50分钟一次，不代表永久命中。"
     await store.append_accepted_facts((ConversationFact.from_relay_event(public),))
     after = await builder.build(request, _profile(), resolved_room_id=room_id, resolved_conversation_id="conversation-1")
-    recall = next(tail for tail in after.dynamic_tail if "public_group_recall" in tail)
+    recall = next(segment.content for segment in after.dynamic_tail if segment.source_kind == "context_recall")
     payload = json.loads(recall)
     assert payload["public_group_recall"][0]["actor_id"] == "laoke"
     assert payload["public_group_recall"][0]["event_id"] == 3
@@ -217,7 +313,7 @@ async def test_private_recall_adds_public_excerpts_only_to_dynamic_tail(actor_id
     assert public["content"] in json.dumps(rendered, ensure_ascii=False)
     probe = await builder.build(replace(request, execution_kind="probe"), _profile(),
         resolved_room_id=room_id, resolved_conversation_id="conversation-1")
-    assert all("public_group_recall" not in tail for tail in probe.dynamic_tail)
+    assert all(segment.source_kind != "context_recall" for segment in probe.dynamic_tail)
 
 
 @pytest.mark.anyio
@@ -247,7 +343,7 @@ async def test_recall_does_not_inject_unrelated_or_non_private_context(mode):
     bedroom.relay_client.payload["turns"][-1]["text"] = "缓存保活"
     builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=bedroom, conversation_store=store)
     bundle = await builder.build(request, _profile(), resolved_room_id=room_id, resolved_conversation_id="conversation-1")
-    assert all("public_group_recall" not in tail for tail in bundle.dynamic_tail)
+    assert all(segment.source_kind != "context_recall" for segment in bundle.dynamic_tail)
 
 
 @pytest.mark.anyio
@@ -504,7 +600,7 @@ async def test_cache_keepalive_uses_all_persisted_facts_and_no_dynamic_context_p
 
     assert '"event_id":1' in "".join(bundle.stable_history)
     assert '"event_id":2' in "".join(bundle.stable_history)
-    assert bundle.dynamic_tail == ("Cache continuity maintenance request.",)
+    assert bundle.dynamic_tail == (PromptSegment("request_metadata", "Cache continuity maintenance request."),)
     assert bundle.static_system == (
         "runtime", "actor:jiao", "room:room_weiwei_jiao"
     )

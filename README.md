@@ -1,5 +1,86 @@
 # AI Memory Gateway
 
+## Runtime context provenance repair (2026-10-04, local; not deployed)
+
+The Anthropic renderer previously labeled every dynamic-tail string
+`current_event`, including public Living Room recall, retrieved memory and
+relationship summaries. This was an input-label defect, not evidence that Relay
+routed private facts into Group. A reported private-room response misidentified
+its current scene as Group; historical provider payloads are not available to
+prove the complete incident cause.
+
+`ContextBundle.dynamic_tail` now carries the existing `PromptSegment` type from
+its owner through all three protocol renderers. Historical recall is
+`context_recall`, memory is `retrieved_memory`, summaries are
+`relationship_summary`, and only actual current conversation/game input is
+`current_event`. Bedroom scene context, stance, probe instructions, calendar
+environment and cache maintenance retain separate types. Current conversation
+input includes room/conversation/event coordinates (Bedroom also includes the
+session/turn). Do not infer segment types from user text or re-label the entire
+tail as current events. No string-tail compatibility fallback is retained.
+
+Current-event selection precedes the recent-context display limit. A missing
+requested event fails explicitly, rather than substituting the older burst
+trigger. Frozen contract fixtures remain unchanged; runtime tests supply an
+event that actually exists in the fixture transcript.
+
+This changes dynamic input only: the stable cache prefix, compression algorithm,
+Persona, memory ACL and stored history are unchanged. No private incident text
+is copied into tests. Local regression results and TEST deployment are distinct;
+this entry does not claim the reported privacy incidents are fully resolved.
+
+Generation receives a separate `current_time` dynamic segment with UTC, the
+accepted current event's timestamp, and (when supplied) the interacting device's
+system time, timezone label and UTC offset. Device time advances by server elapsed
+time since Relay acceptance; it is a context hint, never an ordering/lease clock.
+Missing device context is explicitly UTC-only. Neither clock enters the stable
+prefix/hash, summary or transcript. Cache keepalive and frozen cache probes do not
+acquire it. Relay's authenticated `POST /internal/interaction-context` reads the
+original human trigger's durable outbox context, checking actor/room/conversation
+and current+trigger identity; Group's second actor shares that interaction hint,
+not another room's clock or search choice. Bedroom additionally binds its session.
+
+### Optional native web search (local implementation; routes not verified here)
+
+`Profile.capabilities.web_search` is null, `anthropic_web_search_20250305`, or
+`openai_web_search` (Responses only). A declaration alone does not enable chat:
+the existing probe-result store must contain `native_web_search=verified` for the
+exact Profile revision. Dashboard's explicit one-call search probe uses a small
+synthetic prompt and requires a provider search result/call plus a real URL
+citation; prose claiming a search is not proof. It uses `/api/cache-probes` with
+`probe_kind=native_web_search` and the existing charge-confirmation/auth boundary.
+Usage is recorded as `web_search_probe`; it never writes a Relay final or memory.
+Verified search also verifies generation for that same Profile revision; it does
+not create cache/TTL proof or activate a binding. A failed/unobservable search
+probe does not revoke an independently verified generation route.
+
+The PWA captures a per-conversation opt-in on each new send. Off omits the search
+tool. On full generation only, the tool hash gets a search suffix, separating its
+provider cache while retaining the existing cognitive summary/cursor. A switch
+can cause a legitimate prefix rebuild. Probe, compression and keepalive do not
+mount search. Only explicitly approved, search-verified fallback candidates may
+execute when opted in; unsupported candidates are skipped without provider spend.
+Native search evidence stays inside Gateway; the Orchestrator stream is unchanged.
+Provider URL citations are rendered as clickable links. Search plus client-tool
+continuation preserves provider output blocks. Anthropic `pause_turn` fails
+explicitly (no automatic continuation/spend); this is not advertised as support
+for arbitrary long-running server-tool tasks. Existing tool-loop bounds apply;
+only the dedicated search probe promises one generation request.
+
+Deploy Relay's new endpoint and runtime module **before** Gateway, then the PWA.
+Gateway deliberately has no silent fallback when the endpoint is absent or its
+coordinates mismatch. Rollback in reverse order. Frozen group-room v1.0/v1.1
+remain byte-identical. No DB migration or new secret is required. This local
+change does not certify any OFOX search route or change live Profile bindings.
+
+Read-only TEST inspection also located refusal finals 1143 and 1187 in the jiao
+private partition, with GPT generation receipts marked succeeded. This status
+means execution completed, not that the response was helpful. Existing receipt
+fields do not preserve the historical full provider input or provider moderation
+reason. Current-data recall reconstruction cannot establish which exact memory,
+summary, or provider policy caused those refusals; do not silently rewrite or
+retry them. Private message bodies are excluded from this engineering record.
+
 ## Summary truncation and assistant history envelope repair (2026-10-01, local)
 
 TEST logs showed `summary was truncated; history unchanged` before Laoke's

@@ -15,6 +15,9 @@ PACK_REQUEST = json.loads(
 FACTS = json.loads(
     (FIXTURE_ROOT / "context-facts-response-active.json").read_text(encoding="utf-8")
 )
+# Assemble consistent runtime data without modifying the frozen contract examples.
+PACK_REQUEST["current_event_id"] = FACTS["trigger_event"]["event_id"]
+FACTS["current_event_id"] = PACK_REQUEST["current_event_id"]
 
 
 class Relay:

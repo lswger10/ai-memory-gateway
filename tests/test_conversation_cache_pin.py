@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from cache_strategies import PromptSegment
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -85,7 +87,7 @@ class _ContextBuilder:
             static_system=("kernel", f"actor:{kwargs['actor_id']}", "room"),
             stable_summary="summary",
             stable_history=("accepted fact",),
-            dynamic_tail=("cache continuity maintenance",),
+            dynamic_tail=(PromptSegment("current_event", "cache continuity maintenance"),),
             actor_prompt_version=f"{kwargs['actor_id']}.v2",
             runtime_kernel_version="kernel.v1",
             room_policy_version="room.v1",

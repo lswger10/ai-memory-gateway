@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+from cache_strategies import PromptSegment
 from typing import Any
 
 from actor_prompt_profiles import load_actor_prompt_profiles
@@ -195,27 +196,30 @@ class BedroomContextPackService:
         summaries = bounded_context_rows(await self.summary_search(query, policy, 4))
         profile = self.prompt_profiles[request.actor_id]
         stable = self.build_stable_execution_components(request.actor_id, room_id)
-        dynamic: list[str] = [
+        dynamic: list[PromptSegment] = [PromptSegment("bedroom_context",
             "Temporary Bedroom scene layer (not identity or permanent memory): "
-            + str(session.get("scene_context") or "private relationship scene")
+            + str(session.get("scene_context") or "private relationship scene"))
         ]
         if memories.memories:
-            dynamic.append(
+            dynamic.append(PromptSegment("retrieved_memory",
                 "Authorized relationship and memory context:\n"
-                + "\n".join(f"- {row['content']}" for row in bounded_context_rows(memories.memories))
-            )
+                + "\n".join(f"- [{row['scope']}] {row['content']}" for row in bounded_context_rows(memories.memories))
+            ))
         if summaries:
-            dynamic.append(
+            dynamic.append(PromptSegment("relationship_summary",
                 "Authorized relationship summaries:\n"
                 + "\n".join(f"- [{row['scope']}] {row['content']}" for row in summaries)
-            )
-        dynamic.append(
-            "\n".join(
+            ))
+        dynamic.append(PromptSegment("current_event",
+            "Current Bedroom coordinates: " + json.dumps({
+                "room_id": room_id, "conversation_id": session["conversation_id"],
+                "bedroom_session_id": request.bedroom_session_id, "turn_id": request.turn_id,
+            }, sort_keys=True) + "\n" + "\n".join(
                 f"{'薇薇' if turn['actor_id']=='weiwei' else profile.actor_id}: {turn['text']}"
                 for turn in facts["turns"]
                 if turn["turn_id"] == request.turn_id
             )
-        )
+        ))
         return {
             "room_id": room_id,
             "conversation_id": session["conversation_id"],

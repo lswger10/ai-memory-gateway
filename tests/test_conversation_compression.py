@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 from types import SimpleNamespace
 
 import pytest
@@ -148,7 +149,7 @@ async def test_manual_summary_is_atomic_scoped_and_does_not_delete_facts(failure
     result = await service.compress(**{**target, "current_event_id": 72})
     assert result["compressed_up_to_event_id"] == 24
     import json
-    incremental = json.loads(runner.inputs[-1][0])
+    incremental = json.loads(runner.inputs[-1][0].content)
     assert incremental["prior_summary"] == "The user and actor discussed synthetic events 1 through 16."
     assert [event["event_id"] for event in incremental["new_events"]] == list(range(17, 25))
     assert await facts.count_facts("conversation-1") == 72

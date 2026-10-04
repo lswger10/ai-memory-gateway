@@ -1,3 +1,4 @@
+from cache_strategies import PromptSegment
 import ast
 import json
 from pathlib import Path
@@ -18,6 +19,24 @@ PACK_REQUEST = json.loads(
 FACTS = json.loads(
     (FIXTURE_ROOT / "context-facts-response-active.json").read_text(encoding="utf-8")
 )
+# Frozen schema examples are not a complete execution transcript (201 is absent).
+# Runtime tests must request the actual accepted event; contract bytes stay frozen.
+PACK_REQUEST["current_event_id"] = FACTS["trigger_event"]["event_id"]
+FACTS["current_event_id"] = PACK_REQUEST["current_event_id"]
+
+
+def test_current_segment_does_not_claim_older_trigger_mentions_or_reactions():
+    from group_memory import _dynamic_context_segments
+    facts = {"room_id": "room_group_home", "conversation_id": "synthetic",
+        "trigger_event": {"event_id": 101, "actor_id": "weiwei", "content": "old", "mentions": ["laoke"]},
+        "recent_public_events": [], "accepted_burst_public_events": [
+            {"event_id": 102, "actor_id": "jiao", "content": "new", "mentions": []}],
+        "reactions_by_event": {"55": {"weiwei": "heart"}}}
+    segments = _dynamic_context_segments((), (), None, facts, 102)
+    current = next(s.content for s in segments if s.source_kind == "current_event")
+    assert "laoke" not in current and "55" not in current
+    metadata = next(s.content for s in segments if s.source_kind == "request_metadata")
+    assert "101" in metadata and "55" in metadata
 
 
 class FakeRelayClient:
@@ -54,6 +73,51 @@ class FakeContextService:
 
 
 class GroupContextPackServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_current_event_is_selected_before_recent_context_limit(self):
+        from group_memory import _render_public_context
+        facts = json.loads(json.dumps(FACTS))
+        facts["trigger_event"]["content"] = "OLDER TRIGGER"
+        facts["accepted_burst_public_events"] = [
+            {**facts["trigger_event"], "event_id": i, "content": f"FACT {i}"}
+            for i in range(102, 125)
+        ]
+        rendered = _render_public_context(facts, maximum_events=20, current_event_id=102)
+        self.assertIn("FACT 102", rendered)
+        self.assertNotIn("OLDER TRIGGER", rendered)
+
+    def test_missing_current_event_is_not_replaced_with_trigger(self):
+        from group_memory import _query_text, _render_public_context
+        with self.assertRaisesRegex(ValueError, "current event"):
+            _query_text(FACTS, 999)
+        with self.assertRaisesRegex(ValueError, "current event"):
+            _render_public_context(FACTS, maximum_events=20, current_event_id=999)
+
+    async def test_private_current_event_retains_room_coordinates_separate_from_memory(self):
+        from group_contracts import ContextPackRequest
+        from group_memory import GroupContextPackService
+        for actor in ("jiao", "laoke"):
+            with self.subTest(actor=actor):
+                room = f"room_weiwei_{actor}"
+                facts = json.loads(json.dumps(FACTS))
+                event_id = facts["trigger_event"]["event_id"]
+                facts.update(room_id=room, conversation_id="private-test", current_event_id=event_id)
+                facts["trigger_event"].update(room_id=room, conversation_id="private-test")
+                request = {**PACK_REQUEST, "actor_id": actor, "room_id": room,
+                           "conversation_id": "private-test", "current_event_id": event_id}
+                service = GroupContextPackService(FakeRelayClient(facts), search=AsyncMock(
+                    return_value=AuthorizedMemorySearchResult(
+                        ({"id": 1, "scope": f"weiwei-{actor}", "content": "Private preference"},),
+                        (1,), CandidateAudit())))
+                result = await service.build_execution_components(ContextPackRequest.from_dict(request))
+                segments = result["dynamic_tail"]
+                current = [s for s in segments if s.source_kind == "current_event"]
+                self.assertEqual(1, len(current))
+                self.assertIn(room, current[0].content)
+                self.assertIn('"room_type": "private"', current[0].content)
+                self.assertIn('"conversation_id": "private-test"', current[0].content)
+                self.assertNotIn("Private preference", current[0].content)
+                self.assertEqual("retrieved_memory", segments[0].source_kind)
+
     async def test_execution_tail_has_current_fact_once_and_bounded_distinct_memories(self):
         from group_contracts import ContextPackRequest
         from group_memory import GroupContextPackService
@@ -65,7 +129,7 @@ class GroupContextPackServiceTests(unittest.IsolatedAsyncioTestCase):
         search = AsyncMock(return_value=AuthorizedMemorySearchResult(rows, (1, 2, 3, 4, 5), CandidateAudit()))
         service = GroupContextPackService(FakeRelayClient(facts), search=search)
         components = await service.build_execution_components(ContextPackRequest.from_dict(PACK_REQUEST))
-        tail = "\n".join(components["dynamic_tail"])
+        tail = "\n".join(segment.content for segment in components["dynamic_tail"])
         self.assertNotIn("OLD HISTORY ONLY", tail)
         self.assertEqual(tail.count("Repeated memory"), 1)
         self.assertIn("Second relevant memory", tail)
@@ -162,8 +226,8 @@ class GroupContextPackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         probe_contract = "Probe response contract"
         self.assertNotIn(probe_contract, "\n".join(probe["static_system"]))
-        self.assertIn(probe_contract, "\n".join(probe["dynamic_tail"]))
-        self.assertNotIn(probe_contract, "\n".join(full["dynamic_tail"]))
+        self.assertIn(probe_contract, "\n".join(segment.content for segment in probe["dynamic_tail"]))
+        self.assertNotIn(probe_contract, "\n".join(segment.content for segment in full["dynamic_tail"]))
 
     async def test_gateway_does_not_reparse_names_as_strong_mentions(self):
         from group_contracts import ContextPackRequest
