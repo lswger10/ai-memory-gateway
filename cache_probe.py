@@ -167,7 +167,11 @@ class GatewayCacheProbeService:
             raise ValueError("native web search mode is not configured")
         request = self._request(actor_id=actor_id, room_id=room_id,
             conversation_id=conversation_id, profile_id=profile_id)
-        context = ContextBundle(static_system=("Use the web search tool once and cite the source URL.",),
+        context = ContextBundle(static_system=(
+                "Use the web search tool once and cite the source URL.",
+                "You are a synthetic search-capability probe, not a conversation actor.",
+                "Use only the public test question; no private history is included.",
+            ),
             stable_summary="", stable_history=(),
             dynamic_tail=(PromptSegment("current_event", "Search for the official Python documentation website. Reply with its URL and one short sentence."),),
             actor_prompt_version="search-probe.v1", runtime_kernel_version="search-probe.v1",

@@ -12,6 +12,59 @@ from model_profiles import ModelProfile
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("protocol,mode", [
+    ("anthropic_messages_compatible", "anthropic_web_search_20250305"),
+    ("openai_responses", "openai_web_search"),
+])
+async def test_search_probe_reaches_transport_through_real_request_renderer(protocol, mode):
+    import json
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+
+    payload = _profile().to_dict()
+    payload["protocol"] = protocol
+    payload["headers"] = {"Authorization": "Bearer ${credential}"}
+    payload["capabilities"]["web_search"] = mode
+    if protocol == "openai_responses":
+        payload.update(cache_strategy="openai_stable_prefix_v1", requested_cache_ttl=None)
+        payload["capabilities"].update(cache_strategies=["openai_stable_prefix_v1"], cache_ttls=[])
+    profiles = InMemoryModelProfileStore()
+    await profiles.put_profile(ModelProfile.from_dict(payload))
+    usage = InMemoryModelUsageStore()
+    sent = []
+
+    def respond(request):
+        sent.append(json.loads(request.content))
+        # A normal answer without server-search evidence must NOT enable search.
+        if protocol == "openai_responses":
+            body = 'event: response.output_text.delta\ndata: {"delta":"No search evidence."}\n\nevent: response.completed\ndata: {"response":{"output":[],"usage":{"input_tokens":31,"output_tokens":2}}}\n\n'
+        else:
+            body = 'event: message_start\ndata: {"message":{"usage":{"input_tokens":31,"output_tokens":2}}}\n\nevent: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"No search evidence."}}\n\nevent: message_stop\ndata: {}\n\n'
+        return httpx.Response(200, text=body)
+
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    service = GatewayCacheProbeService(profiles=profiles, usage_store=usage,
+        provider_runner=GatewayProviderRunner(transport=transport, credential_resolver=Resolver()))
+    try:
+        result = await service.run_search(profile_id="profile-1", profile_revision=1,
+            actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="synthetic")
+        assert len(sent) == 1
+        assert sent[0]["tools"][0]["type"] == ("web_search" if protocol == "openai_responses" else "web_search_20250305")
+        assert sent[0]["max_output_tokens" if protocol == "openai_responses" else "max_tokens"] == 512
+        assert result["status"] == "unverified"
+        rows = await usage.list_receipts()
+        assert len(rows) == 1
+        assert rows[0].execution_purpose == "web_search_probe"
+        assert rows[0].usage.input_tokens == 31
+        assert not await profiles.has_verified_probe("profile-1", 1, "native_web_search")
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("evidence", [True, False])
 async def test_search_probe_is_one_small_call_and_requires_provider_search_evidence(evidence):
     store = InMemoryModelProfileStore()
