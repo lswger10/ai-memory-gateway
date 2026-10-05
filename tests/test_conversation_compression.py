@@ -12,6 +12,72 @@ from tests.test_execution_context_builder import _GroupContext, _event, _profile
 
 
 @pytest.mark.anyio
+async def test_responses_summary_uses_bounded_isolated_cache_key_and_preserves_facts():
+    import json
+    from contextlib import asynccontextmanager
+    from conversation_compression import ConversationCompressionService
+    from gateway_provider_runner import GatewayProviderRunner
+    from model_profiles import ModelProfile
+    from tests.test_gateway_provider_runner import Resolver, profile
+
+    payload = profile().to_dict()
+    payload.update(protocol="openai_responses", cache_strategy="openai_stable_prefix_v1",
+                   requested_cache_ttl=None)
+    payload["capabilities"].update(cache_strategies=["openai_stable_prefix_v1"], cache_ttls=[])
+    selected = ModelProfile.from_dict(payload)
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield "event: response.output_text.delta"
+            yield "data: " + json.dumps({"type": "response.output_text.delta", "delta": "A bounded summary."})
+            yield ""
+            yield "event: response.completed"
+            yield "data: " + json.dumps({"type": "response.completed", "response": {
+                "status": "completed", "output": [], "usage": {"input_tokens": 100, "output_tokens": 8}}})
+            yield ""
+
+    class Transport:
+        async def open_stream(self, **kwargs):
+            body = kwargs["json_body"]
+            # Provider schema boundary: the previous namespace + suffix was 74 chars.
+            assert len(body["prompt_cache_key"]) <= 64
+            assert "tools" not in body
+            calls.append(body)
+            @asynccontextmanager
+            async def opened(): yield Response()
+            return opened()
+
+    class Sync:
+        async def ensure_relay_synced(self, **kwargs): pass
+
+    class Profiles:
+        async def resolve(self, *args): return SimpleNamespace(primary=selected)
+
+    facts, history, usage = InMemoryConversationPartitionStore(), InMemoryAnchoredHistoryStore(), InMemoryModelUsageStore()
+    await facts.append_accepted_facts(tuple(ConversationFact.from_relay_event(_event(i)) for i in range(1, 65)))
+    builder = SimpleNamespace(group_context=_GroupContext(), conversation_sync=Sync(),
+        conversation_store=facts, history_store=history)
+    service = ConversationCompressionService(builder=builder, profiles=Profiles(),
+        runner=GatewayProviderRunner(transport=Transport(), credential_resolver=Resolver()), usage_store=usage)
+    target = dict(actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="conversation-1", current_event_id=64)
+    result = await service.compress(**target)
+    assert result["compressed_up_to_event_id"] == 16
+    assert await facts.count_facts("conversation-1") == 64
+    assert len(calls) == 1
+    assert calls[0]["prompt_cache_key"] not in history._states
+    await facts.append_accepted_facts(tuple(ConversationFact.from_relay_event(_event(i)) for i in range(65, 73)))
+    await service.compress(**{**target, "current_event_id": 72})
+    assert calls[0]["prompt_cache_key"] != calls[1]["prompt_cache_key"]
+    receipts = await usage.list_receipts()
+    assert len(receipts) == len(calls) == 2
+    assert {r.prompt_cache_key for r in receipts} == {c["prompt_cache_key"] for c in calls}
+    assert all(r.status == "succeeded" for r in receipts)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("automatic", [False, True])
 async def test_chinese_summary_has_output_headroom_and_completes_without_retry(automatic):
     from contextlib import asynccontextmanager

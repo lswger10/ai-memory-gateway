@@ -1,5 +1,21 @@
 # AI Memory Gateway
 
+## Compression request cache-key bound (2026-10-04)
+
+Summary execution now hashes the existing conversation namespace plus summary
+revision into a 64-character key. Appending `:summary:<revision>` directly to
+the 64-character namespace produced an over-length Responses `prompt_cache_key`
+(74 characters at revision 1). This changes only the provider key for summary
+execution: ordinary chat namespaces, persisted summary/cursor identity, accepted
+conversation facts and the compression policy are unchanged. Summary failures
+still leave history and cursor untouched; no automatic paid retry is added.
+
+A regression uses the actual provider runner/renderer with a bounded synthetic
+HTTP transport and verifies independent keys across summary revisions, recorded
+keys, atomic cursor progression and preservation of all accepted facts. Local
+Gateway suite: 447 passed, 59 skipped, 2 subtests passed. This is not a claim of
+successful paid summary execution on the live route.
+
 ## Runtime context provenance repair (2026-10-04, local; not deployed)
 
 The Anthropic renderer previously labeled every dynamic-tail string

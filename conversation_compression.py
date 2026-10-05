@@ -1,6 +1,7 @@
 """Bounded paid summaries of Relay facts; never a chat fact or long-term memory."""
 
 import asyncio
+import hashlib
 import json
 from cache_strategies import PromptSegment
 import uuid
@@ -76,7 +77,10 @@ class ConversationCompressionService:
             tool_schema_hash="conversation-summary.v1", summary_version=state.state_revision,
             compressed_up_to_event_id=state.compressed_up_to_event_id)
         generation_id = f"conversation-summary:{uuid.uuid4()}"
-        summary_namespace = f"{namespace}:summary:{state.state_revision}"
+        # Preserve summary/revision isolation without exceeding provider key limits.
+        summary_namespace = hashlib.sha256(
+            f"{namespace}:summary:{state.state_revision}".encode("utf-8")
+        ).hexdigest()
         draft = execution_receipt_draft(profile=profile, generation_request_id=generation_id,
             actor_id=actor_id, room_id=room_id, conversation_id=conversation_id,
             context=context, cache_namespace=summary_namespace, execution_purpose="conversation_compression")
