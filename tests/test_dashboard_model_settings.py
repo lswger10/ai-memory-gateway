@@ -88,6 +88,51 @@ def test_json_preview_keeps_confirmation_and_imports_only_after_click(dashboard,
         "scope": "weiwei-laoke", "perspective": "laoke", "memory_type": "fact", "confidential": False}})]
 
 
+@pytest.mark.parametrize("width", [1280, 390, 412])
+def test_garden_archive_all_sections_and_real_delete_request(dashboard, width):
+    page, responses, writes = dashboard
+    page.set_viewport_size({"width": width, "height": 900})
+    assert page.locator('body').get_attribute('class') == 'garden-archive'
+    responses['/api/memories'] = {'memories': [
+        {'id': i, 'content': 'Synthetic garden memory ' + str(i), 'importance': 5,
+         'layer': 1, 'scope': 'weiwei-jiao', 'perspective': 'jiao', 'is_active': True}
+        for i in (901, 902)]}
+    def delete_fixture(route):
+        writes.append(('/api/memories/batch-delete', route.request.post_data_json))
+        responses['/api/memories']['memories'] = []
+        route.fulfill(json={'deleted': 2})
+    page.route('**/api/memories/batch-delete', delete_fixture)
+    page.reload()
+    page.wait_for_function('document.querySelectorAll(".mem-check").length===2')
+    for section in ('manage', 'import', 'export', 'conversations', 'models', 'settings'):
+        nav = page.locator(f'[data-section="{section}"]')
+        nav.click()
+        assert nav.locator('.nav-label').is_visible()
+        assert page.locator(f'#section-{section}').is_visible()
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), section
+        assert nav.bounding_box()['height'] >= 44
+    page.locator('[data-section="manage"]').click()
+    page.wait_for_function('document.querySelectorAll(".mem-check").length===2')
+    page.locator('.mem-check').first.check()
+    page.locator('.mem-check').last.check()
+    for button in page.locator('#floatingBar button').all():
+        box = button.bounding_box()
+        assert box and box['x'] >= 0 and box['x'] + box['width'] <= width
+        assert box['height'] >= 44
+    page.locator('#floatingBar').get_by_role('button', name='删除选中').click()
+    assert writes == []
+    page.locator('#memoryDeleteModal').get_by_role('button', name='取消').click()
+    assert writes == []
+    page.locator('#floatingBar').get_by_role('button', name='删除选中').click()
+    with page.expect_request(lambda r: r.url.endswith('/api/memories/batch-delete') and r.method == 'POST'):
+        page.locator('#memoryDeleteModal').get_by_role('button', name='确认永久删除').click()
+    assert writes[-1] == ('/api/memories/batch-delete', {'ids': [902, 901]})
+    page.wait_for_function('document.querySelectorAll(".mem-check").length===0')
+    evidence = ROOT / 'artifacts' / 'garden-ui'
+    evidence.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(evidence / f'archive-{width}.png'), full_page=True)
+
+
 def test_json_import_requires_classification_and_invalidates_changed_preview(dashboard):
     page, _, writes = dashboard
     page.locator('[data-section="import"]').click()

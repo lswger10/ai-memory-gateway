@@ -1,5 +1,14 @@
 # AI Memory Gateway
 
+## Garden Dashboard test release preparation (2026-10-13)
+
+`codex/gateway-garden-test-release` starts at the verified test baseline
+`01f27d9` and carries only the garden Dashboard change from `ccda2a4`.
+The unpublished device-context execution changes are excluded. Dashboard
+regression: 24 passed using synthetic data. Frozen v1.1 contract files now
+disable Windows newline conversion, matching v1.0; their Git bytes are unchanged.
+Cloud deployment and post-restart persistence verification are still pending.
+
 ## Compression request cache-key bound (2026-10-04)
 
 Summary execution now hashes the existing conversation namespace plus summary
