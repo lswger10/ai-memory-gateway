@@ -336,15 +336,16 @@ class ToolStreamContext(StreamContext):
 
 
 class OpenAIToolResponse(Response):
-    def __init__(self, protocol, round_number):
+    def __init__(self, protocol, round_number, call_id="tool-1"):
         self.protocol = protocol
         self.round_number = round_number
+        self.call_id = call_id
 
     async def aiter_lines(self):
         arguments = '{"content":"remember rain","scope":"weiwei-jiao","memory_type":"fact","perspective":"jiao","confidential":false,"importance":7,"evidence_event_ids":[101]}'
         if self.protocol == "openai_chat_completions":
             payload = (
-                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "tool-1", "function": {"name": "write_memory", "arguments": arguments}}]}}]}
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": self.call_id, "function": {"name": "write_memory", "arguments": arguments}}]}}]}
                 if self.round_number == 1
                 else {"choices": [{"delta": {"content": "saved"}}]}
             )
@@ -365,13 +366,14 @@ class OpenAIToolResponse(Response):
 
 
 class OpenAIToolTransport(Transport):
-    def __init__(self, protocol):
+    def __init__(self, protocol, call_id="tool-1"):
         super().__init__()
         self.protocol = protocol
+        self.call_id = call_id
 
     async def open_stream(self, **kwargs):
         self.calls.append(kwargs)
-        response = OpenAIToolResponse(self.protocol, len(self.calls))
+        response = OpenAIToolResponse(self.protocol, len(self.calls), self.call_id)
 
         class Context:
             async def __aenter__(self): return response
@@ -573,8 +575,12 @@ async def test_anthropic_tool_call_is_private_staged_and_followed_by_tool_result
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("protocol", ["openai_chat_completions", "openai_responses"])
-async def test_openai_tool_call_is_private_staged_and_followed_by_native_tool_result(protocol):
+@pytest.mark.parametrize("protocol,call_id", [
+    ("openai_chat_completions", "tool-1"),
+    ("openai_responses", "tool-1"),
+    ("openai_chat_completions", "gemini-" + "x" * 450),
+], ids=["chat", "responses", "gemini-long-id"])
+async def test_openai_tool_call_is_private_staged_and_followed_by_native_tool_result(protocol, call_id):
     payload = profile().to_dict()
     payload.update(protocol=protocol, cache_strategy="openai_stable_prefix_v1", requested_cache_ttl=None)
     payload["capabilities"]["tools"] = True
@@ -582,7 +588,7 @@ async def test_openai_tool_call_is_private_staged_and_followed_by_native_tool_re
     payload["capabilities"]["cache_ttls"] = []
     tool_profile = ModelProfile.from_dict(payload)
     store = InMemoryActorMemoryToolStore()
-    transport = OpenAIToolTransport(protocol)
+    transport = OpenAIToolTransport(protocol, call_id)
     runner = GatewayProviderRunner(
         transport=transport, credential_resolver=Resolver(),
         memory_tools=ActorMemoryToolLibrary(store),
@@ -607,10 +613,13 @@ async def test_openai_tool_call_is_private_staged_and_followed_by_native_tool_re
     second = transport.calls[1]["json_body"]
     if protocol == "openai_chat_completions":
         assert second["messages"][-1]["role"] == "tool"
+        assert second["messages"][-1]["tool_call_id"] == call_id
+        assert second["messages"][-2]["tool_calls"][0]["id"] == call_id
     else:
         assert second["input"][-1]["type"] == "function_call_output"
     assert [item.data["text"] for item in chunks if item.event == "final"] == ["saved"]
     assert len([stage for stage in store.stages.values() if stage["status"] == "staged"]) == 1
+    assert all(len(key[2]) <= 200 for key in store.stages)
 
 
 @pytest.mark.anyio

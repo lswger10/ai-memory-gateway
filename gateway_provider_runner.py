@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -278,10 +279,14 @@ class GatewayProviderRunner:
                         continue
                     if self.memory_tools is None:
                         raise ProviderRunUnavailable("provider requested unavailable memory tools")
+                    tool_key = f"{profile.profile_id}:{call['id']}"
+                    if len(tool_key) > 200:
+                        # Keep opaque provider IDs intact on the wire; bound only the internal staging key.
+                        tool_key = "sha256:" + hashlib.sha256(tool_key.encode("utf-8")).hexdigest()
                     try:
                         result = await self.memory_tools.call(
                             context.actor_memory_context,
-                            f"{profile.profile_id}:{call['id']}",
+                            tool_key,
                             call["name"], call["arguments"],
                         )
                     except PermissionError as exc:
