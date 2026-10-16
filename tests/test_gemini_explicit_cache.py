@@ -86,6 +86,8 @@ async def test_reuses_frozen_prefix_and_sends_new_history_only_in_tail():
     assert "earlier" not in json.dumps(second)
     assert "current_event" not in json.dumps(transport.calls[0]["json_body"])
     assert transport.calls[0]["json_body"]["ttl"] == "3600s"
+    declarations = transport.calls[0]["json_body"]["tools"][0]["functionDeclarations"]
+    assert declarations and all("parameters" in tool and "parametersJsonSchema" not in tool for tool in declarations)
     receipts = await cache.usage.list_receipts()
     assert len(receipts) == 1 and receipts[0].execution_purpose == "cache_create"
     assert receipts[0].usage.cache_creation_input_tokens == 5000

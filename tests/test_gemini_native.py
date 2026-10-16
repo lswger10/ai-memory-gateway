@@ -39,7 +39,7 @@ def test_native_render_preserves_roles_context_labels_media_and_tools():
     assert body["contents"][2]["parts"][0]["text"] == "[current_time]\nnow"
     assert body["contents"][3]["parts"][0]["text"] == "[current_event]\nquestion"
     assert body["contents"][-1]["parts"][-1]["inlineData"]["mimeType"] == "application/pdf"
-    assert body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]
+    assert body["tools"][0]["functionDeclarations"][0]["parameters"]
 
 
 class NativeResponse:
@@ -109,6 +109,12 @@ async def test_native_real_runner_tool_roundtrip_preserves_signature_and_scope()
         body = json.loads(req.content)
         sent.append(body)
         if len(sent) == 1:
+            # OFOX returns STOP with empty parts for parametersJsonSchema.
+            declarations = body["tools"][0]["functionDeclarations"]
+            assert all("parametersJsonSchema" not in tool for tool in declarations)
+            search = next(tool for tool in declarations if tool["name"] == "search_memory")
+            assert search["parameters"]["required"] == ["query"]
+            assert search["parameters"]["properties"]["query"] == {"type": "string"}
             parts = [signature]
         else:
             assert body["contents"][-2] == {"role": "model", "parts": [signature]}

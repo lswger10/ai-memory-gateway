@@ -1,5 +1,29 @@
 # AI Memory Gateway
 
+## OFOX Gemini native tool schema fix (2026-10-16, local verified)
+
+Two bounded synthetic requests to the same 3.1 Pro native route isolated a
+wire-format incompatibility: `functionDeclarations.parametersJsonSchema`
+returned HTTP 200 / STOP with empty parts; changing only that field to
+`parameters` returned `get_memory` with arguments and a thought signature.
+The native adapter now uses `parameters` for both direct requests and cached
+tool definitions. Other adapters, bindings, Persona, history, summaries and ACL
+are unchanged; no dependency, retry, schema or service was added.
+
+Before the fix, render and real-runner tool-roundtrip regressions both failed.
+After the fix, native/cache focused tests: **32 passed, 1 skipped**, with the
+packaged-import case excluded after its separately recorded failure. Full free
+suite: **512 passed, 62 skipped, 2 subtests passed, 1 failed**; the sole failure
+was the existing 30-second Windows packaged-import subprocess timeout, also
+seen outside the sandbox. Direct import of that exact copied build directory
+completed with `PACKAGED_IMPORT_OK`; the timeout assertion was not relaxed.
+
+New paid authorization ledger: **2 of 5 used**, both synthetic diagnostics;
+3 remain for one bounded cache/tool roundtrip. Deployment and final acceptance
+are pending at this commit. Earlier real text/image finals 1882/1884/1886 were
+accepted and survived subsequent input/reload after Tidal's native provenance
+fix `4d51fba`; tool event 1887 failed with an empty provider response.
+
 ## Qualified Gemini cache resource-name fix (2026-10-16, test deployed)
 
 The cache creation response validator now accepts both `cachedContents/{id}`

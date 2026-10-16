@@ -37,7 +37,7 @@ class GeminiNativeAdapter:
         if tools:
             body["tools"] = [{"functionDeclarations": [
                 {"name": tool["name"], "description": tool["description"],
-                 "parametersJsonSchema": tool["input_schema"]} for tool in tools]}]
+                 "parameters": tool["input_schema"]} for tool in tools]}]
         return RenderedProviderRequest("POST", f"/gemini/v1beta/models/{profile.model}:streamGenerateContent?alt=sse", body)
 
     def parse_usage(self, values):
