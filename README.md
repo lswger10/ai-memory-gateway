@@ -1,6 +1,6 @@
 # AI Memory Gateway
 
-## OFOX Gemini native tool schema fix (2026-10-16, local verified)
+## OFOX Gemini native tool schema fix (2026-10-16, test deployed; paid acceptance blocked)
 
 Two bounded synthetic requests to the same 3.1 Pro native route isolated a
 wire-format incompatibility: `functionDeclarations.parametersJsonSchema`
@@ -18,9 +18,22 @@ was the existing 30-second Windows packaged-import subprocess timeout, also
 seen outside the sandbox. Direct import of that exact copied build directory
 completed with `PACKAGED_IMPORT_OK`; the timeout assertion was not relaxed.
 
+Runtime commit `53dadc4c6b59bf3b03feddb5b3b145d32654f08c` was pushed to the
+existing test branch. The replacement Gateway pod ran Python 3.12.14, health
+HTTP 200, and the adapter's LF-normalized SHA256 matched
+`4e9d6cc2daea8aa4be6edcf55547865f71b55ebcb363c258a728bda401513d43`.
+The Zeabur deployment-detail page remained loading, so deployment ID is unknown.
+
 New paid authorization ledger: **2 of 5 used**, both synthetic diagnostics;
-3 remain for one bounded cache/tool roundtrip. Deployment and final acceptance
-are pending at this commit. Earlier real text/image finals 1882/1884/1886 were
+3 remain for one bounded cache/tool roundtrip. No post-deployment paid request
+was made: browser control became unavailable (terminal operation timed out,
+then browser selection and inventory also timed out). The existing management
+API resume command targeted only Laoke's expired paused cache; whether that
+command executed is **unknown**, so inspect `GET /api/cache-pins` before
+resuming or testing. Do not blindly resend a paid diagnostic. A temporary,
+three-request-capped diagnostic was syntax-checked but never sent or run.
+Full cached-tool acceptance and normal-chat recovery remain **BLOCKED**, not
+PASS. Earlier real text/image finals 1882/1884/1886 were
 accepted and survived subsequent input/reload after Tidal's native provenance
 fix `4d51fba`; tool event 1887 failed with an empty provider response.
 
