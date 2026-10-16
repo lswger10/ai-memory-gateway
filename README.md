@@ -1,6 +1,6 @@
 # AI Memory Gateway
 
-## Gemini explicit-cache memory tools root-cause fix (2026-10-16, local)
+## Gemini explicit-cache memory tools root-cause fix (2026-10-16, test deployed)
 
 OFOX and Google both define `tools` as immutable input on the
 `CachedContent` resource. A generation that references that resource should
