@@ -1,6 +1,57 @@
 # AI Memory Gateway
 
-## OFOX Gemini explicit cache (2026-10-16, deployed to test; provider unverified)
+## Qualified Gemini cache resource-name fix (2026-10-16, local verified)
+
+The cache creation response validator now accepts both `cachedContents/{id}`
+and `projects/{project}/locations/{region}/cachedContents/{id}`, retaining the
+exact provider handle. URL/query/traversal/extra path forms remain rejected;
+model and expiry validation, pause behavior and existing bindings are unchanged.
+No schema, dependency, retry or service was added.
+
+TDD: two qualified-handle cases failed before the fix; targeted cache/native
+tests then passed (33 passed, 1 skipped). Free full suite: **513 passed,
+62 skipped, 2 subtests passed** (`python -B -m pytest -q -p no:cacheprovider`,
+PostgreSQL approval disabled). This local check makes no provider requests.
+Deployment and bounded 3.1 integration evidence are pending; six authorized
+provider requests remain from the preceding ten-request budget.
+
+## OFOX Gemini explicit cache (2026-10-16, deployed; provider hit observed, integration blocked)
+
+Bounded synthetic provider check after deployment (2026-10-16):
+
+- Four potentially billable requests used from the authorized ten: one cache
+  creation and one reference each for `google/gemini-3.8-flash` and
+  `google/gemini-3.1-pro-preview`. No private history, Persona or memories sent.
+- Both creations returned HTTP 200 and `totalTokenCount=16920`, TTL 3600s.
+  Both direct native `generateContent` references returned HTTP 200, `STOP`,
+  five characters of synthetic reply, and `cachedContentTokenCount=16920`.
+  Pro reported `promptTokenCount=16929`, `candidatesTokenCount=1`,
+  `thoughtsTokenCount=131`, `totalTokenCount=17061`. This proves these specific
+  provider cache references hit, not that the full Gateway route is verified.
+- The deployed Gateway creation path rejected the actual resource name:
+  OFOX returned `projects/{project}/locations/{region}/cachedContents/{id}`;
+  `_create` currently accepts only `cachedContents/{id}`. The paid creation
+  succeeded but validation paused it before generation. Direct diagnostic
+  references reused the returned handles without changing deployed code or
+  silently relaxing production validation. Native streaming/tools/media and
+  the normal Pin path remain unverified; no native Profile was promoted.
+- User subsequently requested withdrawing 3.8. Existing management API set
+  `ofox-gemini-3-8-flash` to disabled, revision 2 (unverified after edit).
+  It had no actor default, fallback or room binding; all bindings were checked
+  unchanged. Existing 3.1 Pro stays enabled/passed at revision 1 on its original
+  compatible protocol. GPT/Claude, history and summaries were not changed.
+- Probe Profiles/resources/receipts were process-local diagnostic objects,
+  not business database inserts. Only the authorized Flash enabled flag was
+  changed through the normal management API. The task-created temporary request
+  ledger was removed after this evidence was recorded; synthetic caches expire after one
+  hour without renewal. No more provider calls after the positive Pro evidence.
+- Follow-up required before enabling native explicit caching: narrowly support
+  the observed qualified resource-name form with regression coverage, then
+  verify the actual Gateway streaming path. This check did not implement or
+  deploy that fix, and did not claim continuous renewal or guaranteed savings.
+
+Official reference: <https://ofox.ai/docs/api/gemini/cached-contents>.
+The following records the preceding implementation/deployment acceptance.
 
 Implemented on `codex/gateway-garden-test-release` after design commit `b089d7b`.
 Runtime release `2cefadfbcbd3ddf4f0ddbe1d701a34216746c965` is pushed on

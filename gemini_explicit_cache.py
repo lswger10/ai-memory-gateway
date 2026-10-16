@@ -197,7 +197,8 @@ class GeminiExplicitCache:
             received = usage.cache_creation_input_tokens is not None
             name = value.get("name", "")
             expires = datetime.fromisoformat(value["expireTime"].replace("Z", "+00:00"))
-            if (not re.fullmatch(r"cachedContents/[A-Za-z0-9_-]+", name)
+            if (not re.fullmatch(
+                    r"(?:projects/[A-Za-z0-9_-]+/locations/[A-Za-z0-9_-]+/)?cachedContents/[A-Za-z0-9_-]+", name)
                 or expires.tzinfo is None or not self.now() < expires <= self.now() + timedelta(seconds=3605)
                 or value.get("model", "").removeprefix("models/") != profile.model.removeprefix("models/")):
                 raise ExplicitCacheUnavailable("gemini_cache_resource_invalid")

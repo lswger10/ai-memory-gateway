@@ -257,7 +257,11 @@ async def test_admin_resource_listing_and_exact_resume_do_not_call_provider(monk
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("cache_read", [4000, None])
-async def test_native_probe_uses_real_runner_with_mock_http_and_does_not_bind(cache_read):
+@pytest.mark.parametrize("resource_name", [
+    "cachedContents/probe",
+    "projects/123456789012/locations/us-central1/cachedContents/synthetic_probe-1",
+])
+async def test_native_probe_uses_real_runner_with_mock_http_and_does_not_bind(cache_read, resource_name):
     import httpx
     from cache_probe import GatewayCacheProbeService
     from provider_transport import PooledHttpTransport
@@ -267,9 +271,9 @@ async def test_native_probe_uses_real_runner_with_mock_http_and_does_not_bind(ca
     def respond(req):
         sent.append((req.url.path, json.loads(req.content)))
         if req.url.path.endswith("cachedContents"):
-            return httpx.Response(200, json={"name": "cachedContents/probe", "model": selected.model,
+            return httpx.Response(200, json={"name": resource_name, "model": selected.model,
                 "expireTime": (cache.now() + timedelta(hours=1)).isoformat(), "usageMetadata": {"totalTokenCount": 4000}})
-        assert json.loads(req.content)["cachedContent"] == "cachedContents/probe"
+        assert json.loads(req.content)["cachedContent"] == resource_name
         frame = {"candidates": [{"content": {"parts": [{"text": "synthetic ok"}]}, "finishReason": "STOP"}],
                  "usageMetadata": {"promptTokenCount": 4100, "candidatesTokenCount": 3, "cachedContentTokenCount": cache_read}}
         return httpx.Response(200, text="data: " + json.dumps(frame) + "\n\n")
@@ -280,6 +284,7 @@ async def test_native_probe_uses_real_runner_with_mock_http_and_does_not_bind(ca
             profile_id=selected.profile_id, actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="never-read-real-history")
         assert (result.status == "verified") == (cache_read is not None)
         assert len(sent) == 3
+        assert (await cache.store.list_resources())[0].resource_name == resource_name
         assert await cache.profiles.has_verified_probe(selected.profile_id, 1, "gemini_explicit_cache") == (cache_read is not None)
         assert await cache.profiles.get_actor_binding("jiao") is None
         assert sorted(row.execution_purpose for row in await cache.usage.list_receipts()) == ["cache_create", "cache_probe", "cache_probe"]
@@ -347,12 +352,20 @@ async def test_profile_edit_drops_verification_before_any_new_request():
 
 
 @pytest.mark.anyio
-async def test_cache_invalid_resource_pauses_without_exposing_response():
+@pytest.mark.parametrize("resource_name", [
+    "https://private.invalid/secret",
+    "projects/secret/locations/us-central1/cachedContents/../other",
+    "projects/secret/locations/us-central1/cachedContents/id?key=secret",
+    "projects/secret/locations/us-central1/cachedContents/id/extra",
+    "projects//locations/us-central1/cachedContents/secret",
+    "projects/secret/locations/us-central1/cachedContents/%2Fother",
+])
+async def test_cache_invalid_resource_pauses_without_exposing_response(resource_name):
     cache, transport, selected = await setup_cache()
     async def malicious(**kwargs):
         class Response:
             status_code = 200
-            def json(self): return {"name": "https://private.invalid/secret", "model": selected.model,
+            def json(self): return {"name": resource_name, "model": selected.model,
                 "expireTime": (cache.now() + timedelta(hours=1)).isoformat()}
         return Response()
     transport.request = malicious
