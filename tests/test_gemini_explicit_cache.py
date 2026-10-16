@@ -81,12 +81,13 @@ async def test_reuses_frozen_prefix_and_sends_new_history_only_in_tail():
     second = await prepare(cache, transport, selected, replace(context(), stable_history=context().stable_history + (extra,)))
     assert len(transport.calls) == 1
     assert first["cachedContent"] == second["cachedContent"]
-    assert "systemInstruction" not in second and "tools" not in second
+    assert "systemInstruction" not in second and "tools" in second
     assert "new fact" in json.dumps(second["contents"][0])
     assert "earlier" not in json.dumps(second)
     assert "current_event" not in json.dumps(transport.calls[0]["json_body"])
     assert transport.calls[0]["json_body"]["ttl"] == "3600s"
-    declarations = transport.calls[0]["json_body"]["tools"][0]["functionDeclarations"]
+    assert "tools" not in transport.calls[0]["json_body"]
+    declarations = second["tools"][0]["functionDeclarations"]
     assert declarations and all("parameters" in tool and "parametersJsonSchema" not in tool for tool in declarations)
     receipts = await cache.usage.list_receipts()
     assert len(receipts) == 1 and receipts[0].execution_purpose == "cache_create"
