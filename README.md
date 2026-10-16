@@ -1,6 +1,6 @@
 # AI Memory Gateway
 
-## Qualified Gemini cache resource-name fix (2026-10-16, local verified)
+## Qualified Gemini cache resource-name fix (2026-10-16, test deployed)
 
 The cache creation response validator now accepts both `cachedContents/{id}`
 and `projects/{project}/locations/{region}/cachedContents/{id}`, retaining the
@@ -12,10 +12,50 @@ TDD: two qualified-handle cases failed before the fix; targeted cache/native
 tests then passed (33 passed, 1 skipped). Free full suite: **513 passed,
 62 skipped, 2 subtests passed** (`python -B -m pytest -q -p no:cacheprovider`,
 PostgreSQL approval disabled). This local check makes no provider requests.
-Deployment and bounded 3.1 integration evidence are pending; six authorized
-provider requests remain from the preceding ten-request budget.
+Runtime fix `2c54c9b66c18973d66fd25fb2b23fea280a7e82a` was pushed and deployed
+as test deployment `6ad1f0c30b0bc926ae2aa52a`. Root Dockerfile remains the
+pinned Python 3.12-slim image; runtime Python 3.12.14, health HTTP 200, and
+`gemini_explicit_cache.py` SHA256
+`a766a2425c32f807343466080f53813c3ba45652480d739e4bf5770befd4b5aa`
+matched the local file. Actor bindings, room overrides and memories retained
+their pre-deploy database fingerprints.
 
-## OFOX Gemini explicit cache (2026-10-16, deployed; provider hit observed, integration blocked)
+The six remaining authorized paid requests were used, with a transport-side
+six-request cap and no retry: two cache creations plus four native streaming
+generations. All four reported **cached_tokens=16910**. Two were frozen probes;
+two ran `GatewayModelExecutionService.stream` with an enabled synthetic private
+Pin, real Profile resolution, native provider runner and usage receipts. Both
+normal rounds emitted `profile/delta/final/usage/done`; changing dynamic time
+and adding an accepted-history-shaped synthetic message on round two reused
+the same cache without another creation. Normal round input/output usage was
+16956/204 and 16960/181. No private history, Persona or memories were sent.
+These checks used in-memory diagnostic stores and a synthetic context builder:
+they verify deployed Gateway generation/cache integration, **not** a browser
+send, Relay final acceptance, real cognitive assembly, tools or image execution.
+The earlier four plus these six exhaust the ten-request authorization.
+
+After this evidence, the user explicitly prioritized caching and authorized
+native protocol migration. The existing `ofox-gemini-3-1-pro-preview` Profile
+was updated through management to revision 2: `gemini_native`, base URL
+`https://api.ofox.ai`, `gemini-native.v1`, `gemini_explicit_cache_v1`, TTL `1h`,
+and the existing credential reference with the native `x-goog-api-key` template.
+The observed probe result was saved for revision 2 and test status set to passed.
+Actor defaults/room overrides were compared unchanged; laoke private still
+selects this same Profile ID, jiao private remains GPT. 3.8 stays disabled.
+Laoke's existing private Pin was off and was enabled to permit explicit caching
+on the next real chat; Group Pin and all other bindings were left unchanged.
+No provider call was made by these configuration writes.
+
+This remains a one-hour creation/reference cache, **not scheduled renewal**:
+Gemini's idle keepalive state may display paused/unsupported even with Pin on.
+Expiry rebuilds on the next authorized real generation; continuous idle warmth
+and guaranteed savings are not promised. No additional paid tests are authorized.
+Rollback uses the same Profile ID at a new revision with its prior compatible
+protocol/base `/v1`, `openai-chat.v1`, Authorization template,
+`no_prompt_cache_v1` and null TTL, then revalidates that revision; do not edit
+binding rows or re-enable 3.8. The code fix itself can be reverted independently.
+
+## Earlier OFOX Gemini explicit cache acceptance (2026-10-16, historical)
 
 Bounded synthetic provider check after deployment (2026-10-16):
 
