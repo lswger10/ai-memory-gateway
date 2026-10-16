@@ -1,5 +1,41 @@
 # AI Memory Gateway
 
+## Gemini explicit-cache memory tools root-cause fix (2026-10-16, local)
+
+OFOX and Google both define `tools` as immutable input on the
+`CachedContent` resource. A generation that references that resource should
+send only `cachedContent` plus the new turn. The deployed Gateway did the
+opposite: cache creation omitted the memory tools and each generation tried to
+attach them beside `cachedContent`. OFOX accepted cache creation but rejected
+generation with HTTP 400 and the generic message `The service is temporarily
+unavailable. Please try again later.` The same failure with a minimal tool set
+rules out the number of memory tools as the cause.
+
+The minimal fix moves the existing Gemini-native tool declarations into cache
+creation and removes them from cached generation requests. No tool, ACL,
+memory, transcript, Persona, binding, database schema, service, dependency,
+retry or fallback was added. The frozen-prefix fingerprint now includes a
+layout version so an existing tool-less cache is rebuilt once instead of being
+silently reused. Other providers and unpinned Gemini requests are unchanged.
+
+TDD reproduced both failures before the change: the cached generation still
+carried `tools`, and an old layout fingerprint reused an incompatible cache.
+After the fix, Gemini cache/native/provider-runner tests are **64 passed, 1
+skipped**; the free full Gateway suite is **514 passed, 62 skipped, 2 subtests
+passed**. The remaining warning is the existing Windows pytest cache-directory
+permission warning, not a product test failure.
+
+For the newest seven-request authorization, **6 were used and 1 remains**:
+cache creation, full-tool and minimal-tool diagnostics all stayed bounded and
+published nothing to Relay. No post-fix provider call has been made yet. A
+complete live memory-tool roundtrip needs both generation and the continuation
+after the tool result, so the single remaining request is preserved rather
+than spent on an acceptance that cannot finish. This change is local until its
+commit, push and Zeabur test deployment are recorded below.
+
+References: <https://ofox.ai/docs/api/gemini/cached-contents> and
+<https://ai.google.dev/api/caching>.
+
 ## OFOX Gemini native full-tool schema compatibility (2026-10-16)
 
 The deployed cached-tool diagnostic reached OFOX with the explicit cache

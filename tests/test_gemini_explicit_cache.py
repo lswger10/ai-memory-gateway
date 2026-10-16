@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -81,17 +82,34 @@ async def test_reuses_frozen_prefix_and_sends_new_history_only_in_tail():
     second = await prepare(cache, transport, selected, replace(context(), stable_history=context().stable_history + (extra,)))
     assert len(transport.calls) == 1
     assert first["cachedContent"] == second["cachedContent"]
-    assert "systemInstruction" not in second and "tools" in second
+    assert "systemInstruction" not in second and "tools" not in second
     assert "new fact" in json.dumps(second["contents"][0])
     assert "earlier" not in json.dumps(second)
     assert "current_event" not in json.dumps(transport.calls[0]["json_body"])
     assert transport.calls[0]["json_body"]["ttl"] == "3600s"
-    assert "tools" not in transport.calls[0]["json_body"]
-    declarations = second["tools"][0]["functionDeclarations"]
+    declarations = transport.calls[0]["json_body"]["tools"][0]["functionDeclarations"]
     assert declarations and all("parameters" in tool and "parametersJsonSchema" not in tool for tool in declarations)
     receipts = await cache.usage.list_receipts()
     assert len(receipts) == 1 and receipts[0].execution_purpose == "cache_create"
     assert receipts[0].usage.cache_creation_input_tokens == 5000
+
+
+@pytest.mark.anyio
+async def test_tools_inside_cache_layout_rebuilds_legacy_tools_outside_cache_resource():
+    cache, transport, selected = await setup_cache()
+    ctx, req = context(), request()
+    body = GatewayProviderRunner()._render(selected, req, ctx, "namespace").json_body
+    await prepare(cache, transport, selected, ctx, req)
+    row = (await cache.store.list_resources())[0]
+    legacy_payload = [ctx.static_system, ctx.stable_summary, ctx.summary_version,
+        ctx.compressed_up_to_event_id, ctx.stable_history[:row.history_count], body.get("tools", [])]
+    legacy_hash = hashlib.sha256(json.dumps(
+        legacy_payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    await cache.store.save(replace(row, prefix_hash=legacy_hash))
+
+    await prepare(cache, transport, selected, ctx, req)
+
+    assert len(transport.calls) == 2
 
 
 @pytest.mark.anyio

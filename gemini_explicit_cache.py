@@ -125,7 +125,7 @@ class PostgresGeminiCacheStore:
 
 
 def _fingerprint(context, body, history_count):
-    payload = [context.static_system, context.stable_summary, context.summary_version,
+    payload = ["tools-in-cache.v1", context.static_system, context.stable_summary, context.summary_version,
                context.compressed_up_to_event_id, context.stable_history[:history_count], body.get("tools", [])]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -172,6 +172,7 @@ class GeminiExplicitCache:
             resource = await self._create(resource, profile, request, context, body, headers, transport)
         tail = dict(body)
         tail.pop("systemInstruction", None)
+        tail.pop("tools", None)
         tail["contents"] = body["contents"][resource.history_count + bool(context.stable_summary):]
         tail["cachedContent"] = resource.resource_name
         return tail
@@ -179,6 +180,8 @@ class GeminiExplicitCache:
     async def _create(self, resource, profile, request, context, body, headers, transport):
         payload = {"model": profile.model, "ttl": "3600s", "systemInstruction": body["systemInstruction"],
                    "contents": body["contents"][:resource.history_count + bool(context.stable_summary)]}
+        if body.get("tools"):
+            payload["tools"] = body["tools"]
         draft = execution_receipt_draft(profile=profile, generation_request_id=request.generation_request_id,
             actor_id=request.actor_id, room_id=request.room_id, conversation_id=request.conversation_id,
             context=context, cache_namespace=resource.namespace, execution_purpose="cache_create")
