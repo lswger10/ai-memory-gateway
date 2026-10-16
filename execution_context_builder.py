@@ -6,7 +6,7 @@ from cache_strategies import PromptSegment
 
 from actor_memory_tools import ACTOR_MEMORY_TOOL_SCHEMA_HASH, ActorMemoryExecutionContext
 from shared_page_client import CALENDAR_TOOL_SCHEMA_HASH
-from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, InMemoryAnchoredHistoryStore, build_summary_namespace
+from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, SummaryCompressionError, InMemoryAnchoredHistoryStore, build_summary_namespace
 from bedroom_memory import BedroomContextPackService, BedroomPackRequest
 from conversation_partitions import InMemoryConversationPartitionStore
 from conversation_sync import ConversationSyncService
@@ -268,7 +268,7 @@ class GatewayExecutionContextBuilder:
                     namespace=namespace, state=state, prior_summary=prior_summary, events=events)
             except ProviderRunUnavailable as exc:
                 # A failed maintenance call is not permission to pay another fallback Profile.
-                raise AnchoredHistoryError("conversation summary failed; history unchanged") from exc
+                raise SummaryCompressionError("summary_provider_unavailable") from exc
 
         state, history = await self.history_compactor.maybe_compact(
             store=self.history_store,

@@ -6,7 +6,7 @@ from typing import Any, AsyncIterator, Protocol
 
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
 from cache_strategies import PromptSegment
-from anchored_history import SummaryInputBudgetExceeded
+from anchored_history import SummaryInputBudgetExceeded, SummaryCompressionError
 from model_profile_store import InMemoryModelProfileStore
 from model_usage_store import (
     execution_receipt_draft,
@@ -126,9 +126,10 @@ class GatewayModelExecutionService:
                     resolved_conversation_id=conversation_id,
                     allow_compression=index == 0,
                 )
-            except SummaryInputBudgetExceeded:
+            except (SummaryInputBudgetExceeded, SummaryCompressionError) as exc:
                 logging.getLogger(__name__).warning(
-                    "summary_input_budget_exceeded generation=%s profile=%s",
+                    "%s generation=%s profile=%s",
+                    exc.reason if isinstance(exc, SummaryCompressionError) else "summary_input_budget_exceeded",
                     request.generation_request_id, profile.profile_id,
                 )
                 yield ExecutionStreamEvent("unavailable", {

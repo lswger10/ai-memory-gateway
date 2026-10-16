@@ -46,6 +46,13 @@ class _Connection:
             return dict(self.rows[namespace])
         if "FOR UPDATE" in sql:
             return dict(self.rows[args[0]])
+        if "SET compression_error=$3" in sql:
+            namespace, expected, reason = args
+            row = self.rows[namespace]
+            if row["state_revision"] != expected:
+                return None
+            row["compression_error"] = reason
+            return dict(row)
         if "UPDATE conversation_summary_state" in sql:
             namespace, expected, summary, count, cursor = args
             row = self.rows[namespace]
@@ -56,6 +63,7 @@ class _Connection:
                 summary_token_count=count,
                 compressed_up_to_event_id=cursor,
                 state_revision=expected + 1,
+                compression_error=None,
             )
             return dict(row)
         raise AssertionError(sql)
@@ -147,6 +155,73 @@ async def test_postgres_compression_rejects_stale_revision_without_partial_curso
 
 async def _pool(pool):
     return pool
+
+
+async def _assert_persistent_pause(factory, restart):
+    from anchored_history import AnchoredHistoryCompactor, SummaryCompressionError
+    identity = dict(actor_id="laoke", room_id="room_weiwei_laoke",
+                    conversation_id="pause-test", execution_mode="private")
+    key = build_summary_namespace(**identity)
+    store = PostgresAnchoredHistoryStore(factory)
+    state = await store.get_or_create(key, identity=identity)
+    events = tuple(dict(event_id=i, actor_id="weiwei", content=f"synthetic-{i}") for i in range(1, 131))
+    calls = []
+
+    async def fail(*args):
+        calls.append(1)
+        raise SummaryCompressionError("summary_empty")
+
+    with pytest.raises(SummaryCompressionError):
+        await AnchoredHistoryCompactor().maybe_compact(store=store, cache_namespace=key,
+            state=state, events=events, summarize=fail, identity=identity)
+    await restart()
+    restarted = PostgresAnchoredHistoryStore(factory)
+    restored = await restarted.get_or_create(key, identity=identity)
+    assert restored.compression_error == "summary_empty"
+    assert (restored.summary, restored.state_revision, restored.compressed_up_to_event_id) == ("", 1, 0)
+    for _ in range(2):
+        with pytest.raises(SummaryCompressionError, match="summary_empty"):
+            await AnchoredHistoryCompactor().maybe_compact(store=restarted, cache_namespace=key,
+                state=restored, events=events, summarize=fail, identity=identity)
+    assert len(calls) == 1
+    for changes in (dict(actor_id="jiao", room_id="room_weiwei_jiao"),
+                    dict(room_id="room_group_home", execution_mode="group"),
+                    dict(conversation_id="bedroom:pause-test", execution_mode="bedroom")):
+        other = dict(identity, **changes)
+        assert (await restarted.get_or_create(build_summary_namespace(**other), identity=other)).compression_error is None
+
+    async def succeed(*args):
+        calls.append(1)
+        return "Complete synthetic summary"
+
+    recovered, tail = await AnchoredHistoryCompactor().maybe_compact(store=restarted,
+        cache_namespace=key, state=restored, events=events, summarize=succeed, force=True, identity=identity)
+    assert len(calls) == 2 and len(tail) == 48
+    assert recovered.compression_error is None and recovered.compressed_up_to_event_id == 82
+    with pytest.raises(AnchoredHistoryError, match="revision conflict"):
+        await store.set_compression_error(key, expected_revision=1, reason="summary_empty")
+    assert await restarted.get_or_create(key, identity=identity) == recovered
+
+
+@pytest.mark.anyio
+async def test_postgres_pause_store_recreation_and_explicit_recovery():
+    pool = _Pool()
+    async def restart(): pass
+    await _assert_persistent_pause(lambda: _pool(pool), restart)
+
+
+@pytest.mark.anyio
+async def test_real_postgres_pause_survives_new_connections_and_schema_reinitialization(monkeypatch, isolated_postgres):
+    import database
+    async def factory(): return isolated_postgres
+    monkeypatch.setattr(database, "get_pool", factory)
+    await database.init_tables()
+
+    async def restart():
+        await isolated_postgres.expire_connections()
+        await database.init_tables()
+
+    await _assert_persistent_pause(factory, restart)
 
 
 class _PostgresCteVisibilityConnection:

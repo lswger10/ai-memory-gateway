@@ -6,6 +6,35 @@
 
 **Owner:** Gateway. Reuse the release worktree at 67e0653; preserve pre-existing README edits. Tidal d1b27bd remains unchanged.
 
+## Follow-up: approved failure pause, local only (2026-10-16)
+
+- On base `44611d5`, persist `compression_error` in the existing summary row before
+  an attempt. Failure/cancellation never changes summary, cursor or revision;
+  repeated turns, Profile swaps and store recreation cannot auto-pay again.
+  Success atomically clears the marker. No raw-fact deletion or ACL change.
+- Summary output allowance 8192 includes reasoning; retained summary cap stays
+  4096 characters. Record safe rejection category/length and usage, not private
+  text. No retries, fallback or guarantee of future upstream success.
+- Review found Group/Bedroom lacked the private-only manual retry path. Resolved
+  via explicit `action: resume` on the existing management endpoint, exact summary
+  identity/revision and shared lock, status-only output, no provider call and no
+  state creation. Next full execution gets one attempt; a failure pauses again.
+- RED/GREEN: initial seven failures; additional Group/Bedroom resume tests first
+  failed for the missing operation. Final Gateway 479 passed / 61 skipped /
+  2 subtests, Tidal client 5 passed. Read-only independent review found no remaining
+  material issues. Existing single-replica constraint is unchanged.
+- Real PostgreSQL: separate diagnostic process ran current changed compactor/
+  decoder/store methods and additive DDL in disposable test schema, recreated
+  pool, verified durable pause/resume/CAS/scopes and 130 untouched synthetic facts.
+  Schema removed and absence verified; no application table/file modified, no
+  service restart. This does not convert the 61 skipped opt-in tests to passes.
+- Zero paid requests; not committed/pushed/deployed. Current deployed application
+  remains unchanged. Old-code rollback ignores pause markers and may spend again.
+- Gemini keepalive remains blocked pending a separately scoped native Gemini
+  cachedContents adapter/lifecycle design: current OFOX OpenAI-compatible chat
+  cannot just inherit Claude's 50-minute verified-1h behavior. No automatic paid
+  job was enabled, no Profile/binding changed, no implicit-cache hit promised.
+
 ## Tasks
 
 - [x] RED: existing builder must summarize once across Profile switches, with unchanged facts and distinct provider cache keys. Oversized full summary batches must fail before a provider call, not shrink into repeated paid fragments.

@@ -214,7 +214,8 @@ async def test_summary_failure_or_oversize_keeps_previous_summary_and_cursor():
     with pytest.raises(AnchoredHistoryError):
         await compactor.maybe_compact(store=store, cache_namespace="namespace-1", state=state,
             events=events, summarize=oversized)
-    assert await store.get_or_create("namespace-1") == state
+    from dataclasses import replace
+    assert await store.get_or_create("namespace-1") == replace(state, compression_error="summary_too_long")
 
 
 @pytest.mark.anyio
@@ -344,3 +345,30 @@ async def test_full_batch_leaves_tail_and_does_not_summarize_next_turn():
     again, remaining = await compactor.maybe_compact(store=store, cache_namespace="summary",
         state=updated, events=next_tail, summarize=summarize)
     assert again == updated and remaining == next_tail and len(calls) == 1
+
+
+@pytest.mark.anyio
+async def test_interrupted_summary_stays_paused_without_changing_prefix_or_other_scopes():
+    import asyncio
+    store = InMemoryAnchoredHistoryStore()
+    state = await store.get_or_create("summary")
+    events = tuple(dict(event_id=i, actor_id="weiwei", content="synthetic") for i in range(1, 131))
+    calls = []
+    async def interrupted(*args):
+        calls.append(1)
+        raise asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await AnchoredHistoryCompactor().maybe_compact(store=store, cache_namespace="summary",
+            state=state, events=events, summarize=interrupted)
+    restored = await store.get_or_create("summary")
+    assert restored.compression_error == "summary_attempt_incomplete"
+    assert (restored.summary, restored.state_revision, restored.compressed_up_to_event_id) == ("", 1, 0)
+    with pytest.raises(AnchoredHistoryError, match="paused"):
+        await AnchoredHistoryCompactor().maybe_compact(store=store, cache_namespace="summary",
+            state=state, events=events, summarize=interrupted)
+    assert calls == [1]
+    other = await store.get_or_create("other-actor-room")
+    async def success(*args): return "Other scope summary"
+    result, tail = await AnchoredHistoryCompactor().maybe_compact(store=store, cache_namespace="other-actor-room",
+        state=other, events=events, summarize=success)
+    assert result.compressed_up_to_event_id == 82 and len(tail) == 48

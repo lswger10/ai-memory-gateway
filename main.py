@@ -75,7 +75,7 @@ from shared_page_client import SharedPageClient
 from media_materialization import RelayMediaReader
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
-from anchored_history import AnchoredHistoryError, InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore, SummaryInputBudgetExceeded
+from anchored_history import AnchoredHistoryError, InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore, SummaryInputBudgetExceeded, SummaryCompressionError
 from conversation_compression import ConversationCompressionService
 from model_execution import ProviderRunUnavailable
 from conversation_partitions import (
@@ -891,7 +891,10 @@ async def compress_conversation(request: Request):
     _require_model_management()
     try:
         payload = await request.json()
-        if not isinstance(payload, dict) or set(payload) != {"actor_id", "room_id", "conversation_id", "current_event_id"}:
+        resume = isinstance(payload, dict) and payload.get("action") == "resume"
+        fields = ({"action", "actor_id", "room_id", "conversation_id", "execution_mode", "expected_revision"}
+                  if resume else {"actor_id", "room_id", "conversation_id", "current_event_id"})
+        if not isinstance(payload, dict) or set(payload) != fields:
             raise ValueError("invalid compression target")
         await _refresh_actor_prompt_store()
         await _get_model_execution_service()
@@ -899,9 +902,13 @@ async def compress_conversation(request: Request):
             _conversation_compression_service = ConversationCompressionService(
                 builder=_model_context_builder, profiles=_model_profile_store,
                 runner=_model_provider_runner, usage_store=_model_usage_store)
+        if resume:
+            return await _conversation_compression_service.resume(**{k: v for k, v in payload.items() if k != "action"})
         return await _conversation_compression_service.compress(**payload)
     except SummaryInputBudgetExceeded as exc:
         raise HTTPException(status_code=413, detail="summary_input_budget_exceeded") from exc
+    except SummaryCompressionError as exc:
+        raise HTTPException(status_code=502, detail=exc.reason) from exc
     except AnchoredHistoryError as exc:
         raise HTTPException(status_code=409, detail="compression_state_conflict") from exc
     except (ValueError, TypeError) as exc:

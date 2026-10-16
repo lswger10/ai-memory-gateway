@@ -348,6 +348,9 @@ CREATE TABLE IF NOT EXISTS conversation_summary_state (
     UNIQUE(actor_id,room_id,conversation_id,execution_mode)
 );
 
+ALTER TABLE conversation_summary_state
+    ADD COLUMN IF NOT EXISTS compression_error TEXT;
+
 CREATE TABLE IF NOT EXISTS conversation_cache_pins (
     pin_id TEXT PRIMARY KEY,
     room_id TEXT NOT NULL,

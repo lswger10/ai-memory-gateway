@@ -14,6 +14,12 @@ class SummaryInputBudgetExceeded(AnchoredHistoryError):
     """The whole target batch cannot fit the bounded summary request."""
 
 
+class SummaryCompressionError(AnchoredHistoryError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"compression paused: {reason}; history unchanged")
+
+
 def build_summary_namespace(*, actor_id: str, room_id: str, conversation_id: str,
                             execution_mode: str) -> str:
     """Conversation cognition survives Profile/Persona/tool changes; scenes do not mix."""
@@ -63,6 +69,7 @@ class AnchoredHistoryState:
     summary: str
     summary_token_count: int
     state_revision: int
+    compression_error: str | None = None
 
 
 class AnchoredHistoryCompactor:
@@ -93,6 +100,10 @@ class AnchoredHistoryCompactor:
     @staticmethod
     def _estimated_tokens(text: str) -> int:
         return max(1, (len(text) + 3) // 4)
+
+    async def resume(self, *, store, namespace, expected_revision):
+        async with self._lock:
+            await store.set_compression_error(namespace, expected_revision=expected_revision, reason=None)
 
     async def maybe_compact(
         self,
@@ -126,12 +137,22 @@ class AnchoredHistoryCompactor:
             latest = await store.get_or_create(cache_namespace, identity=identity)
             if latest.state_revision != state.state_revision:
                 raise AnchoredHistoryError("cache state revision conflict before summary")
-            replacement = await summarize(state.summary, compressed)
-            if not isinstance(replacement, str) or not replacement.strip():
-                raise AnchoredHistoryError("compression produced an empty summary")
-            token_count = self._estimated_tokens(replacement)
-            if token_count > self.summary_token_limit:
-                raise AnchoredHistoryError("replacement summary exceeds token limit")
+            if latest.compression_error and not force:
+                raise SummaryCompressionError(latest.compression_error)
+            # Persist before spending: cancellation/crash must not buy another attempt.
+            await store.set_compression_error(cache_namespace, expected_revision=state.state_revision,
+                                              reason="summary_attempt_incomplete")
+            try:
+                replacement = await summarize(state.summary, compressed)
+                if not isinstance(replacement, str) or not replacement.strip():
+                    raise SummaryCompressionError("summary_empty")
+                token_count = self._estimated_tokens(replacement)
+                if token_count > self.summary_token_limit:
+                    raise SummaryCompressionError("summary_too_long")
+            except SummaryCompressionError as exc:
+                await store.set_compression_error(cache_namespace, expected_revision=state.state_revision,
+                                                  reason=exc.reason)
+                raise
             updated = await store.apply_compression(
                 cache_namespace,
                 expected_revision=state.state_revision,
@@ -181,6 +202,13 @@ class InMemoryAnchoredHistoryStore:
         if any(event_id <= state.compressed_up_to_event_id for event_id in event_ids):
             raise AnchoredHistoryError("appended event must follow compressed cursor")
         # Observation intentionally does not mutate the compression cursor/state.
+
+    async def set_compression_error(self, cache_namespace, *, expected_revision, reason):
+        async with self._lock:
+            current = self._states.get(cache_namespace)
+            if current is None or current.state_revision != expected_revision:
+                raise AnchoredHistoryError("cache state revision conflict")
+            self._states[cache_namespace] = replace(current, compression_error=reason)
 
     async def apply_compression(
         self,
@@ -256,6 +284,7 @@ def _state_from_row(row) -> AnchoredHistoryState:
         summary=str(row["summary"]),
         summary_token_count=int(row["summary_token_count"]),
         state_revision=int(row["state_revision"]),
+        compression_error=row.get("compression_error"),
     )
 
 
@@ -355,6 +384,16 @@ class PostgresAnchoredHistoryStore:
             raise AnchoredHistoryError("factual event ids must be positive")
         # Append observation deliberately does not move compressed_up_to.
 
+    async def set_compression_error(self, cache_namespace, *, expected_revision, reason):
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE conversation_summary_state SET compression_error=$3,updated_at=NOW()
+                   WHERE summary_namespace=$1 AND state_revision=$2 RETURNING summary_namespace""",
+                cache_namespace, expected_revision, reason)
+            if row is None:
+                raise AnchoredHistoryError("cache state revision conflict")
+
     async def apply_compression(
         self,
         cache_namespace: str,
@@ -394,10 +433,10 @@ class PostgresAnchoredHistoryStore:
                     """UPDATE conversation_summary_state SET
                          summary=$3,summary_token_count=$4,
                          compressed_up_to_event_id=$5,
-                         state_revision=state_revision+1,updated_at=NOW()
+                         state_revision=state_revision+1,compression_error=NULL,updated_at=NOW()
                        WHERE summary_namespace=$1 AND state_revision=$2
                        RETURNING summary_namespace AS cache_namespace,compressed_up_to_event_id,summary,
-                                 summary_token_count,state_revision""",
+                                 summary_token_count,state_revision,compression_error""",
                     cache_namespace,
                     expected_revision,
                     replacement_summary,

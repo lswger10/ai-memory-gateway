@@ -3,11 +3,12 @@
 import asyncio
 import hashlib
 import json
+import logging
 from cache_strategies import PromptSegment
 import uuid
 from types import SimpleNamespace
 
-from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, build_summary_namespace
+from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, SummaryCompressionError, build_summary_namespace
 from model_execution import ContextBundle, ProviderRunUnavailable
 from model_usage_store import execution_receipt_draft, record_provider_attempt
 
@@ -19,6 +20,15 @@ class ConversationCompressionService:
         # ponytail: one manual summary at a time on this single-replica Gateway;
         # use a database claim if Gateway is deployed with multiple replicas.
         self._lock = asyncio.Lock()
+
+    async def resume(self, *, actor_id, room_id, conversation_id, execution_mode, expected_revision):
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ValueError("expected summary revision is required")
+        namespace = build_summary_namespace(actor_id=actor_id, room_id=room_id,
+            conversation_id=conversation_id, execution_mode=execution_mode)
+        await self.compactor.resume(store=self.builder.history_store, namespace=namespace,
+                                    expected_revision=expected_revision)
+        return {"status": "resumed"}
 
     async def compress(self, *, actor_id, room_id, conversation_id, current_event_id):
         if actor_id not in {"jiao", "laoke"} or room_id != f"room_weiwei_{actor_id}":
@@ -80,16 +90,33 @@ class ConversationCompressionService:
 
         async def on_attempt(attempt_id, usage, status, received, cache_support):
             await record_provider_attempt(self.usage_store, draft, attempt_id, usage, status, received, cache_support)
+            logging.getLogger(__name__).info(
+                "summary_usage generation=%s attempt=%s input_tokens=%s output_tokens=%s received=%s",
+                generation_id, attempt_id, usage.input_tokens, usage.output_tokens, received)
 
         summary = ""
-        async for item in self.runner.run(profile=profile,
-                request=SimpleNamespace(execution_kind="full", generation_request_id=generation_id),
-                # The storage char/4 estimate is not a multilingual output-token budget.
-                context=context, cache_namespace=summary_namespace, max_output_tokens=4096, on_attempt=on_attempt):
-            if item.event == "final":
-                if item.data.get("truncated"):
-                    raise ProviderRunUnavailable("summary was truncated; history unchanged")
-                summary = item.data.get("text", "").strip()
-        if not summary or len(summary) > 4096:
-            raise ProviderRunUnavailable("summary is empty or exceeds the storage limit")
+        try:
+            async for item in self.runner.run(profile=profile,
+                    request=SimpleNamespace(execution_kind="full", generation_request_id=generation_id),
+                    # Reasoning shares the output allowance; storage length stays bounded separately.
+                    context=context, cache_namespace=summary_namespace, max_output_tokens=8192, on_attempt=on_attempt):
+                if item.event == "final":
+                    summary = item.data.get("text", "").strip()
+                    if item.data.get("truncated"):
+                        raise SummaryCompressionError("summary_truncated")
+            if not summary:
+                raise SummaryCompressionError("summary_empty")
+            if len(summary) > 4096:
+                raise SummaryCompressionError("summary_too_long")
+        except ProviderRunUnavailable as exc:
+            reason = ("summary_empty" if str(exc) == "provider completed without reply text"
+                      else "summary_provider_unavailable")
+            logging.getLogger(__name__).warning("%s generation=%s", reason, generation_id)
+            raise SummaryCompressionError(reason) from exc
+        except SummaryCompressionError as exc:
+            logging.getLogger(__name__).warning("%s generation=%s summary_chars=%s",
+                exc.reason, generation_id, len(summary))
+            raise
+        logging.getLogger(__name__).info("summary_accepted generation=%s summary_chars=%s",
+            generation_id, len(summary))
         return summary

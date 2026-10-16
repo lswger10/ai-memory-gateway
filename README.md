@@ -1,5 +1,64 @@
 # AI Memory Gateway
 
+## Summary failure pause (2026-10-16, test release authorized)
+
+On top of `44611d5`, automatic summary failure now durably pauses that exact
+actor/room/conversation/mode in `conversation_summary_state.compression_error`.
+The additive, idempotent column is written **before** the provider attempt, so
+cancellation/process loss also leaves a pause. Empty, truncated, overlong or
+unavailable responses never advance summary/cursor; later turns and Profile
+changes do not retry or fall back. A validated summary atomically clears the
+pause. Pausing does not bump summary revision or alter the cache prefix, and
+no original facts are removed. Raw-history repair retains the pause.
+
+Summary output allowance is now 8192 tokens (including reasoning), not the
+chat-output limit; summary storage remains at most 4096 characters. This is
+headroom, not a guarantee that every upstream result succeeds or costs less.
+The 192000-character input-data cap and complete-batch/48-event-tail behavior
+remain unchanged. Safe logs record attempt usage, rejection category and
+summary length, never transcript/summary text. Exact upstream finish reasons
+are not newly persisted by this change.
+
+Recovery reuses the admin-only `POST /api/conversation-compression`: its existing
+private compression operation is an explicit paid retry. For all modes, the
+additional exact body `{action: "resume", actor_id, room_id, conversation_id,
+execution_mode, expected_revision}` only clears an existing pause under the
+same compactor lock; it returns `{status: "resumed"}` with no provider call.
+The next normal full execution may make one new summary attempt. Administrators
+must read the current `state_revision` for the exact four identity fields from
+`conversation_summary_state` first; a nonexistent/stale row returns 409.
+For Bedroom, `conversation_id` is the existing `bedroom:<session>` partition,
+not the ordinary private conversation. No new visible UI retry button was added.
+Do not resume a paid attempt without the user's applicable authorization.
+
+Free verification: Gateway **479 passed, 61 skipped, 2 subtests passed**;
+Tidal Gateway-client **5 passed**. RED/GREEN cases cover empty/truncated/oversize/
+transport failures, cancelled attempts, Profile switches, Group/Bedroom recovery,
+concurrent resume and raw-fact preservation. Independent read-only review passed.
+An isolated Zeabur test PostgreSQL schema exercised the actual changed compactor,
+state decoder and store methods in a separate diagnostic process: one synthetic
+attempt across repeated turns, persistence after connection-pool recreation,
+idempotent column migration, explicit resume, atomic success, stale revision
+rejection and actor/room/Bedroom isolation. All 130 synthetic facts remained.
+The disposable schema was dropped and absence verified, including on the first
+test-fixture error. This was **not** a server/application restart or deployment;
+the 61 opt-in tests remain skipped. No live application tables or files changed.
+
+No provider requests or new dependency/service/branch/worktree. The user has
+authorized committing, pushing and deploying this fix to test; rollout evidence
+will be recorded after verification. Rolling back to old code would ignore the pause and
+can resume automatic spending; leave this nullable column in place rather than
+dropping data. Multi-replica paid-call exclusion is still not claimed.
+
+Gemini Cache Pin remains unsupported/paused, not silently enabled: current OFOX
+Gemini Profiles use OpenAI-compatible chat, whereas its documented explicit
+cache uses native Gemini `cachedContents` and a `cachedContent` generation
+reference. The documented create/read/delete surface does not establish TTL
+renewal support. Native protocol/cache-object lifecycle and actual route evidence
+need a separate scoped design/authorization; ordinary periodic generations are
+not evidence of keepalive or savings. Sources: [OFOX cache API](https://ofox.ai/docs/api/gemini/cached-contents),
+[OFOX explicit caching guide](https://ofox.ai/docs/develop/advanced/gemini-explicit-cache).
+
 ## Conversation summary separation (2026-10-16, test chat recovery verified)
 
 The working change separates `conversation_summary_state` from Profile-specific
