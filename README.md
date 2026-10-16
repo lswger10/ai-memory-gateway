@@ -1,6 +1,6 @@
 # AI Memory Gateway
 
-## Conversation summary separation (2026-10-15, local regressions passed; not deployed)
+## Conversation summary separation (2026-10-16, deployed to test; Gemini summary acceptance failed)
 
 The working change separates `conversation_summary_state` from Profile-specific
 provider cache namespaces. The summary key includes actor, room, canonical
@@ -45,7 +45,21 @@ the 192,000 bound was announced before changing it. Exact 191,999/192,000/192,00
 boundary checks and a larger realistic-event regression pass. Two authorized
 diagnostic provider requests used the old deployed code: the historical batch
 returned HTTP 200 with empty content/zero usage, while synthetic input worked.
-No existing factual records or bindings were changed. Deployment is pending.
+Code commit `58f6b38a18944de1c2dea2ffebe7835a502a656c` is pushed and deployed
+to Zeabur test Gateway deployment `6ad1c0ef0b0bc926ae2a941e`.
+Runtime source SHA256 matches Git, health is HTTP 200, and the additive table
+exists. Before/after deployment counts and content fingerprints match for
+conversations, memories, Persona versions/active selection, Profiles, bindings,
+room overrides and cache pins. No existing factual records or bindings changed.
+Production is untouched. One explicitly authorized post-deploy historical-summary
+request returned Gateway HTTP 502 `compression_unavailable`. Exactly one provider
+receipt was added: OFOX Gemini Pro reported succeeded, 82,109 input / 4,092 output
+tokens, usage received. The adopted state remains cursor 1583 / revision 52 /
+994 summary characters, not the older Gemini cursor 1271. Raw facts were not
+deleted. The receipt omits finish reason/body length, so truncation versus summary
+length validation cannot yet be distinguished. The old 4,096 output-token bound
+was not raised. Incident budget: 3 of 5 actual requests used; no automatic retry.
+Laoke real-chat restoration is not yet verified and must not be claimed.
 
 Rollback: keep old rows until rollout acceptance; they are not dual-written.
 Old-code rollback after new compaction can lose derived progress and repeat
