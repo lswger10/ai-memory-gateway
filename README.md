@@ -1,11 +1,12 @@
 # AI Memory Gateway
 
-## OFOX Gemini explicit cache (2026-10-16, local only)
+## OFOX Gemini explicit cache (2026-10-16, deployed to test; provider unverified)
 
 Implemented on `codex/gateway-garden-test-release` after design commit `b089d7b`.
-This is **not deployed or provider-verified**. Existing online Profiles and
-bindings are unchanged; the previously documented test release below is not
-evidence that this new path is running there.
+Runtime release `2cefadfbcbd3ddf4f0ddbe1d701a34216746c965` is pushed on
+`codex/gateway-garden-test-release` and deployed to Zeabur test as
+`6ad1e80d0b0bc926ae2aa244`. This is **not provider-verified**. Existing online
+Profiles and bindings are unchanged; no native Gemini Profile was enabled.
 
 - New `gemini_native` / `gemini_explicit_cache_v1` reuse the existing transport,
   tools, usage and conversation Pin. Native text/media, function responses,
@@ -36,13 +37,43 @@ evidence that this new path is running there.
   billable. Missing cache-read telemetry cannot verify explicit caching.
   Resource readiness is not a cache hit; actual usage remains authoritative.
 
-Free full-suite result: **505 passed, 62 skipped, 2 subtests passed** using
+Free full-suite result: **506 passed, 62 skipped, 2 subtests passed** using
 `python -B -m pytest -q -p no:cacheprovider` with PostgreSQL approval disabled.
-Verification uses fake HTTP and synthetic data only; PostgreSQL opt-in tests
-are skipped. Independent review's cost-disclosure and sanitized-error findings
-were fixed and rechecked. No provider calls, cloud changes, push or deployment.
-Real PostgreSQL migration/restart and OFOX route/media/tool/cache validation
-remain release gates before enabling the new protocol on a real binding.
+The suite uses fake HTTP and synthetic data; its PostgreSQL opt-in cases remain
+skipped. Separately, the authorized test PostgreSQL check used disposable schema
+`gemini_release_20261016_1fb9fb7`, not business rows:
+
+- Before push, the new table/index DDL ran twice. Three synthetic resource states
+  (ready/paused/interrupted) and 130 synthetic facts survived a fresh diagnostic
+  process and an actual restart of `next-postgres`.
+- Zeabur's `data` volume is mounted at `/var/lib/postgresql/18/docker`; PostgreSQL
+  reports `/var/lib/postgresql/18/docker/pgdata`. Its postmaster start changed to
+  `2026-10-16 08:55:49.221544+00:00`; logs confirmed existing data skipped init.
+- After deployment, the actual `apply_model_execution_schema` ran twice in that
+  isolated schema. Actual `PostgresGeminiCacheStore`/`GeminiExplicitCache` rejected
+  four preparations from durable paused/interrupted states without provider I/O,
+  blocked alternate-Profile bypass, allowed one of eight concurrent reservations,
+  rejected stale writes and wrong/early recovery, and allowed exact expired recovery.
+- Before/after restart, deployment and isolated checks, all 28 original public
+  tables had identical row counts and content fingerprints. Observed counts:
+  1715 conversations, 23 memories, 7 Profiles, 2 actor bindings, 3 room overrides,
+  1597 execution receipts. These are evidence, not hardcoded acceptance thresholds.
+  The new public cache-resource table exists and is empty. The disposable schema
+  was dropped and its absence verified; no existing history was deleted.
+- Initial release `1fb9fb7` failed to start because `.dockerignore` omitted the new
+  module. `2cefadf` adds that one allowlist entry and a RED/GREEN import smoke test
+  using only image-allowed files in an isolated directory. The fixed cloud image
+  starts successfully, health returns 200, and 13 runtime files (including the
+  root Dockerfile, new module and Dashboard assets) match Git content hashes.
+  Runtime is Python 3.12.14 / Uvicorn on 8080. Local Docker is unavailable, so the
+  local smoke test is not a local image build; the Zeabur image supplies that check.
+
+Independent review's cost-disclosure and sanitized-error findings were fixed and
+rechecked before release. This deployment made **zero paid provider calls**.
+OFOX route/media/tool/cache-hit validation remains a gate before enabling the new
+protocol on any real binding. The pre-existing pgvector-unavailable warning and
+Python vector-search fallback remain unchanged. Production was not touched.
+Rollback can redeploy `792dc34`; retain the additive cache table and business data.
 No new service/dependency/branch/worktree; Relay and Orchestrator are unchanged.
 
 ## Summary failure pause (2026-10-16, deployed and freely verified in test)
