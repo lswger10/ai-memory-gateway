@@ -30,8 +30,12 @@ cache creation, full-tool and minimal-tool diagnostics all stayed bounded and
 published nothing to Relay. No post-fix provider call has been made yet. A
 complete live memory-tool roundtrip needs both generation and the continuation
 after the tool result, so the single remaining request is preserved rather
-than spent on an acceptance that cannot finish. This change is local until its
-commit, push and Zeabur test deployment are recorded below.
+than spent on an acceptance that cannot finish. Runtime commit
+`ad377c086b783cfd47a1cb5d665b681c2bcb9dcd` is pushed and running in Zeabur
+test deployment `6ad23ea19b2fc6928298151e`; service health returned HTTP 200
+and deployed `gemini_explicit_cache.py` SHA256
+`ca70cc49953023d9ff07c399581483f9a968a8cb9bc073e9bdb53825338acafe`
+matched the committed file. Production and Relay were not changed.
 
 References: <https://ofox.ai/docs/api/gemini/cached-contents> and
 <https://ai.google.dev/api/caching>.
