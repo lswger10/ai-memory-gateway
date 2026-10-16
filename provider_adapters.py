@@ -14,6 +14,26 @@ class ProviderAdapterError(RuntimeError):
     pass
 
 
+def _gemini_parameter_schema(value):
+    if isinstance(value, list):
+        return [_gemini_parameter_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {
+        key: _gemini_parameter_schema(item)
+        for key, item in value.items()
+        if key != "uniqueItems"
+    }
+    schema_type = result.get("type")
+    if isinstance(schema_type, list):
+        concrete = [item for item in schema_type if item != "null"]
+        if len(concrete) != 1 or len(concrete) == len(schema_type):
+            raise ProviderAdapterError("Gemini parameters contain an unsupported type union")
+        result["type"] = concrete[0]
+        result["nullable"] = True
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class RenderedProviderRequest:
     method: str
@@ -37,7 +57,7 @@ class GeminiNativeAdapter:
         if tools:
             body["tools"] = [{"functionDeclarations": [
                 {"name": tool["name"], "description": tool["description"],
-                 "parameters": tool["input_schema"]} for tool in tools]}]
+                 "parameters": _gemini_parameter_schema(tool["input_schema"])} for tool in tools]}]
         return RenderedProviderRequest("POST", f"/gemini/v1beta/models/{profile.model}:streamGenerateContent?alt=sse", body)
 
     def parse_usage(self, values):

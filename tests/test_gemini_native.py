@@ -40,6 +40,11 @@ def test_native_render_preserves_roles_context_labels_media_and_tools():
     assert body["contents"][3]["parts"][0]["text"] == "[current_event]\nquestion"
     assert body["contents"][-1]["parts"][-1]["inlineData"]["mimeType"] == "application/pdf"
     assert body["tools"][0]["functionDeclarations"][0]["parameters"]
+    declarations = {item["name"]: item for item in body["tools"][0]["functionDeclarations"]}
+    confidence = declarations["propose_memory_candidate"]["parameters"]["properties"]["confidence"]
+    assert confidence == {"type": "number", "nullable": True, "minimum": 0, "maximum": 1}
+    memory_ids = declarations["merge_memories"]["parameters"]["properties"]["memory_ids"]
+    assert "uniqueItems" not in memory_ids
 
 
 class NativeResponse:

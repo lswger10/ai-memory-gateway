@@ -1,5 +1,29 @@
 # AI Memory Gateway
 
+## OFOX Gemini native full-tool schema compatibility (2026-10-16)
+
+The deployed cached-tool diagnostic reached OFOX with the explicit cache
+reference and all 19 tools, then returned HTTP 400 before generation. The same
+route had already accepted a single `get_memory` declaration. Free inspection
+isolated the remaining difference to JSON-Schema-only keywords in the complete
+tool set: nullable union types and `uniqueItems` are not valid in Gemini's
+native OpenAPI `parameters` shape.
+
+The Gemini adapter now maps a nullable union to `type` plus `nullable` and omits
+`uniqueItems`; the existing tool executor remains the validation boundary.
+OpenAI/Anthropic rendering, tool definitions, ACL, cache ownership, bindings,
+Persona, summaries and history are unchanged. TDD reproduced the old wire
+shape before the fix. Free full regression: **513 passed, 62 skipped, 2
+subtests passed**.
+
+The authorized five-request ledger is exhausted: two one-tool schema
+comparisons, one rejected cache creation before the tools-outside-cache fix,
+then one successful cache creation and one cached generation rejected with the
+full old schema. No request was retried and nothing was published to Relay.
+The post-fix live cached tool roundtrip is therefore **UNVERIFIED**, not PASS,
+until separately authorized; normal text/image evidence remains the earlier
+accepted events recorded below.
+
 ## OFOX Gemini native tool schema fix (2026-10-16, test deployed; paid acceptance blocked)
 
 Two bounded synthetic requests to the same 3.1 Pro native route isolated a
