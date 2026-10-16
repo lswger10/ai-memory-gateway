@@ -1,6 +1,6 @@
 # AI Memory Gateway
 
-## Summary failure pause (2026-10-16, test release authorized)
+## Summary failure pause (2026-10-16, deployed and freely verified in test)
 
 On top of `44611d5`, automatic summary failure now durably pauses that exact
 actor/room/conversation/mode in `conversation_summary_state.compression_error`.
@@ -44,9 +44,28 @@ The disposable schema was dropped and absence verified, including on the first
 test-fixture error. This was **not** a server/application restart or deployment;
 the 61 opt-in tests remain skipped. No live application tables or files changed.
 
-No provider requests or new dependency/service/branch/worktree. The user has
-authorized committing, pushing and deploying this fix to test; rollout evidence
-will be recorded after verification. Rolling back to old code would ignore the pause and
+Release `792dc34969adadd91a7c0654001a2eceb2404193` is pushed to the existing
+private `codex/gateway-garden-test-release` branch and running in Zeabur test as
+deployment `6ad1d23e0b0bc926ae2a9a26`. The source branch and root Dockerfile were
+verified; all six changed runtime Python files plus Dockerfile match Git blob
+SHA-256 values. Python 3.12.14 / Uvicorn started on port 8080, health returned 200,
+and the new nullable PostgreSQL column exists after the new container started.
+The database identity and before/after fingerprints match for conversations,
+memories, Persona versions/active selections, Profiles, actor bindings, room
+overrides, existing summary/cursor and Pin settings. Observed factual rows stayed
+1715; this count is evidence, not a deployment requirement. Provider receipts
+stayed 1597 throughout deployment and free API checks. Anonymous and Persona-only
+resume requests returned 401; an admin resume for a synthetic nonexistent identity
+returned 409 without creating a row. No existing pause was cleared.
+
+Fresh release tests: Gateway 479 passed / 61 skipped / 2 subtests; Tidal client
+5 passed. This release verifies actual application replacement and migration;
+durable failed-attempt behavior was covered by the isolated PostgreSQL/pool
+recreation check above, not a new paid failure or live-chat test. Relay, Web,
+Orchestrator and production were not redeployed. No provider requests or new
+dependency/service/branch/worktree. This post-deploy evidence is a local docs-only
+follow-up, left unpushed to avoid another automatic deployment (watch path `*`).
+Rolling back to old code would ignore the pause and
 can resume automatic spending; leave this nullable column in place rather than
 dropping data. Multi-replica paid-call exclusion is still not claimed.
 

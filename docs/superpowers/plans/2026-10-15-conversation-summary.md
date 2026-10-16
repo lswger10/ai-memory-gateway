@@ -6,7 +6,7 @@
 
 **Owner:** Gateway. Reuse the release worktree at 67e0653; preserve pre-existing README edits. Tidal d1b27bd remains unchanged.
 
-## Follow-up: approved failure pause, local only (2026-10-16)
+## Follow-up: approved failure pause, deployed to test (2026-10-16)
 
 - On base `44611d5`, persist `compression_error` in the existing summary row before
   an attempt. Failure/cancellation never changes summary, cursor or revision;
@@ -28,8 +28,19 @@
   pool, verified durable pause/resume/CAS/scopes and 130 untouched synthetic facts.
   Schema removed and absence verified; no application table/file modified, no
   service restart. This does not convert the 61 skipped opt-in tests to passes.
-- Zero paid requests; not committed/pushed/deployed. Current deployed application
-  remains unchanged. Old-code rollback ignores pause markers and may spend again.
+- Release `792dc34969adadd91a7c0654001a2eceb2404193` was committed/pushed to the
+  existing test branch and deployed as `6ad1d23e0b0bc926ae2a9a26`. Fresh free tests:
+  Gateway 479 passed / 61 skipped / 2 subtests; Tidal client 5 passed. Container
+  Python 3.12.14, root Dockerfile and six changed runtime-file hashes match Git;
+  startup completed on port 8080, health 200, additive pause column present.
+- Before/after database identity and selected facts/Memory/Persona/Profile/
+  binding/summary/Pin fingerprints match; factual rows stayed 1715. Receipts
+  stayed 1597: zero paid requests. Deployed resume API checks: anonymous and
+  Persona-only 401, nonexistent synthetic target with admin credential 409;
+  no state created or existing pause cleared. No new real-chat/paid failure test.
+- Post-deploy evidence is a local docs-only follow-up, not another push/redeploy.
+  Relay/Web/Orchestrator/production untouched. Old-code rollback ignores pause
+  markers and may spend again; keep the nullable column on rollback.
 - Gemini keepalive remains blocked pending a separately scoped native Gemini
   cachedContents adapter/lifecycle design: current OFOX OpenAI-compatible chat
   cannot just inherit Claude's 50-minute verified-1h behavior. No automatic paid
