@@ -1,6 +1,6 @@
 # AI Memory Gateway
 
-## Conversation summary separation (2026-10-16, deployed to test; Gemini summary acceptance failed)
+## Conversation summary separation (2026-10-16, test chat recovery verified)
 
 The working change separates `conversation_summary_state` from Profile-specific
 provider cache namespaces. The summary key includes actor, room, canonical
@@ -59,7 +59,27 @@ tokens, usage received. The adopted state remains cursor 1583 / revision 52 /
 deleted. The receipt omits finish reason/body length, so truncation versus summary
 length validation cannot yet be distinguished. The old 4,096 output-token bound
 was not raised. Incident budget: 3 of 5 actual requests used; no automatic retry.
-Laoke real-chat restoration is not yet verified and must not be claimed.
+An explicitly authorized fourth diagnostic used the same Gemini Pro and current
+history, with a one-call transport ceiling and an 8,192-token output cap only in
+that diagnostic process. It completed with HTTP 200 / finish_reason `stop`:
+82,109 input tokens, 4,062 output tokens (793 text / 3,269 reasoning), 995 summary
+characters, no reported refusal. The full 153-event batch (143,596 input data
+characters) was accepted atomically: cursor 1806 / revision 53, retaining 48
+recent events. No retry or model switch. Incident budget is now 4/5 requests.
+This successful run does not prove the previous failure was truncation: its
+finish reason was not captured and this run used fewer than 4,096 output tokens.
+The persistent runtime still requests 4,096; 8,192 was not silently made a new
+global default. Latest deployed docs commit is `9fd2f6059c3a3986ca5442bfba3814c7f1e51560`,
+deployment `6ad1c3d30b0bc926ae2a9537`, with the same application code as `58f6b38`.
+Final browser acceptance sent one neutral `L1016` message through the real Laoke
+private room. The current Gemini Pro replied successfully at 2026-10-16 06:43:21
+UTC; the reply remained after page reload and displayed the expected Profile.
+Exactly one provider receipt was added (1592 -> 1593): generation succeeded,
+21,815 input / 351 output tokens, with no compression or tool follow-up receipt.
+Gateway factual tail grew 48 -> 50, ending at event 1869; shared summary stayed
+cursor 1806 / revision 53 / 995 characters. The requested chat recovery is
+verified for this real path, not a guarantee of future upstream availability.
+Incident paid allowance is exhausted: 5/5 requests, no more test calls.
 
 Rollback: keep old rows until rollout acceptance; they are not dual-written.
 Old-code rollback after new compaction can lose derived progress and repeat
