@@ -31,6 +31,8 @@ def _gemini_parameter_schema(value):
             raise ProviderAdapterError("Gemini parameters contain an unsupported type union")
         result["type"] = concrete[0]
         result["nullable"] = True
+    if "enum" in result and "type" not in result:
+        result["type"] = "string"
     return result
 
 
