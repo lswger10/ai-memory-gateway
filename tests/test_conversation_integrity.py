@@ -7,7 +7,7 @@ import pytest
 
 import database
 import main
-from anchored_history import AnchoredHistoryError, PostgresAnchoredHistoryStore
+from anchored_history import AnchoredHistoryError, PostgresAnchoredHistoryStore, build_summary_namespace
 from conversation_partitions import ConversationFact, PostgresConversationPartitionStore
 from conversation_sync import ConversationSyncService, ConversationSyncIncomplete
 from test_conversation_sync import FakeRelay, relay_event
@@ -135,32 +135,30 @@ async def test_missing_current_fact_cannot_advance_the_watermark(history_db):
 async def test_repair_invalidates_summary_and_fences_old_compression(history_db, damage):
     pool, store, derived, _ = history_db
     history = PostgresAnchoredHistoryStore(database.get_pool)
-    identity = {"actor_id": "jiao", "conversation_id": "group-1", "profile_id": "test",
-                "profile_revision": 1, "execution_mode": "group", "actor_prompt_version": "v1",
-                "runtime_kernel_version": "v1", "room_policy_version": "v1",
-                "tool_schema_hash": "v1", "cache_strategy_version": "v1"}
+    identity = {"actor_id": "jiao", "room_id": "room_group_home",
+                "conversation_id": "group-1", "execution_mode": "group"}
     async with pool.acquire() as conn:
         await conn.execute("INSERT INTO model_profiles(profile_id,profile_json) VALUES('test','{}')")
-    initial = await history.get_or_create("test-namespace", identity=identity)
-    compressed = await history.apply_compression("test-namespace", expected_revision=initial.state_revision,
+    initial = await history.get_or_create(build_summary_namespace(**identity), identity=identity)
+    compressed = await history.apply_compression(build_summary_namespace(**identity), expected_revision=initial.state_revision,
         replacement_summary="old summary", summary_token_count=2, compressed_up_to_event_id=2)
     if damage:
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM conversations WHERE id=$1", derived)
     service = ConversationSyncService(FakeRelay(relay_event(i) for i in (1, 2, 3)), store, history)
     await service.ensure_relay_synced(actor_id="jiao", room_id="room_group_home", conversation_id="group-1", current_event_id=3)
-    state = await history.get_or_create("test-namespace", identity=identity)
+    state = await history.get_or_create(build_summary_namespace(**identity), identity=identity)
     if damage:
         assert state.summary == ""
         assert state.compressed_up_to_event_id == 0
         assert state.state_revision > compressed.state_revision
         with pytest.raises(AnchoredHistoryError, match="revision"):
-            await history.apply_compression("test-namespace", expected_revision=compressed.state_revision,
+            await history.apply_compression(build_summary_namespace(**identity), expected_revision=compressed.state_revision,
                 replacement_summary="late stale summary", summary_token_count=3, compressed_up_to_event_id=3)
     else:
         assert state == compressed
     await service.ensure_relay_synced(actor_id="laoke", room_id="room_group_home", conversation_id="group-1", current_event_id=3)
-    assert await history.get_or_create("test-namespace", identity=identity) == state
+    assert await history.get_or_create(build_summary_namespace(**identity), identity=identity) == state
 
 
 @pytest.mark.anyio
@@ -194,15 +192,13 @@ async def test_duplicate_or_truncated_authority_history_fails_without_mutation(h
 async def test_cache_reader_waits_for_atomic_repair_even_for_new_namespace(history_db, monkeypatch, existing_namespace):
     pool, store, derived, _ = history_db
     history = PostgresAnchoredHistoryStore(database.get_pool)
-    identity = {"actor_id": "jiao", "conversation_id": "group-1", "profile_id": "test",
-                "profile_revision": 1, "execution_mode": "group", "actor_prompt_version": "v1",
-                "runtime_kernel_version": "v1", "room_policy_version": "v1",
-                "tool_schema_hash": "v1", "cache_strategy_version": "v1"}
+    identity = {"actor_id": "jiao", "room_id": "room_group_home",
+                "conversation_id": "group-1", "execution_mode": "group"}
     async with pool.acquire() as conn:
         await conn.execute("INSERT INTO model_profiles(profile_id,profile_json) VALUES('test','{}')")
         await conn.execute("UPDATE conversations SET content='CORRUPTED' WHERE id=$1", derived)
     if existing_namespace:
-        await history.get_or_create("concurrent", identity=identity)
+        await history.get_or_create(build_summary_namespace(**identity), identity=identity)
     reached, release = asyncio.Event(), asyncio.Event()
     invalidate = history.invalidate_conversation_state
 
@@ -218,7 +214,7 @@ async def test_cache_reader_waits_for_atomic_repair_even_for_new_namespace(histo
     reader = None
     try:
         await asyncio.wait_for(reached.wait(), 5)
-        reader = asyncio.create_task(history.get_or_create("concurrent", identity=identity))
+        reader = asyncio.create_task(history.get_or_create(build_summary_namespace(**identity), identity=identity))
         async with asyncio.timeout(5):
             async with pool.acquire() as conn:
                 while not await conn.fetchval("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted"):

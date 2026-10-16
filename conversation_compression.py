@@ -7,11 +7,9 @@ from cache_strategies import PromptSegment
 import uuid
 from types import SimpleNamespace
 
-from actor_memory_tools import ACTOR_MEMORY_TOOL_SCHEMA_HASH
-from shared_page_client import CALENDAR_TOOL_SCHEMA_HASH
-from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError
+from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, build_summary_namespace
 from model_execution import ContextBundle, ProviderRunUnavailable
-from model_usage_store import build_cache_namespace, execution_receipt_draft, record_provider_attempt
+from model_usage_store import execution_receipt_draft, record_provider_attempt
 
 
 class ConversationCompressionService:
@@ -36,14 +34,9 @@ class ConversationCompressionService:
                 room_id=room_id, conversation_id=conversation_id, current_event_id=current_event_id)
             profile = (await self.profiles.resolve(actor_id, room_id)).primary
             components = self.builder.group_context.build_stable_execution_components(actor_id, room_id)
-            identity = dict(actor_id=actor_id, conversation_id=conversation_id,
-                profile_id=profile.profile_id, profile_revision=profile.revision, execution_mode="private",
-                actor_prompt_version=components["actor_prompt_version"],
-                runtime_kernel_version=components["runtime_kernel_version"],
-                room_policy_version=components["room_policy_version"],
-                tool_schema_hash=(CALENDAR_TOOL_SCHEMA_HASH if getattr(self.builder, "calendar_client", None) else ACTOR_MEMORY_TOOL_SCHEMA_HASH) if profile.capabilities.tools else components["tool_schema_hash"],
-                cache_strategy_version=profile.cache_strategy)
-            namespace = build_cache_namespace(**identity)
+            identity = dict(actor_id=actor_id, room_id=room_id,
+                conversation_id=conversation_id, execution_mode="private")
+            namespace = build_summary_namespace(**identity)
             state = await self.builder.history_store.get_or_create(namespace, identity=identity)
             facts = await self.builder.conversation_store.list_facts(conversation_id,
                 after_event_id=state.compressed_up_to_event_id, through_event_id=current_event_id)
@@ -79,7 +72,7 @@ class ConversationCompressionService:
         generation_id = f"conversation-summary:{uuid.uuid4()}"
         # Preserve summary/revision isolation without exceeding provider key limits.
         summary_namespace = hashlib.sha256(
-            f"{namespace}:summary:{state.state_revision}".encode("utf-8")
+            f"{namespace}:{profile.profile_id}:{profile.revision}:summary:{state.state_revision}".encode("utf-8")
         ).hexdigest()
         draft = execution_receipt_draft(profile=profile, generation_request_id=generation_id,
             actor_id=actor_id, room_id=room_id, conversation_id=conversation_id,

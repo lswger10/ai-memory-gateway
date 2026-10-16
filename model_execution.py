@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Protocol
 
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
 from cache_strategies import PromptSegment
+from anchored_history import SummaryInputBudgetExceeded
 from model_profile_store import InMemoryModelProfileStore
 from model_usage_store import (
     execution_receipt_draft,
@@ -125,6 +126,16 @@ class GatewayModelExecutionService:
                     resolved_conversation_id=conversation_id,
                     allow_compression=index == 0,
                 )
+            except SummaryInputBudgetExceeded:
+                logging.getLogger(__name__).warning(
+                    "summary_input_budget_exceeded generation=%s profile=%s",
+                    request.generation_request_id, profile.profile_id,
+                )
+                yield ExecutionStreamEvent("unavailable", {
+                    "generation_request_id": request.generation_request_id,
+                    "reason_code": "generation_unavailable",
+                })
+                return
             except SearchCapabilityUnavailable as exc:
                 last_unavailable = ProviderRunUnavailable(str(exc))
                 continue

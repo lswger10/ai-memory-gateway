@@ -1,5 +1,110 @@
 # AI Memory Gateway
 
+## Conversation summary separation (2026-10-15, local regressions passed; not deployed)
+
+The working change separates `conversation_summary_state` from Profile-specific
+provider cache namespaces. The summary key includes actor, room, canonical
+partition and execution mode, but not Profile/Persona/tool versions. Normal,
+probe, keepalive and manual compression readers share that owner. Original
+conversation facts and Relay storage are not changed or deleted by compaction.
+
+On first read, the new store adopts the most advanced valid existing summary
+for the same actor/partition/mode, checking factual source coordinates, cursor
+and bounds. Equal-cursor conflicting summaries or invalid provenance fail;
+they do not start paid reconstruction. Historical summaries have no source
+hash, so this cannot prove their semantic accuracy. History repair invalidates
+both stores; Bedroom cleanup removes both derived states for that session.
+
+Free review caught a release blocker: the old 16,000-character input cap could
+not hold a complete normal batch with event metadata. With explicit user
+approval, the summary data bound is now 192,000 characters, including prior
+summary and full event metadata. This is not a token or currency ceiling;
+static summary instructions are additional. The 128-event automatic trigger,
+48-event recent tail and complete human-led exchange boundary are unchanged.
+An oversized batch makes no provider call and leaves summary/cursor intact;
+it is never reduced into small paid fragments. The management endpoint returns
+413 `summary_input_budget_exceeded`; execution logs the same reason and ends
+with the existing `unavailable` event, without a paid fallback or new protocol.
+Histories beyond this cap still need separately bounded catch-up before normal
+generation can resume; no catch-up loop was added.
+
+Free verification: real-event-shape batching and the next turn, exact cap
+boundaries, non-retrying error paths, Profile-independent summary reuse, actor/
+room/Bedroom isolation and preserved facts. Gateway full suite: 468 passed,
+60 skipped, 2 subtests passed. Tidal Gateway-client regression: 5 passed.
+With explicit test-DB authorization, the actual store and new table DDL passed
+eight synthetic checks in an isolated Zeabur test PostgreSQL schema: adoption,
+connection-pool recreation/idempotent schema initialization, revision guard,
+room provenance, actor isolation, Bedroom cleanup, repair invalidation and
+raw-fact preservation. The temporary schema was dropped and absence verified.
+This is not a PostgreSQL server restart or the skipped opt-in suite.
+
+Release investigation measured the remaining full batch after adopting the
+advanced summary at about 143,000 characters, above the earlier 128,000 cap;
+the 192,000 bound was announced before changing it. Exact 191,999/192,000/192,001
+boundary checks and a larger realistic-event regression pass. Two authorized
+diagnostic provider requests used the old deployed code: the historical batch
+returned HTTP 200 with empty content/zero usage, while synthetic input worked.
+No existing factual records or bindings were changed. Deployment is pending.
+
+Rollback: keep old rows until rollout acceptance; they are not dual-written.
+Old-code rollback after new compaction can lose derived progress and repeat
+summary cost, though raw facts remain. Do not run old/new writers concurrently.
+The existing one-replica summary lock remains; cross-replica paid-call dedup is
+not claimed. No new service, dependency, Relay protocol or frontend was added.
+
+## OFOX Gemini test rollout (2026-10-15)
+
+Code commit `67e0653eb46d655429db9eacaef04391917e509c` is pushed on
+`codex/gateway-garden-test-release` and running in Zeabur test deployment
+`6ad07e3270022145c6b45baf`; runtime source hash matches Git and health is 200.
+This newer runtime evidence supersedes the October 13 pending-cutover note below.
+
+- Both actors' existing model menus offer enabled, verified profiles
+  `ofox-gemini-3-8-flash` (`google/gemini-3.8-flash`) and
+  `ofox-gemini-3-1-pro-preview` (`google/gemini-3.1-pro-preview`). Existing actor
+  defaults and room overrides are unchanged. Profiles remain Gateway-owned;
+  no frontend implementation, credential change or schema migration was needed.
+- Profiles use OFOX OpenAI chat completions, text/image input and tools. They
+  use `no_prompt_cache_v1`; neither verified 1h keepalive nor native web search
+  is enabled for these profiles. Pro is a preview model.
+- OFOX's opaque Gemini tool IDs exceeded the internal memory staging key bound.
+  The runner hashes only overlong internal keys, retaining original IDs in
+  provider requests/results. Existing ACL and accepted-final commit rules remain.
+- Synthetic image understanding passed for each profile. After deployment,
+  each completed one real tool roundtrip (two requests). Total paid probes:
+  Flash 5, Pro 4, including five pre-fix requests; no private history was sent.
+  Receipt totals: Flash 4,779 input / 377 output tokens; Pro 3,975 / 491.
+- Verification: RED long-ID regression, focused suite 82 passed; Gateway full
+  451 passed / 59 skipped / 2 subtests passed; Tidal selector tests 12 passed.
+  Both live private-room menus expose both Gemini profiles without changing
+  their selections. Follow-up real private-chat acceptance is recorded below.
+- Before/after restart, PostgreSQL storage identity and count/content fingerprints
+  matched for conversation history/sync, memories/summaries, Persona versions,
+  profiles, actor bindings, room overrides and conversation pins. Profile probe
+  status was intentionally updated afterward; final binding fingerprints match.
+- Rollback: disable the two new profiles via existing management and, if needed,
+  revert the runner/test commit. No production or live service was touched.
+
+This rollout note is a local documentation update; the code commit above is
+the deployed artifact. The pre-existing README worktree edit is preserved.
+
+### Real private-chat acceptance (2026-10-15)
+
+The existing UI sent one short message in each private room: Jiao/Flash final
+event `1775` and Laoke/Pro final event `1777` both arrived, displayed the correct
+provider/model provenance, and remained after refresh. Existing room overrides
+were restored to Jiao GPT Responses and Laoke Claude 1h, verified after refresh.
+No code, credentials, Persona or ACL changed in this acceptance step.
+
+Budget exception: the user authorized two paid tests. Two UI sends caused four
+provider requests, not two: each conversation first triggered an automatic
+`conversation_compression`, then one `generation`. All four receipts succeeded;
+no manual retry was sent. This exceeded the requested two-call allowance and was
+disclosed. Before future exact-call-budget tests, check automatic compression
+eligibility as well as tool/retry paths; a short reply does not bound input cost.
+No additional paid verification or compression-policy change was made.
+
 ## Garden Dashboard test release preparation (2026-10-13)
 
 `codex/gateway-garden-test-release` starts at the verified test baseline
@@ -7,7 +112,12 @@
 The unpublished device-context execution changes are excluded. Dashboard
 regression: 24 passed using synthetic data. Frozen v1.1 contract files now
 disable Windows newline conversion, matching v1.0; their Git bytes are unchanged.
-Cloud deployment and post-restart persistence verification are still pending.
+Release commit `635804f` is pushed. Zeabur test deployment
+`6ace4eaf48c5c4b07807557a` built successfully, but the runtime remains Starting
+at image Pulling (checked 2026-10-13). The old instance still serves; its CSS
+hash differs from this release. GitHub's success status is therefore not
+evidence of runtime cutover. Post-restart persistence and new UI verification
+remain pending. No environment variables, credentials or database data changed.
 
 ## Compression request cache-key bound (2026-10-04)
 

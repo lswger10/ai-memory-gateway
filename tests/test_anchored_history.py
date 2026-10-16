@@ -248,3 +248,99 @@ async def test_concurrent_rooms_wait_and_stale_state_never_pays_twice():
     assert not isinstance(results[1], BaseException)
     assert isinstance(results[2], AnchoredHistoryError)
     assert len(calls) == 2
+
+
+@pytest.mark.anyio
+async def test_oversized_full_batch_never_buys_small_fragments_on_subsequent_turns():
+    store = InMemoryAnchoredHistoryStore()
+    state = await store.get_or_create("conversation-summary")
+    compactor = AnchoredHistoryCompactor()
+    calls = []
+
+    async def summarize(prior, events):
+        calls.append(events)
+        return "A summary."
+
+    for count in (130, 131):
+        events = tuple({"event_id": i, "actor_id": "weiwei", "content": "x" * 3000}
+                       for i in range(1, count + 1))
+        with pytest.raises(AnchoredHistoryError, match="summary input budget"):
+            await compactor.maybe_compact(store=store, cache_namespace="conversation-summary",
+                state=state, events=events, summarize=summarize)
+        assert await store.get_or_create("conversation-summary") == state
+    assert calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("input_chars, permitted", [(191999, True), (192000, True), (192001, False)])
+async def test_full_batch_input_bound_includes_prior_summary_and_event_metadata(input_chars, permitted):
+    import json
+    store = InMemoryAnchoredHistoryStore()
+    await store.get_or_create("summary")
+    state = await store.apply_compression("summary", expected_revision=1,
+        replacement_summary="先前摘要" * 1000, summary_token_count=1000, compressed_up_to_event_id=1)
+    events = tuple(dict(event_id=i, actor_id="weiwei", content="") for i in range(2, 132))
+    overhead = len(json.dumps({"prior_summary": state.summary, "new_events": events[:82]}, ensure_ascii=False))
+    events[0]["content"] = "字" * (input_chars - overhead)
+    calls = []
+    async def summarize(prior, selected):
+        calls.append(selected)
+        return "New complete summary"
+    kwargs = dict(store=store, cache_namespace="summary", state=state, events=events, summarize=summarize)
+    if permitted:
+        updated, tail = await AnchoredHistoryCompactor().maybe_compact(**kwargs)
+        assert updated.compressed_up_to_event_id == 83 and len(tail) == 48
+        assert calls == [events[:82]]
+    else:
+        with pytest.raises(AnchoredHistoryError, match="summary input budget"):
+            await AnchoredHistoryCompactor().maybe_compact(**kwargs)
+        assert calls == [] and await store.get_or_create("summary") == state
+
+
+@pytest.mark.anyio
+async def test_summary_state_isolates_actor_room_conversation_and_bedroom_session():
+    from anchored_history import build_summary_namespace
+    identities = [
+        dict(actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="private-jiao", execution_mode="private"),
+        dict(actor_id="laoke", room_id="room_weiwei_laoke", conversation_id="private-laoke", execution_mode="private"),
+        dict(actor_id="jiao", room_id="room_group_home", conversation_id="group", execution_mode="group"),
+        dict(actor_id="laoke", room_id="room_group_home", conversation_id="group", execution_mode="group"),
+        dict(actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="bedroom:a", execution_mode="bedroom"),
+        dict(actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="bedroom:b", execution_mode="bedroom"),
+    ]
+    store = InMemoryAnchoredHistoryStore()
+    keys = [build_summary_namespace(**identity) for identity in identities]
+    assert len(set(keys)) == 6
+    for i, (key, identity) in enumerate(zip(keys, identities)):
+        await store.get_or_create(key, identity=identity)
+        await store.apply_compression(key, expected_revision=1, replacement_summary=f"scope {i}",
+                                      summary_token_count=2, compressed_up_to_event_id=10)
+    await store.delete_conversation_state("bedroom:a")
+    for i, (key, identity) in enumerate(zip(keys, identities)):
+        state = await store.get_or_create(key, identity=identity)
+        assert state.summary == ("" if i == 4 else f"scope {i}")
+    await store.invalidate_conversation_state("group")
+    assert (await store.get_or_create(keys[0])).summary == "scope 0"
+    assert (await store.get_or_create(keys[2])).summary == ""
+    assert (await store.get_or_create(keys[3])).summary == ""
+
+
+@pytest.mark.anyio
+async def test_full_batch_leaves_tail_and_does_not_summarize_next_turn():
+    store = InMemoryAnchoredHistoryStore()
+    state = await store.get_or_create("summary")
+    compactor = AnchoredHistoryCompactor()
+    calls = []
+    events = tuple(dict(event_id=i, actor_id="weiwei", content=str(i)) for i in range(1, 131))
+    async def summarize(prior, selected):
+        calls.append([event["event_id"] for event in selected])
+        return "Complete earlier history"
+    updated, tail = await compactor.maybe_compact(store=store, cache_namespace="summary",
+        state=state, events=events, summarize=summarize)
+    assert updated.compressed_up_to_event_id == 82
+    assert calls == [list(range(1, 83))]
+    assert len(tail) == 48
+    next_tail = tail + (dict(event_id=131, actor_id="weiwei", content="next"),)
+    again, remaining = await compactor.maybe_compact(store=store, cache_namespace="summary",
+        state=updated, events=next_tail, summarize=summarize)
+    assert again == updated and remaining == next_tail and len(calls) == 1

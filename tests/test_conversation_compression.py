@@ -232,3 +232,30 @@ def test_compression_endpoint_requires_admin_and_rejects_extra_payload(monkeypat
     response = client.post("/api/conversation-compression", json={"unexpected": True},
         headers={"X-Gateway-Key": "summary-admin"})
     assert response.status_code == 422
+
+
+def test_compression_endpoint_reports_input_budget_not_state_conflict(monkeypatch):
+    from unittest.mock import AsyncMock
+    from fastapi.testclient import TestClient
+    from anchored_history import AnchoredHistoryCompactor
+    import main
+
+    class Compression:
+        async def compress(self, **kwargs):
+            store = InMemoryAnchoredHistoryStore()
+            state = await store.get_or_create("summary")
+            async def forbidden_summary(*args):
+                pytest.fail("oversized input must not reach a provider")
+            await AnchoredHistoryCompactor().maybe_compact(store=store, cache_namespace="summary",
+                state=state, events=tuple(dict(event_id=i, actor_id="weiwei", content="x" * 3000)
+                                         for i in range(1, 131)), summarize=forbidden_summary)
+    monkeypatch.setattr(main, "GATEWAY_SECRET", "summary-admin")
+    monkeypatch.setenv("MODEL_PROFILE_MANAGEMENT_ENABLED", "true")
+    monkeypatch.setattr(main, "_refresh_actor_prompt_store", AsyncMock())
+    monkeypatch.setattr(main, "_get_model_execution_service", AsyncMock())
+    monkeypatch.setattr(main, "_conversation_compression_service", Compression())
+    response = TestClient(main.app).post("/api/conversation-compression",
+        json=dict(actor_id="jiao", room_id="room_weiwei_jiao", conversation_id="test", current_event_id=130),
+        headers={"X-Gateway-Key": "summary-admin"})
+    assert response.status_code == 413
+    assert response.json() == {"detail": "summary_input_budget_exceeded"}

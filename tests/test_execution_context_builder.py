@@ -364,15 +364,9 @@ async def test_context_builder_persists_complete_cache_identity_before_history_r
 
     assert history.identity == {
         "actor_id": "jiao",
+        "room_id": "room_weiwei_jiao",
         "conversation_id": "conversation-1",
-        "profile_id": "profile-1",
-        "profile_revision": 4,
         "execution_mode": "private",
-        "actor_prompt_version": "actor.v1",
-        "runtime_kernel_version": "runtime.v1",
-        "room_policy_version": "room.v1",
-        "tool_schema_hash": "tools.v1",
-        "cache_strategy_version": "no_prompt_cache_v1",
     }
     assert '"event_id":1' in bundle.stable_history[0]
     assert '"event_id":2' not in "".join(bundle.stable_history)
@@ -462,6 +456,7 @@ async def test_group_cognitive_transcript_is_shared_while_actor_cache_identity_i
 async def test_compressed_cursor_never_deletes_complete_conversation_partition():
     from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
     from conversation_partitions import InMemoryConversationPartitionStore
+    from model_usage_store import build_cache_namespace
 
     relay = _Relay()
     relay.events = [_event(i) for i in range(1, 6)]
@@ -506,6 +501,64 @@ async def test_compressed_cursor_never_deletes_complete_conversation_partition()
     assert summary.calls == 1
     assert await conversations.count_facts("conversation-1") == 5
     assert [fact.source_event_id for fact in await conversations.list_facts("conversation-1")] == [1, 2, 3, 4, 5]
+
+    # Switching the runtime body must not buy the same summary again.
+    original_facts = await conversations.list_facts("conversation-1")
+    provider_keys = set()
+    for profile_id in ("gemini", "claude", "gpt"):
+        switched = replace(selected, profile_id=profile_id, revision=9)
+        result = await builder.build(request, switched, resolved_room_id="room_weiwei_jiao",
+            resolved_conversation_id="conversation-1")
+        assert result.stable_summary == bundle.stable_summary
+        assert result.summary_version == bundle.summary_version
+        assert result.compressed_up_to_event_id == 3
+        assert result.stable_prefix_hash == bundle.stable_prefix_hash
+        assert summary.calls == 1
+        provider_keys.add(build_cache_namespace(actor_id="jiao", conversation_id="conversation-1",
+            profile_id=switched.profile_id, profile_revision=switched.revision, execution_mode="private",
+            actor_prompt_version=result.actor_prompt_version, runtime_kernel_version=result.runtime_kernel_version,
+            room_policy_version=result.room_policy_version, tool_schema_hash=result.tool_schema_hash,
+            cache_strategy_version=switched.cache_strategy))
+    assert len(provider_keys) == 3
+    assert await conversations.list_facts("conversation-1") == original_facts
+    maintenance = await builder.build_cache_keepalive(actor_id="jiao", room_id="room_weiwei_jiao",
+        conversation_id="conversation-1", execution_mode="private", bedroom_session_id=None,
+        cache_conversation_id="conversation-1", profile=replace(selected, profile_id="keepalive-profile"))
+    assert maintenance.stable_summary == bundle.stable_summary
+    assert maintenance.compressed_up_to_event_id == 3 and summary.calls == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("message_repeats", [35, 90])
+async def test_default_compaction_accepts_real_message_shape_without_next_turn_summary(message_repeats):
+    """Normal event metadata must not prevent the next reply at the default threshold."""
+    group = _GroupContext()
+    group.relay_client = _Relay()
+    group.relay_client.events = [_event(i, actor_id="weiwei" if i % 2 else "jiao")
+                                for i in range(1, 132)]
+    for event in group.relay_client.events:
+        event["content"] = "这是用于免费回归的合成聊天内容。" * message_repeats
+    builder = GatewayExecutionContextBuilder(group_context=group, bedroom_context=object())
+    calls = []
+    class Summary:
+        async def summarize(self, **kwargs):
+            calls.append(kwargs["events"])
+            return "Earlier accepted conversation."
+    builder.summary_service = Summary()
+    prior = _request()
+    request = replace(prior, current_event_id=131, fence=replace(prior.fence, trigger_event_id=131))
+    bundle = await builder.build(request, _profile(), resolved_room_id="room_weiwei_jiao",
+                                 resolved_conversation_id="conversation-1")
+    assert len(calls) == 1
+    assert bundle.compressed_up_to_event_id == 82
+    assert await builder.conversation_store.count_facts("conversation-1") == 131
+    group.relay_client.events.append(_event(132, actor_id="jiao"))
+    group.relay_client.events.append(_event(133))
+    next_request = replace(request, current_event_id=133, fence=replace(request.fence, trigger_event_id=133))
+    again = await builder.build(next_request, _profile(), resolved_room_id="room_weiwei_jiao",
+                               resolved_conversation_id="conversation-1")
+    assert len(calls) == 1 and again.compressed_up_to_event_id == 82
+    assert await builder.conversation_store.count_facts("conversation-1") == 133
 
 
 @pytest.mark.anyio

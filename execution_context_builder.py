@@ -6,7 +6,7 @@ from cache_strategies import PromptSegment
 
 from actor_memory_tools import ACTOR_MEMORY_TOOL_SCHEMA_HASH, ActorMemoryExecutionContext
 from shared_page_client import CALENDAR_TOOL_SCHEMA_HASH
-from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, InMemoryAnchoredHistoryStore
+from anchored_history import AnchoredHistoryCompactor, AnchoredHistoryError, InMemoryAnchoredHistoryStore, build_summary_namespace
 from bedroom_memory import BedroomContextPackService, BedroomPackRequest
 from conversation_partitions import InMemoryConversationPartitionStore
 from conversation_sync import ConversationSyncService
@@ -16,7 +16,7 @@ from group_memory import GroupContextPackService
 from model_execution import ContextBundle, ProviderRunUnavailable, SearchCapabilityUnavailable
 from model_execution_contracts import GatewayExecutionRequest
 from model_profiles import ModelProfile
-from model_usage_store import build_cache_namespace, build_stable_prefix_hash
+from model_usage_store import build_stable_prefix_hash
 
 
 class GatewayExecutionContextBuilder:
@@ -173,30 +173,13 @@ class GatewayExecutionContextBuilder:
             (CALENDAR_TOOL_SCHEMA_HASH if self.calendar_client else ACTOR_MEMORY_TOOL_SCHEMA_HASH)
             if profile.capabilities.tools else components["tool_schema_hash"]
         )
-        namespace = build_cache_namespace(
-            actor_id=actor_id,
-            conversation_id=cache_conversation_id,
-            profile_id=profile.profile_id,
-            profile_revision=profile.revision,
-            execution_mode=execution_mode,
-            actor_prompt_version=components["actor_prompt_version"],
-            runtime_kernel_version=components["runtime_kernel_version"],
-            room_policy_version=components["room_policy_version"],
-            tool_schema_hash=tool_schema_hash,
-            cache_strategy_version=profile.cache_strategy,
-        )
         identity = {
             "actor_id": actor_id,
-            "conversation_id": cache_conversation_id,
-            "profile_id": profile.profile_id,
-            "profile_revision": profile.revision,
+            "room_id": room_id,
+            "conversation_id": partition_id,
             "execution_mode": execution_mode,
-            "actor_prompt_version": components["actor_prompt_version"],
-            "runtime_kernel_version": components["runtime_kernel_version"],
-            "room_policy_version": components["room_policy_version"],
-            "tool_schema_hash": tool_schema_hash,
-            "cache_strategy_version": profile.cache_strategy,
         }
+        namespace = build_summary_namespace(**identity)
         state = await self.history_store.get_or_create(namespace, identity=identity)
         facts = await self.conversation_store.list_facts(
             partition_id, after_event_id=state.compressed_up_to_event_id
@@ -259,37 +242,15 @@ class GatewayExecutionContextBuilder:
             if request.execution_kind == "full" and profile.capabilities.tools
             else components["tool_schema_hash"]
         )
-        # Probe reuses full's cognitive summary, not its tool-enabled provider cache.
-        history_tool_schema_hash = (
-            (CALENDAR_TOOL_SCHEMA_HASH if self.calendar_client else ACTOR_MEMORY_TOOL_SCHEMA_HASH)
-            if profile.capabilities.tools else components["tool_schema_hash"]
-        )
         if search_enabled:
             tool_schema_hash += "+web-search:" + profile.capabilities.web_search
-        namespace = build_cache_namespace(
-            actor_id=request.actor_id,
-            conversation_id=cache_conversation_id,
-            profile_id=profile.profile_id,
-            profile_revision=profile.revision,
-            execution_mode=request.execution_mode,
-            actor_prompt_version=components["actor_prompt_version"],
-            runtime_kernel_version=components["runtime_kernel_version"],
-            room_policy_version=components["room_policy_version"],
-            tool_schema_hash=history_tool_schema_hash,
-            cache_strategy_version=profile.cache_strategy,
-        )
         identity = {
             "actor_id": request.actor_id,
-            "conversation_id": cache_conversation_id,
-            "profile_id": profile.profile_id,
-            "profile_revision": profile.revision,
+            "room_id": room_id,
+            "conversation_id": partition_id,
             "execution_mode": request.execution_mode,
-            "actor_prompt_version": components["actor_prompt_version"],
-            "runtime_kernel_version": components["runtime_kernel_version"],
-            "room_policy_version": components["room_policy_version"],
-            "tool_schema_hash": history_tool_schema_hash,
-            "cache_strategy_version": profile.cache_strategy,
         }
+        namespace = build_summary_namespace(**identity)
         state = await self.history_store.get_or_create(namespace, identity=identity)
         facts = await self.conversation_store.list_facts(
             partition_id,

@@ -334,6 +334,20 @@ CREATE TABLE IF NOT EXISTS model_cache_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS conversation_summary_state (
+    summary_namespace TEXT PRIMARY KEY,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    room_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('private','group','bedroom')),
+    summary TEXT NOT NULL DEFAULT '',
+    summary_token_count INTEGER NOT NULL DEFAULT 0,
+    compressed_up_to_event_id BIGINT NOT NULL DEFAULT 0,
+    state_revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(actor_id,room_id,conversation_id,execution_mode)
+);
+
 CREATE TABLE IF NOT EXISTS conversation_cache_pins (
     pin_id TEXT PRIMARY KEY,
     room_id TEXT NOT NULL,

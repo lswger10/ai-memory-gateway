@@ -75,7 +75,7 @@ from shared_page_client import SharedPageClient
 from media_materialization import RelayMediaReader
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
 from cache_dashboard import build_cache_observability_summary, build_cache_usage_view
-from anchored_history import AnchoredHistoryError, InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore
+from anchored_history import AnchoredHistoryError, InMemoryAnchoredHistoryStore, PostgresAnchoredHistoryStore, SummaryInputBudgetExceeded
 from conversation_compression import ConversationCompressionService
 from model_execution import ProviderRunUnavailable
 from conversation_partitions import (
@@ -900,6 +900,8 @@ async def compress_conversation(request: Request):
                 builder=_model_context_builder, profiles=_model_profile_store,
                 runner=_model_provider_runner, usage_store=_model_usage_store)
         return await _conversation_compression_service.compress(**payload)
+    except SummaryInputBudgetExceeded as exc:
+        raise HTTPException(status_code=413, detail="summary_input_budget_exceeded") from exc
     except AnchoredHistoryError as exc:
         raise HTTPException(status_code=409, detail="compression_state_conflict") from exc
     except (ValueError, TypeError) as exc:

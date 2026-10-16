@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass, replace
 
 
 class AnchoredHistoryError(ValueError):
     pass
+
+
+class SummaryInputBudgetExceeded(AnchoredHistoryError):
+    """The whole target batch cannot fit the bounded summary request."""
+
+
+def build_summary_namespace(*, actor_id: str, room_id: str, conversation_id: str,
+                            execution_mode: str) -> str:
+    """Conversation cognition survives Profile/Persona/tool changes; scenes do not mix."""
+    if actor_id not in {"jiao", "laoke"} or execution_mode not in {"private", "group", "bedroom"}:
+        raise AnchoredHistoryError("invalid summary identity")
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        raise AnchoredHistoryError("summary conversation is required")
+    if (not isinstance(room_id, str) or not room_id.strip()
+            or conversation_id.startswith("bedroom:") != (execution_mode == "bedroom")
+            or conversation_id == "bedroom:"):
+        raise AnchoredHistoryError("summary room/scene mismatch")
+    return hashlib.sha256(json.dumps([actor_id, room_id, conversation_id, execution_mode],
+        ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +57,7 @@ class AnchoredHistoryQuery:
 
 @dataclass(frozen=True, slots=True)
 class AnchoredHistoryState:
+    # This historical field name now holds only the conversation-summary namespace.
     cache_namespace: str
     compressed_up_to_event_id: int
     summary: str
@@ -93,13 +114,10 @@ class AnchoredHistoryCompactor:
         if cut <= 0:
             return state, events
         # Bound one paid summary without cutting a message or silently dropping a unit.
-        while cut > 0 and len(json.dumps({"prior_summary": state.summary,
-                "new_events": events[:cut]}, ensure_ascii=False)) > 16000:
-            cut -= 1
-            while cut > 0 and events[cut]["actor_id"] != "weiwei":
-                cut -= 1
-        if cut <= 0:
-            raise AnchoredHistoryError("one complete exchange exceeds summary input budget")
+        if len(json.dumps({"prior_summary": state.summary,
+                "new_events": events[:cut]}, ensure_ascii=False)) > 192000:
+            raise SummaryInputBudgetExceeded(
+                "complete batch exceeds summary input budget; bounded catch-up required; history unchanged")
         compressed = events[:cut]
         tail = events[cut:]
         # ponytail: summaries queue within this single-replica Gateway. Multi-replica
@@ -244,15 +262,9 @@ def _state_from_row(row) -> AnchoredHistoryState:
 class PostgresAnchoredHistoryStore:
     REQUIRED_IDENTITY = {
         "actor_id",
+        "room_id",
         "conversation_id",
-        "profile_id",
-        "profile_revision",
         "execution_mode",
-        "actor_prompt_version",
-        "runtime_kernel_version",
-        "room_policy_version",
-        "tool_schema_hash",
-        "cache_strategy_version",
     }
 
     def __init__(self, pool_factory, *, summary_token_limit: int = 1024) -> None:
@@ -267,7 +279,9 @@ class PostgresAnchoredHistoryStore:
         if not cache_namespace:
             raise AnchoredHistoryError("cache namespace is required")
         if not isinstance(identity, dict) or set(identity) != self.REQUIRED_IDENTITY:
-            raise AnchoredHistoryError("complete cache identity is required")
+            raise AnchoredHistoryError("complete summary identity is required")
+        if cache_namespace != build_summary_namespace(**identity):
+            raise AnchoredHistoryError("summary namespace identity mismatch")
         pool = await self._pool_factory()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -276,40 +290,61 @@ class PostgresAnchoredHistoryStore:
                     "SELECT pg_advisory_xact_lock_shared(hashtextextended('history-repair:' || $1, 0))",
                     identity["conversation_id"],
                 )
+                # Serialize first adoption; a second Profile must see the same state.
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", cache_namespace)
                 row = await conn.fetchrow(
-                    """WITH inserted AS (
-                         INSERT INTO model_cache_state(
-                           cache_namespace,actor_id,conversation_id,profile_id,
-                           profile_revision,execution_mode,actor_prompt_version,
-                           runtime_kernel_version,room_policy_version,tool_schema_hash,
-                           cache_strategy_version
-                         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                         ON CONFLICT(cache_namespace) DO NOTHING
-                         RETURNING cache_namespace,compressed_up_to_event_id,summary,
-                                   summary_token_count,state_revision
-                       )
-                       SELECT cache_namespace,compressed_up_to_event_id,summary,
-                              summary_token_count,state_revision FROM inserted
-                       UNION ALL
-                       SELECT cache_namespace,compressed_up_to_event_id,summary,
-                              summary_token_count,state_revision
-                       FROM model_cache_state WHERE cache_namespace=$1
-                       LIMIT 1""",
-                    cache_namespace,
-                    identity["actor_id"],
-                    identity["conversation_id"],
-                    identity["profile_id"],
-                    identity["profile_revision"],
-                    identity["execution_mode"],
-                    identity["actor_prompt_version"],
-                    identity["runtime_kernel_version"],
-                    identity["room_policy_version"],
-                    identity["tool_schema_hash"],
-                    identity["cache_strategy_version"],
-                )
+                    "SELECT summary_namespace AS cache_namespace,* FROM conversation_summary_state WHERE summary_namespace=$1",
+                    cache_namespace)
+                if row is None:
+                    prior = await self._legacy_summary(conn, identity)
+                    row = await conn.fetchrow(
+                        """INSERT INTO conversation_summary_state(
+                             summary_namespace,actor_id,room_id,conversation_id,execution_mode,
+                             summary,summary_token_count,compressed_up_to_event_id,state_revision)
+                           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                           RETURNING summary_namespace AS cache_namespace,*""",
+                        cache_namespace, identity["actor_id"], identity["room_id"],
+                        identity["conversation_id"], identity["execution_mode"],
+                        prior["summary"] if prior else "", prior["summary_token_count"] if prior else 0,
+                        prior["compressed_up_to_event_id"] if prior else 0,
+                        prior["state_revision"] if prior else 1)
         if row is None:
             raise AnchoredHistoryError("cache state could not be created")
         return _state_from_row(row)
+
+    async def _legacy_summary(self, conn, identity):
+        """One-time adoption, never a model call or a write to the old summary rows."""
+        candidates = await conn.fetch(
+            """SELECT * FROM model_cache_state WHERE actor_id=$1 AND conversation_id=$2
+               AND execution_mode=$3 AND compressed_up_to_event_id>0
+               ORDER BY compressed_up_to_event_id DESC,cache_namespace""",
+            identity["actor_id"], identity["conversation_id"], identity["execution_mode"])
+        if not candidates:
+            return None
+        facts = await conn.fetch(
+            """SELECT source_event_id,room_id,canonical_conversation_id,source_kind,bedroom_session_id
+               FROM conversations WHERE session_id=$1 AND fact_identity IS NOT NULL""",
+            identity["conversation_id"])
+        bedroom = identity["execution_mode"] == "bedroom"
+        if not facts or any(f["room_id"] != identity["room_id"]
+                or f["source_kind"] != ("bedroom_turn" if bedroom else "relay_event")
+                or (f["bedroom_session_id"] != identity["conversation_id"][8:] if bedroom
+                    else f["canonical_conversation_id"] != identity["conversation_id"])
+                for f in facts):
+            raise AnchoredHistoryError("legacy summary provenance mismatch; adoption requires review")
+        event_ids = {int(f["source_event_id"]) for f in facts}
+        valid = [c for c in candidates if c["compressed_up_to_event_id"] in event_ids
+                 and isinstance(c["summary"], str) and c["summary"].strip()
+                 and len(c["summary"]) <= self._summary_token_limit * 4
+                 and 0 <= c["summary_token_count"] <= self._summary_token_limit
+                 and c["state_revision"] >= 1]
+        if not valid:
+            raise AnchoredHistoryError("legacy summary cursor/bounds invalid; adoption requires review")
+        best = valid[0]
+        if any(c["summary"] != best["summary"] for c in valid
+               if c["compressed_up_to_event_id"] == best["compressed_up_to_event_id"]):
+            raise AnchoredHistoryError("conflicting legacy summaries; adoption requires review")
+        return best
 
     async def observe_appended_events(
         self, cache_namespace: str, event_ids: tuple[int, ...]
@@ -344,7 +379,7 @@ class PostgresAnchoredHistoryStore:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 current = await conn.fetchrow(
-                    "SELECT * FROM model_cache_state WHERE cache_namespace=$1 FOR UPDATE",
+                    "SELECT * FROM conversation_summary_state WHERE summary_namespace=$1 FOR UPDATE",
                     cache_namespace,
                 )
                 if current is None:
@@ -356,12 +391,12 @@ class PostgresAnchoredHistoryStore:
                 ):
                     raise AnchoredHistoryError("compressed cursor must move forward")
                 row = await conn.fetchrow(
-                    """UPDATE model_cache_state SET
+                    """UPDATE conversation_summary_state SET
                          summary=$3,summary_token_count=$4,
                          compressed_up_to_event_id=$5,
                          state_revision=state_revision+1,updated_at=NOW()
-                       WHERE cache_namespace=$1 AND state_revision=$2
-                       RETURNING cache_namespace,compressed_up_to_event_id,summary,
+                       WHERE summary_namespace=$1 AND state_revision=$2
+                       RETURNING summary_namespace AS cache_namespace,compressed_up_to_event_id,summary,
                                  summary_token_count,state_revision""",
                     cache_namespace,
                     expected_revision,
@@ -380,6 +415,11 @@ class PostgresAnchoredHistoryStore:
                 await self.invalidate_conversation_state(conversation_id, connection=conn)
             return
         await connection.execute(
+            """UPDATE conversation_summary_state SET summary='',summary_token_count=0,
+                 compressed_up_to_event_id=0,state_revision=state_revision+1,updated_at=NOW()
+               WHERE conversation_id=$1""", conversation_id)
+        # Repair also invalidates rollback copies so later adoption cannot resurrect stale text.
+        await connection.execute(
             """UPDATE model_cache_state SET summary='',summary_token_count=0,
                  compressed_up_to_event_id=0,stable_prefix_hash=NULL,
                  state_revision=state_revision+1,updated_at=NOW()
@@ -390,7 +430,7 @@ class PostgresAnchoredHistoryStore:
     async def delete_conversation_state(self, conversation_id: str) -> None:
         pool = await self._pool_factory()
         async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM model_cache_state WHERE conversation_id=$1",
-                conversation_id,
-            )
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('history-repair:' || $1, 0))", conversation_id)
+                await conn.execute("DELETE FROM conversation_summary_state WHERE conversation_id=$1", conversation_id)
+                await conn.execute("DELETE FROM model_cache_state WHERE conversation_id=$1", conversation_id)

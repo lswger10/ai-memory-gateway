@@ -218,6 +218,27 @@ async def test_fallback_does_not_authorize_another_paid_compression():
 
 
 @pytest.mark.anyio
+async def test_summary_budget_failure_finishes_stream_without_provider_or_fallback(caplog):
+    from anchored_history import AnchoredHistoryCompactor, InMemoryAnchoredHistoryStore
+    service, _, runner, usage = await _service(fallbacks=("backup",))
+    class Builder:
+        async def build(self, request, profile, **kwargs):
+            store = InMemoryAnchoredHistoryStore()
+            state = await store.get_or_create("summary")
+            async def forbidden_summary(*args):
+                pytest.fail("oversized input must not reach a provider")
+            await AnchoredHistoryCompactor().maybe_compact(store=store, cache_namespace="summary",
+                state=state, events=tuple(dict(event_id=i, actor_id="weiwei", content="x" * 3000)
+                                         for i in range(1, 131)), summarize=forbidden_summary)
+    service._context_builder = Builder()
+    events = [event async for event in service.stream(_request(binding_revision=None))]
+    assert [event.event for event in events] == ["unavailable"]
+    assert events[0].data["reason_code"] == "generation_unavailable"
+    assert "summary_input_budget_exceeded" in caplog.text
+    assert runner.calls == [] and await usage.list_receipts() == ()
+
+
+@pytest.mark.anyio
 async def test_internal_summary_truncation_marker_does_not_change_public_final_shape():
     service, _, _, _ = await _service()
 
