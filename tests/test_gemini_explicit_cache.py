@@ -15,6 +15,29 @@ from test_gemini_native import native_profile, context
 from test_gateway_provider_runner import request
 
 
+def test_runtime_build_context_can_import_gateway(tmp_path):
+    import os
+    from pathlib import Path
+    import shutil
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    # The image uses a literal allowlist; test imports without the source checkout.
+    for line in (root / ".dockerignore").read_text().splitlines():
+        if line.startswith("!"):
+            relative = line[1:]
+            target = tmp_path / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(root / relative, target)
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", "import sys; sys.path.insert(0, '.'); import main"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PYTHONPATH": ""},
+    )
+    assert result.returncode == 0, result.stderr
+
+
 class CreateTransport:
     def __init__(self, now, error=False): self.now, self.error, self.calls = now, error, []
     async def request(self, **kwargs):
