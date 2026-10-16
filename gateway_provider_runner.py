@@ -17,7 +17,7 @@ from cache_strategies import (
     CacheBreakpoint,
     PromptSegment,
 )
-from model_execution import ContextBundle, ProviderChunk, ProviderRunUnavailable
+from model_execution import ContextBundle, ProviderChunk, ProviderRunUnavailable, ExplicitCacheUnavailable
 from model_execution_contracts import GatewayExecutionRequest, ProviderUsage
 from model_usage_store import UsageRecordingError
 from model_profiles import ModelProfile
@@ -27,6 +27,7 @@ from media_materialization import (
     render_media_tail,
 )
 from provider_adapters import (
+    GeminiNativeAdapter,
     AnthropicMessagesAdapter,
     OpenAIChatCompletionsAdapter,
     OpenAIResponsesAdapter,
@@ -68,12 +69,14 @@ class GatewayProviderRunner:
         media_reader: RelayMediaReader | None = None,
         memory_tools: ActorMemoryToolLibrary | None = None,
         calendar_client=None,
+        explicit_cache=None,
     ) -> None:
         self.transport = transport or PooledHttpTransport()
         self.credentials = credential_resolver or EnvironmentCredentialResolver()
         self.media_reader = media_reader
         self.memory_tools = memory_tools
         self.calendar_client = calendar_client
+        self.explicit_cache = explicit_cache
 
     def _render(
         self,
@@ -162,6 +165,9 @@ class GatewayProviderRunner:
             if profile.cache_strategy == "openai_stable_prefix_v1"
             else None
         )
+        if profile.protocol == "gemini_native":
+            return GeminiNativeAdapter().render(profile=profile, instructions=instructions,
+                messages=messages, max_output_tokens=maximum, media_parts=media_parts, tools=tools)
         if profile.protocol == "openai_responses":
             input_items = tuple(
                 {"role": item["role"], "content": [{"type": "output_text" if item["role"] == "assistant" else "input_text", "text": item["content"]}]}
@@ -198,7 +204,10 @@ class GatewayProviderRunner:
         cache_namespace: str,
         max_output_tokens: int | None = None,
         on_attempt=None,
+        use_explicit_cache: bool = False,
+        explicit_cache_probe: bool = False,
     ) -> AsyncIterator[ProviderChunk]:
+        cached = False
         try:
             credential = self.credentials.resolve(profile.credential_ref)
             headers = resolve_profile_headers(profile, credential)
@@ -219,6 +228,18 @@ class GatewayProviderRunner:
                 media_parts=media_parts,
             )
             body = rendered.json_body
+            if use_explicit_cache and profile.cache_strategy == "gemini_explicit_cache_v1":
+                if self.explicit_cache is None:
+                    raise ExplicitCacheUnavailable("gemini_cache_store_unavailable")
+                try:
+                    body = await self.explicit_cache.prepare(profile=profile, request=request,
+                        context=context, namespace=cache_namespace, body=body, headers=headers,
+                        transport=self.transport, probe=explicit_cache_probe)
+                except ExplicitCacheUnavailable:
+                    raise
+                except Exception as exc:
+                    raise ExplicitCacheUnavailable("gemini_cache_state_unavailable") from exc
+                cached = "cachedContent" in body
             aggregate_usage = None
             provider_usage_received = False
             for _ in range(8):
@@ -235,6 +256,7 @@ class GatewayProviderRunner:
                         if response.status_code >= 400:
                             raise ProviderRunUnavailable(f"provider HTTP {response.status_code}")
                         parser = (self._anthropic if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}
+                                  else self._gemini if profile.protocol == "gemini_native"
                                   else self._openai_responses if profile.protocol == "openai_responses" else self._openai_chat)
                         async for item in parser(response, profile, request):
                             if item.event == "usage":
@@ -302,16 +324,64 @@ class GatewayProviderRunner:
                 body = _continue_with_tool_results(profile.protocol, body, calls, results,
                     assistant_content=tool_item.data.get("assistant_content"))
             raise ProviderRunUnavailable("provider tool loop exceeded limit")
-        except (ProviderRunUnavailable, UsageRecordingError, asyncio.CancelledError, GeneratorExit):
+        except (ProviderRunUnavailable, UsageRecordingError, asyncio.CancelledError, GeneratorExit) as exc:
             if self.memory_tools is not None and context.actor_memory_context is not None:
                 with anyio.fail_after(5, shield=True):
                     await self.memory_tools.discard(context.actor_memory_context)
+            if cached and isinstance(exc, ProviderRunUnavailable):
+                reason = await self.explicit_cache.pause_generation(request=request, namespace=cache_namespace, error=exc)
+                raise ExplicitCacheUnavailable(reason) from exc
             raise
         except Exception as exc:
             if self.memory_tools is not None and context.actor_memory_context is not None:
                 with anyio.fail_after(5, shield=True):
                     await self.memory_tools.discard(context.actor_memory_context)
+            if cached:
+                reason = await self.explicit_cache.pause_generation(request=request, namespace=cache_namespace, error=exc)
+                raise ExplicitCacheUnavailable(reason) from exc
             raise ProviderRunUnavailable("provider transport failed") from exc
+
+    async def _gemini(self, response, profile, request):
+        text, parts, calls = "", [], []
+        finish = None
+        usage_values = {}
+        async for _, data in _sse_json(response):
+            if data.get("error") or data.get("promptFeedback", {}).get("blockReason"):
+                raise ProviderRunUnavailable("provider Gemini request blocked or failed")
+            if isinstance(data.get("usageMetadata"), dict):
+                usage_values.update(data["usageMetadata"])
+                yield _usage_chunk(GeminiNativeAdapter(), usage_values)
+            candidates = data.get("candidates", [])
+            if not candidates:
+                continue
+            if len(candidates) != 1 or candidates[0].get("index", 0) != 0:
+                raise ProviderRunUnavailable("provider returned unexpected Gemini candidates")
+            candidate = candidates[0]
+            finish = candidate.get("finishReason") or finish
+            for part in candidate.get("content", {}).get("parts", []):
+                parts.append(part)  # Preserve signatures on their original parts for tool continuation.
+                if part.get("thought"):
+                    continue
+                if "functionCall" in part:
+                    call = part["functionCall"]
+                    if not call.get("name") or not isinstance(call.get("args", {}), dict):
+                        raise ProviderRunUnavailable("provider Gemini tool call was incomplete")
+                    calls.append({"id": call.get("id") or str(uuid.uuid4()), "name": call["name"],
+                                  "arguments": call.get("args", {}), "provider_id": call.get("id")})
+                elif isinstance(part.get("text"), str):
+                    text += part["text"]
+                    yield ProviderChunk("delta", {"text": part["text"]})
+        if finish is None:
+            raise ProviderRunUnavailable("provider stream omitted its terminal event")
+        if finish not in {"STOP", "MAX_TOKENS"} or (calls and finish != "STOP"):
+            raise ProviderRunUnavailable("provider Gemini response did not complete")
+        if calls:
+            yield ProviderChunk("tool_calls", {"calls": calls, "assistant_content": {"role": "model", "parts": parts}})
+        else:
+            if request.execution_kind == "probe":
+                yield ProviderChunk("probe", _parse_probe(text))
+            yield ProviderChunk("final", {"text": text, "truncated": finish == "MAX_TOKENS"})
+        yield _usage_chunk(GeminiNativeAdapter(), usage_values)
 
     async def _anthropic(self, response, profile, request):
         adapter = AnthropicMessagesAdapter()
@@ -561,7 +631,15 @@ def _add_usage(left: ProviderUsage, right: ProviderUsage) -> ProviderUsage:
 
 def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, results, *, assistant_content=None) -> dict[str, Any]:
     body = json.loads(json.dumps(body))
-    if protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
+    if protocol == "gemini_native":
+        body["contents"].append(assistant_content)
+        body["contents"].append({"role": "user", "parts": [
+            {"functionResponse": {"name": call["name"], "response": (
+                {"output": tool_result_text(result), "is_error": result.get("is_error", False)}
+                if "calendar_content" in result else result),
+                **({"id": call["provider_id"]} if call.get("provider_id") else {})}}
+            for call, result in zip(calls, results, strict=True)]})
+    elif protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
         body["messages"].append({"role": "assistant", "content": assistant_content or [
             {"type": "tool_use", "id": call["id"], "name": call["name"], "input": call["arguments"]}
             for call in calls
@@ -595,7 +673,11 @@ def _continue_with_tool_results(protocol: str, body: dict[str, Any], calls, resu
         images = tool_result_images(result)
         if not images:
             continue
-        if protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
+        if protocol == "gemini_native":
+            body["contents"].append({"role": "user", "parts": [
+                {"text": "Shared calendar page from tool " + call["id"]}] + [
+                {"inlineData": {"mimeType": b["mimeType"], "data": b["data"]}} for b in images]})
+        elif protocol in {"anthropic_messages", "anthropic_messages_compatible"}:
             block = next(b for b in body["messages"][-1]["content"] if b["tool_use_id"] == call["id"])
             block["content"] = [{"type": "text", "text": tool_result_text(result)}] + [
                 {"type": "image", "source": {"type": "base64", "media_type": b["mimeType"], "data": b["data"]}} for b in images]

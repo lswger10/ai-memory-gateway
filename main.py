@@ -71,6 +71,7 @@ from model_execution import GatewayModelExecutionService
 from execution_context_builder import GatewayExecutionContextBuilder
 from conversation_sync import ConversationSyncIncomplete
 from gateway_provider_runner import GatewayProviderRunner
+from gemini_explicit_cache import GeminiExplicitCache, InMemoryGeminiCacheStore, PostgresGeminiCacheStore
 from shared_page_client import SharedPageClient
 from media_materialization import RelayMediaReader
 from postgres_model_stores import PostgresModelProfileStore, PostgresModelUsageStore
@@ -515,6 +516,10 @@ async def _get_model_execution_service() -> GatewayModelExecutionService:
         calendar_token = os.environ.get("SHARED_PAGE_AGENT_TOKEN", "").strip()
         calendar_client = SharedPageClient(calendar_url, calendar_token) if calendar_url and calendar_token else None
         _model_provider_runner = GatewayProviderRunner(
+            explicit_cache=GeminiExplicitCache(
+                store=InMemoryGeminiCacheStore() if ephemeral_fixture else PostgresGeminiCacheStore(get_pool),
+                pins=InMemoryConversationCachePinStore() if ephemeral_fixture else PostgresConversationCachePinStore(get_pool),
+                profiles=_model_profile_store, usage=_model_usage_store),
             calendar_client=calendar_client,
             media_reader=(
                 RelayMediaReader(relay_url, relay_key)
@@ -552,12 +557,7 @@ async def _get_cache_pin_service() -> CachePinService:
     assert _model_profile_store is not None
     assert _model_provider_runner is not None
     assert _model_context_builder is not None
-    fixture = bool(os.environ.get("MODEL_EXECUTION_EPHEMERAL_FIXTURE", "").strip())
-    store = (
-        InMemoryConversationCachePinStore()
-        if fixture
-        else PostgresConversationCachePinStore(get_pool)
-    )
+    store = _model_provider_runner.explicit_cache.pins
     interval = timedelta(
         seconds=max(
             60,
@@ -847,7 +847,21 @@ async def list_conversation_cache_pins():
     pins = await (await _get_cache_pin_service()).list_pins()
     receipts = await _model_usage_store.list_receipts(limit=200) if _model_usage_store is not None else ()
     cache_view = build_cache_usage_view(receipts)
-    return {"pins": [_cache_pin_public(pin, cache_view) for pin in pins]}
+    result = {"pins": [_cache_pin_public(pin, cache_view) for pin in pins]}
+    cache = getattr(_model_provider_runner, "explicit_cache", None)
+    result["explicit_resources"] = []
+    if cache is not None:
+        for row in await cache.store.list_resources():
+            result["explicit_resources"].append({
+                "cache_key": row.cache_key, "attempt_id": row.attempt_id,
+                "actor_id": row.actor_id, "room_id": row.room_id, "conversation_id": row.conversation_id,
+                "execution_mode": row.execution_mode, "profile_id": row.profile_id,
+                "profile_revision": row.profile_revision,
+                "status": "expired" if row.status == "ready" and row.expires_at <= cache.now() else row.status,
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                "last_error": row.last_error,
+            })
+    return result
 
 
 @app.put("/api/cache-pins")
@@ -857,6 +871,19 @@ async def update_conversation_cache_pin(request: Request):
         raise HTTPException(status_code=503, detail="memory_storage_required")
     try:
         payload = await request.json()
+        if isinstance(payload, dict) and payload.get("action") == "resume_explicit_cache":
+            if set(payload) != {"action", "cache_key", "attempt_id", "actor_id", "room_id", "conversation_id", "execution_mode"}:
+                raise CachePinError("invalid cache resume payload")
+            if any(not isinstance(value, str) or not value.strip() for value in payload.values()):
+                raise CachePinError("invalid cache resume coordinates")
+            if payload["execution_mode"] not in {"private", "group"} or payload["actor_id"] not in {"jiao", "laoke"}:
+                raise CachePinError("invalid cache resume scope")
+            await _get_model_execution_service()
+            cache = _model_provider_runner.explicit_cache
+            scope = tuple(payload[key] for key in ("actor_id", "room_id", "conversation_id", "execution_mode"))
+            if not await cache.store.resume(payload["cache_key"], payload["attempt_id"], scope, cache.now()):
+                raise HTTPException(status_code=409, detail="cache_resume_requires_matching_paused_attempt_after_1h")
+            return {"status": "resumed", "provider_calls": 0}
         allowed = {
             "room_id",
             "conversation_id",

@@ -468,6 +468,30 @@ CREATE TABLE IF NOT EXISTS actor_memory_tool_stages (
 
 CREATE INDEX IF NOT EXISTS idx_actor_memory_tool_audit
     ON actor_memory_tool_stages(actor_id,created_at DESC);
+
+CREATE TABLE IF NOT EXISTS gemini_explicit_cache_resources (
+    cache_key TEXT PRIMARY KEY,
+    actor_id TEXT NOT NULL CHECK (actor_id IN ('jiao','laoke')),
+    room_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    execution_mode TEXT NOT NULL CHECK (execution_mode IN ('private','group')),
+    profile_id TEXT NOT NULL,
+    profile_revision INTEGER NOT NULL,
+    namespace TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    prefix_hash TEXT NOT NULL,
+    history_count INTEGER NOT NULL CHECK (history_count >= 0),
+    cutoff_event_id BIGINT NOT NULL,
+    summary_version INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('creating','ready','paused')),
+    resource_name TEXT,
+    expires_at TIMESTAMPTZ,
+    last_error TEXT,
+    CHECK (status <> 'ready' OR (resource_name IS NOT NULL AND expires_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_gemini_cache_scope
+    ON gemini_explicit_cache_resources(actor_id,room_id,conversation_id,execution_mode);
 """
 
 

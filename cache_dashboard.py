@@ -5,6 +5,8 @@ from model_usage_store import ExecutionReceipt
 
 def _cache_outcome(receipt: ExecutionReceipt) -> str:
     usage = receipt.usage
+    if receipt.execution_purpose == "cache_create":
+        return "UNOBSERVABLE"  # Creation is not a cache lookup hit or miss.
     if (usage.cache_read_input_tokens or 0) > 0 or (usage.cached_tokens or 0) > 0:
         return "HIT"
     provider_usage_evidence = receipt.provider_usage_received or any(

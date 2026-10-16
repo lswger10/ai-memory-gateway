@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 import uuid
+import json
 from cache_strategies import PromptSegment
 from typing import Protocol
 
@@ -138,6 +139,8 @@ class GatewayCacheProbeService:
             cache_namespace=cache_namespace,
             max_output_tokens=max_output_tokens,
             on_attempt=partial(record_provider_attempt, self.usage_store, draft),
+            **({"use_explicit_cache": True, "explicit_cache_probe": True}
+               if profile.cache_strategy == "gemini_explicit_cache_v1" and execution_purpose == "cache_probe" else {}),
         )
         try:
             async for chunk in stream:
@@ -218,6 +221,13 @@ class GatewayCacheProbeService:
             profile_id=profile_id,
         )
         context = self._context(profile_id)
+        if profile.cache_strategy == "gemini_explicit_cache_v1":
+            # Probe resources cannot collide with any real conversation or its pause state.
+            conversation_id = "gemini-cache-probe:" + str(uuid.uuid4())
+            request = self._request(actor_id=actor_id, room_id=room_id,
+                conversation_id=conversation_id, profile_id=profile_id)
+            context = replace(context, stable_history=(json.dumps({"event_id": 1, "actor_id": "weiwei",
+                "role": "human", "event_type": "human_message", "content": "Synthetic cache probe."}),))
         namespace = build_cache_namespace(
             actor_id=actor_id,
             conversation_id=conversation_id,
@@ -267,6 +277,7 @@ class GatewayCacheProbeService:
                 probe_kind=(
                     "route_generation"
                     if profile.cache_strategy == "no_prompt_cache_v1"
+                    else "gemini_explicit_cache" if profile.cache_strategy == "gemini_explicit_cache_v1"
                     else "frozen_double_send_cache"
                 ),
                 status=stored_status,

@@ -476,13 +476,13 @@
                         <div class="settings-field"><label for="model-profile-id">Profile ID</label><input id="model-profile-id" required class="input" placeholder="ofox-claude-opus"></div>
                         <div class="settings-field"><label for="model-profile-name">显示名称</label><input id="model-profile-name" required class="input" placeholder="OFOX Claude Opus"></div>
                         <div class="settings-field"><label for="model-profile-provider">Provider</label><input id="model-profile-provider" required class="input" placeholder="ofox"></div>
-                        <div class="settings-field"><label for="model-profile-protocol">Protocol</label><select id="model-profile-protocol" class="input"><option value="anthropic_messages">anthropic_messages</option><option value="anthropic_messages_compatible">anthropic_messages_compatible</option><option value="openai_responses">openai_responses</option><option value="openai_chat_completions">openai_chat_completions</option></select></div>
+                        <div class="settings-field"><label for="model-profile-protocol">Protocol</label><select id="model-profile-protocol" class="input"><option value="anthropic_messages">anthropic_messages</option><option value="anthropic_messages_compatible">anthropic_messages_compatible</option><option value="openai_responses">openai_responses</option><option value="openai_chat_completions">openai_chat_completions</option><option value="gemini_native">gemini_native</option></select></div>
                         <div class="settings-field"><label for="model-profile-base-url">Base URL</label><input id="model-profile-base-url" required type="url" class="input" placeholder="https://api.example.com"></div>
                         <div class="settings-field"><label for="model-profile-route-id">Route ID</label><input id="model-profile-route-id" required class="input" placeholder="provider-route-1"></div>
                         <div class="settings-field"><label for="model-profile-model">模型</label><input id="model-profile-model" required class="input" placeholder="provider/model-name"></div>
                         <div class="settings-field"><label for="model-profile-key-env">API Key 环境变量名</label><input id="model-profile-key-env" required class="input" placeholder="OFOX_API_KEY"></div>
                         <div class="settings-field"><label for="model-profile-headers">Header templates (JSON)</label><input id="model-profile-headers" class="input" value='{"Authorization":"Bearer ${credential}"}'><small class="form-hint">只写模板，不粘贴真实 Key。Anthropic 可用 {"x-api-key":"${credential}","anthropic-version":"2023-06-01"}</small></div>
-                        <div class="settings-field"><label for="model-profile-cache-strategy">Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option></select></div>
+                        <div class="settings-field"><label for="model-profile-cache-strategy">Cache Strategy</label><select id="model-profile-cache-strategy" class="input"><option value="no_prompt_cache_v1">no_prompt_cache_v1</option><option value="anthropic_prefix_anchored_v1">anthropic_prefix_anchored_v1</option><option value="openai_stable_prefix_v1">openai_stable_prefix_v1</option><option value="gemini_explicit_cache_v1">gemini_explicit_cache_v1</option></select></div>
                         <div class="settings-field"><label for="model-profile-cache-ttl">请求 TTL</label><select id="model-profile-cache-ttl" class="input"><option value="">不请求</option><option value="5m">5m</option><option value="1h">1h（必须由真实探针验证）</option></select></div>
                         <div class="settings-field"><label for="model-profile-web-search">原生搜索协议（保存不代表验证通过）</label><select id="model-profile-web-search" class="input"><option value="">不配置</option><option value="anthropic_web_search_20250305">Anthropic web_search_20250305</option><option value="openai_web_search">OpenAI Responses web_search</option></select></div>
                     </div>
@@ -506,7 +506,7 @@
 
                 <div class="card settings-card">
                     <h3 class="settings-group-title">人工双发探针</h3>
-                    <p class="form-hint">此按钮会真实调用供应商两次并产生费用。不会自动运行，也不是缓存保活。</p>
+                    <p class="form-hint">普通缓存探针最多生成两次。Gemini 显式缓存探针最多发起 1 次缓存创建和 2 次生成；每次都可能计费，失败时提前停止。不会自动运行，也不续期。</p>
                     <div class="settings-grid">
                         <div class="settings-field"><label for="probe-profile">Profile</label><select id="probe-profile" class="input"></select></div>
                         <div class="settings-field"><label for="probe-actor">Actor</label><select id="probe-actor" class="input"><option value="jiao">椒椒</option><option value="laoke">老克</option></select></div>
@@ -538,7 +538,7 @@
 
                 <div class="card settings-card">
                     <h3 class="settings-group-title">Conversation Cache Pin</h3>
-                    <p class="form-hint">Pin 属于 conversation。只有当前已验证且明确支持 1h cache 的 Profile 会产生约 50 分钟一次的保活调用；不支持的 actor 保持 paused。</p>
+                    <p class="form-hint">Pin 属于 conversation。约 50 分钟一次的定时保活仅适用于已验证的 Anthropic 1h 路线。Gemini 仅按真实聊天需要创建和引用缓存，不做定时续期。可引用的缓存资源不代表本次已命中；实际命中以供应商 usage 为准。</p>
                     <div id="conversation-cache-pin-list"><p class="form-hint">尚无 pin。</p></div>
                 </div>
 

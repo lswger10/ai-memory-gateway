@@ -1,5 +1,50 @@
 # AI Memory Gateway
 
+## OFOX Gemini explicit cache (2026-10-16, local only)
+
+Implemented on `codex/gateway-garden-test-release` after design commit `b089d7b`.
+This is **not deployed or provider-verified**. Existing online Profiles and
+bindings are unchanged; the previously documented test release below is not
+evidence that this new path is running there.
+
+- New `gemini_native` / `gemini_explicit_cache_v1` reuse the existing transport,
+  tools, usage and conversation Pin. Native text/media, function responses,
+  thought signatures and terminal/usage parsing are covered by synthetic tests.
+- Ordinary private/Group chat requires an enabled Pin, a selectable Profile,
+  and `gemini_explicit_cache=verified` evidence for that exact Profile revision.
+  Free tests do not verify any real Profile. Bedroom explicit caching is excluded.
+- Create TTL=3600s once, then reference the frozen prefix plus new dynamic tail.
+  Time/new facts do not recreate it; expiry or repaired/changed frozen contents
+  rebuild only on the next real generation. There is **no Gemini scheduled
+  keepalive, PATCH renewal, idle recreation or guaranteed hit/savings**.
+- Gateway's additive `gemini_explicit_cache_resources` table owns handles,
+  expiry, scope, frozen-prefix metadata and attempt state only. It contains no
+  transcript, summary text, media bytes or credentials. Raw facts and shared
+  conversation summaries are not rewritten by this feature.
+- Atomic pre-request reservation makes failed/unknown/interrupted creation
+  pause across later requests and process reconstruction. Cache generation
+  errors also pause; neither case authorizes a paid fallback. Logs/state retain
+  controlled error categories/HTTP codes, not response bodies.
+- Existing admin `GET /api/cache-pins` exposes resource status/expiry and exact
+  recovery coordinates, not provider handles. Explicit `PUT /api/cache-pins`
+  with `{action: "resume_explicit_cache", cache_key, attempt_id, actor_id,
+  room_id, conversation_id, execution_mode}` clears only a matching non-ready
+  attempt after its one-hour creation window. It calls no provider and does not
+  delete history; the next authorized chat can create again. No new retry button.
+- The existing manually confirmed cache probe uses a separate synthetic
+  conversation: at most one creation plus two generations, each potentially
+  billable. Missing cache-read telemetry cannot verify explicit caching.
+  Resource readiness is not a cache hit; actual usage remains authoritative.
+
+Free full-suite result: **505 passed, 62 skipped, 2 subtests passed** using
+`python -B -m pytest -q -p no:cacheprovider` with PostgreSQL approval disabled.
+Verification uses fake HTTP and synthetic data only; PostgreSQL opt-in tests
+are skipped. Independent review's cost-disclosure and sanitized-error findings
+were fixed and rechecked. No provider calls, cloud changes, push or deployment.
+Real PostgreSQL migration/restart and OFOX route/media/tool/cache validation
+remain release gates before enabling the new protocol on a real binding.
+No new service/dependency/branch/worktree; Relay and Orchestrator are unchanged.
+
 ## Summary failure pause (2026-10-16, deployed and freely verified in test)
 
 On top of `44611d5`, automatic summary failure now durably pauses that exact

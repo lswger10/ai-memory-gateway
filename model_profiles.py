@@ -40,6 +40,7 @@ _CAPABILITY_FIELDS = {
 }
 _TEST_STATUSES = {"unverified", "passed", "failed", "unsupported"}
 _CACHE_STRATEGIES = {
+    "gemini_explicit_cache_v1",
     "anthropic_prefix_anchored_v1",
     "openai_stable_prefix_v1",
     "no_prompt_cache_v1",
@@ -198,6 +199,10 @@ class ModelProfile:
         if strategy not in capabilities.cache_strategies:
             raise ProfileContractError("cache_strategy was not observed for this route")
         ttl = payload.get("requested_cache_ttl")
+        if strategy == "gemini_explicit_cache_v1" and (protocol != "gemini_native" or ttl != "1h"):
+            raise ProfileContractError("Gemini explicit caching requires native protocol and 1h TTL")
+        if protocol == "gemini_native" and strategy not in {"gemini_explicit_cache_v1", "no_prompt_cache_v1"}:
+            raise ProfileContractError("incompatible Gemini cache strategy")
         if ttl is not None:
             ttl = _required_string(ttl, "requested_cache_ttl")
             if ttl not in capabilities.cache_ttls:

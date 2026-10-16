@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import Any, AsyncIterator, Protocol
 
@@ -20,6 +20,10 @@ from provider_adapters import build_provider_provenance
 
 class ProviderRunUnavailable(RuntimeError):
     """A sanitized, retryable provider-attempt failure."""
+
+
+class ExplicitCacheUnavailable(ProviderRunUnavailable):
+    """A cache failure must not authorize another paid route or retry."""
 
 
 class SearchCapabilityUnavailable(ValueError):
@@ -181,10 +185,12 @@ class GatewayModelExecutionService:
                     usage, status, provider_usage_received, observed_cache_support)
             provider_stream = self._provider_runner.run(
                 profile=profile,
-                request=request,
+                request=replace(request, room_id=room_id, conversation_id=conversation_id),
                 context=context,
                 cache_namespace=namespace,
                 on_attempt=on_attempt,
+                **({"use_explicit_cache": request.execution_kind == "full"}
+                   if profile.cache_strategy == "gemini_explicit_cache_v1" else {}),
             )
             try:
                 async for chunk in provider_stream:
@@ -231,6 +237,8 @@ class GatewayModelExecutionService:
                     type(exc.__cause__).__name__ if exc.__cause__ else "none",
                 )
                 last_unavailable = exc
+                if isinstance(exc, ExplicitCacheUnavailable):
+                    break
                 continue
             finally:
                 close = getattr(provider_stream, "aclose", None)

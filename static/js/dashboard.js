@@ -128,6 +128,7 @@ let _gatewayModelBindings = {};
 let _gatewayActorDefaults = {};
 let _editingModelProfile = null;
 let _conversationCachePins = [];
+let _explicitCacheResources = [];
 
 function _modelField(id) {
     return document.getElementById(id);
@@ -247,6 +248,8 @@ function _renderModelProfiles() {
     const previous = probe.value;
     probe.innerHTML = options;
     if (_gatewayModelProfiles.some(p => p.profile_id === previous)) probe.value = previous;
+    probe.onchange = _updateCacheProbeChargeLabel;
+    _updateCacheProbeChargeLabel();
     renderActorBinding();
 }
 
@@ -305,7 +308,15 @@ function _renderModelUsage(cacheView, observability) {
 const CACHE_PIN_MESSAGES = {
     cache_pin_claim_count_label: '保活领取次数',
     cache_pin_claim_count_help: '领取后即计数，即使尚未发送；实际用量与缓存命中以供应商回执为准。',
+    explicit_probe_charge: '确认一次缓存创建及两次生成并运行',
+    ordinary_probe_charge: '确认产生两次调用并运行',
 };
+
+function _updateCacheProbeChargeLabel() {
+    const profile = _gatewayModelProfiles.find(p => p.profile_id === _modelField('probe-profile').value);
+    _modelField('cache-probe-run').textContent = profile?.cache_strategy === 'gemini_explicit_cache_v1'
+        ? CACHE_PIN_MESSAGES.explicit_probe_charge : CACHE_PIN_MESSAGES.ordinary_probe_charge;
+}
 
 function _renderConversationCachePins() {
     const list = _modelField('conversation-cache-pin-list');
@@ -322,10 +333,15 @@ function _renderConversationCachePins() {
             `${escapeHtml(_cacheOutcomeLabel(state.cache_outcome || 'UNOBSERVABLE'))}` +
             `${state.last_error ? ' · ' + escapeHtml(state.last_error) : ''}</div>`
         ).join('');
+        const resources = _explicitCacheResources.filter(row => row.room_id === pin.room_id &&
+            row.conversation_id === pin.conversation_id && row.execution_mode === pin.execution_mode).map(row =>
+            `<div class="form-hint">Gemini explicit · ${escapeHtml(row.actor_id)} · ${escapeHtml(row.profile_id)} r${row.profile_revision} · ` +
+            `${escapeHtml(row.status)} · expires ${escapeHtml(row.expires_at || '—')} · ` +
+            `${escapeHtml(row.last_error || '')}</div>`).join('');
         return `<div class="memory-item" style="margin-bottom:10px;">
             <strong>${escapeHtml(pin.room_id)} · ${escapeHtml(pin.execution_mode)}</strong>
             <span class="badge">${pin.enabled ? 'pin on' : 'pin off'} · ${escapeHtml(pin.status)}</span>
-            <div class="form-hint">${escapeHtml(pin.conversation_id)}</div>${actors}
+            <div class="form-hint">${escapeHtml(pin.conversation_id)}</div>${actors}${resources}
             <div class="form-hint">${CACHE_PIN_MESSAGES.cache_pin_claim_count_help}</div>
         </div>`;
     }).join('');
@@ -367,6 +383,7 @@ async function loadModelProfilesAndUsage() {
     else _modelField('model-usage-body').innerHTML = `<tr><td colspan="8">${escapeHtml(usage.reason.message)}</td></tr>`;
     if (pins.status === 'fulfilled') {
         _conversationCachePins = pins.value.pins;
+        _explicitCacheResources = pins.value.explicit_resources || [];
         _renderConversationCachePins();
     } else _modelField('conversation-cache-pin-list').textContent = pins.reason.message;
     if (memoryAudit.status === 'fulfilled') _renderActorMemoryAudit(memoryAudit.value.items);

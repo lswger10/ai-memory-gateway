@@ -380,6 +380,11 @@ class CachePinService:
                     ), expected=state)
                     continue
                 profile = resolved.primary
+                if profile.protocol == "gemini_native":
+                    await self.store.save_actor_state(pin.pin_id, replace(state, status="paused",
+                        profile_id=profile.profile_id, next_keepalive_at=None,
+                        last_error="gemini_keepalive_unsupported"), expected=state)
+                    continue
                 cache_verified = _supports_verified_one_hour_cache(profile) and (
                     await self.profiles.has_verified_probe(
                         profile.profile_id,

@@ -269,6 +269,28 @@ def test_active_pin_shows_observed_cache_result_separately(dashboard):
     assert "calls 68" not in text
 
 
+def test_gemini_cache_resource_and_charge_disclosure_do_not_enable_or_call(dashboard):
+    page, responses, writes = dashboard
+    assert "1 次缓存创建和 2 次生成" in page.locator("#section-models").inner_text()
+    assert "不做定时续期" in page.locator("#section-models").inner_text()
+    profiles = responses["/api/model-profiles"]["profiles"]
+    profiles[0].update(protocol="gemini_native", cache_strategy="gemini_explicit_cache_v1")
+    responses["/api/cache-pins"] = {"pins": [{"room_id": "room_group_home", "execution_mode": "group",
+        "conversation_id": "synthetic", "enabled": True, "status": "paused", "actors": {
+            "jiao": {"status": "paused", "profile_id": "claude", "last_error": "gemini_keepalive_unsupported"}}}],
+        "explicit_resources": [{"room_id": "room_group_home", "conversation_id": "synthetic", "execution_mode": "group",
+            "actor_id": "jiao", "profile_id": "claude", "profile_revision": 4, "status": "expired",
+            "expires_at": "2026-10-16T01:00:00Z", "last_error": None}]}
+    page.evaluate("loadModelProfilesAndUsage()")
+    page.select_option("#probe-profile", "claude")
+    assert "一次缓存创建及两次生成" in page.locator("#cache-probe-run").inner_text()
+    text = page.locator("#conversation-cache-pin-list").inner_text()
+    assert "expired" in text and "2026-10-16T01:00:00Z" in text and "gemini_keepalive_unsupported" in text
+    page.select_option("#model-profile-protocol", "gemini_native")
+    page.select_option("#model-profile-cache-strategy", "gemini_explicit_cache_v1")
+    assert writes == []
+
+
 def test_usage_dom_separates_one_generation_from_two_attempts(dashboard):
     from dataclasses import replace
     from cache_dashboard import build_cache_observability_summary, build_cache_usage_view

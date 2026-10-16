@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import re
 from typing import Any, Mapping
 
 from cache_strategies import AnthropicPromptLayout, PromptSegment
@@ -18,6 +19,34 @@ class RenderedProviderRequest:
     method: str
     path: str
     json_body: dict[str, Any]
+
+
+class GeminiNativeAdapter:
+    def render(self, *, profile, instructions, messages, max_output_tokens, media_parts=(), tools=()):
+        if not re.fullmatch(r"(?:google/)?gemini-[A-Za-z0-9._-]+", profile.model):
+            raise ProviderAdapterError("invalid Gemini model resource")
+        contents = [{"role": "model" if item["role"] == "assistant" else "user",
+                     "parts": [{"text": item["content"]}]} for item in messages]
+        if media_parts:
+            contents.append({"role": "user", "parts": [
+                {"text": part["text"]} if part["kind"] == "text" else
+                {"inlineData": {"mimeType": part["media_type"], "data": part["data"]}}
+                for part in media_parts]})
+        body = {"systemInstruction": {"parts": [{"text": instructions}]}, "contents": contents,
+                "generationConfig": {"maxOutputTokens": max_output_tokens, "candidateCount": 1}}
+        if tools:
+            body["tools"] = [{"functionDeclarations": [
+                {"name": tool["name"], "description": tool["description"],
+                 "parametersJsonSchema": tool["input_schema"]} for tool in tools]}]
+        return RenderedProviderRequest("POST", f"/gemini/v1beta/models/{profile.model}:streamGenerateContent?alt=sse", body)
+
+    def parse_usage(self, values):
+        output = ProviderUsage.from_provider_values(output_tokens=values.get("candidatesTokenCount")).output_tokens
+        thoughts = ProviderUsage.from_provider_values(output_tokens=values.get("thoughtsTokenCount")).output_tokens
+        if output is not None and thoughts is not None:
+            output += thoughts
+        return ProviderUsage.from_provider_values(input_tokens=values.get("promptTokenCount"),
+            output_tokens=output, cached_tokens=values.get("cachedContentTokenCount"))
 
 
 @dataclass(frozen=True, slots=True)
