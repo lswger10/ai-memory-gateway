@@ -172,6 +172,38 @@ class PostgresModelProfileStore:
             )
         return row is not None
 
+    async def claim_health_check(self, profile_id: str, revision: int) -> bool:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                profile = await conn.fetchrow(
+                    "SELECT revision, enabled FROM model_profiles WHERE profile_id=$1 FOR UPDATE", profile_id)
+                if profile is None or profile["revision"] != revision or not profile["enabled"]:
+                    return False
+                recent = await conn.fetchval(
+                    """SELECT 1 FROM model_profile_probe_results WHERE profile_id=$1
+                       AND probe_kind='model_health' AND tested_at > NOW() - INTERVAL '1 day' LIMIT 1""", profile_id)
+                if recent:
+                    return False
+                await conn.execute(
+                    """INSERT INTO model_profile_probe_results(profile_id,profile_revision,probe_kind,status)
+                       VALUES($1,$2,'model_health','unverified')
+                       ON CONFLICT(profile_id,profile_revision,probe_kind) DO UPDATE SET tested_at=NOW()""",
+                    profile_id, revision)
+        return True
+
+    async def list_health_results(self) -> tuple[dict, ...]:
+        pool = await self._pool_factory()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT r.*, p.profile_json->>'display_name' AS display_name
+                   FROM model_profile_probe_results r JOIN model_profiles p
+                   ON r.profile_id=p.profile_id AND r.profile_revision=p.revision
+                   WHERE r.probe_kind='model_health' AND p.enabled ORDER BY p.profile_id""")
+        return tuple({"profile_id": r["profile_id"], "profile_revision": r["profile_revision"],
+            "display_name": r["display_name"], "status": r["status"],
+            "tested_at": r["tested_at"].isoformat(), **_json_object(r["observed_capabilities"])} for r in rows)
+
     async def _profile(self, conn, profile_id: str) -> ModelProfile:
         row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", profile_id)
         if row is None:
@@ -249,13 +281,23 @@ class PostgresModelProfileStore:
                 raise ProfileStoreError(f"actor has no Model Profile binding: {actor_id}")
             override = await conn.fetchrow("SELECT * FROM model_room_overrides WHERE room_id=$1 AND actor_id=$2", room_id, actor_id)
             primary_id = override["profile_id"] if override else binding["default_profile_id"]
-            primary = await self._profile(conn, primary_id)
+            row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", primary_id)
+            if row is None:
+                raise ProfileStoreError(f"unknown Profile: {primary_id}")
+            primary = ModelProfile.from_dict(_json_object(row["profile_json"]))
             fallback_ids = tuple(
                 item
                 for item in _json_array(binding["approved_fallback_profile_ids"])
                 if item != primary_id
             )
-            fallbacks = tuple([await self._profile(conn, item) for item in fallback_ids])
+            candidates = []
+            for item in fallback_ids:
+                row = await conn.fetchrow("SELECT profile_json FROM model_profiles WHERE profile_id=$1", item)
+                if row is not None:
+                    candidate = ModelProfile.from_dict(_json_object(row["profile_json"]))
+                    if candidate.selectable:
+                        candidates.append(candidate)
+            fallbacks = tuple(candidates)
             revision = int(override["revision"] if override else binding["revision"])
         return ResolvedProfiles(actor_id, room_id, primary, fallbacks, "room_override" if override else "actor_default", revision)
 

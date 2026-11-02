@@ -34,21 +34,27 @@ const ICONS = (() => {
 })();
 
 // ============================================
-// 网关鉴权：从URL参数读取gateway_key，自动注入所有请求
+// 管理凭证只经同源请求头发送，当前标签页关闭后清除。
 // ============================================
-const _gatewayKey = new URLSearchParams(window.location.search).get('gateway_key') || '';
-if (_gatewayKey) {
-    const _origFetch = window.fetch;
-    window.fetch = function(url, opts = {}) {
-        opts.headers = opts.headers || {};
-        if (opts.headers instanceof Headers) {
-            opts.headers.set('X-Gateway-Key', _gatewayKey);
-        } else {
-            opts.headers['X-Gateway-Key'] = _gatewayKey;
-        }
-        return _origFetch.call(this, url, opts);
-    };
-}
+let _gatewayKey = sessionStorage.getItem('gateway-key') || '';
+const _origFetch = window.fetch;
+window.fetch = async function(url, opts = {}) {
+    const target = new URL(url instanceof Request ? url.url : url, location.href);
+    if (target.origin !== location.origin) return _origFetch.call(this, url, opts);
+    const sentKey = _gatewayKey;
+    const headers = new Headers(opts.headers || (url instanceof Request ? url.headers : undefined));
+    if (sentKey) headers.set('X-Gateway-Key', sentKey);
+    const response = await _origFetch.call(this, url, {...opts, headers});
+    if (response.status !== 401) return response;
+    if (_gatewayKey === sentKey) {
+        _gatewayKey = window.prompt('请输入网关管理密钥（仅保留在当前标签页）') || '';
+        if (_gatewayKey) sessionStorage.setItem('gateway-key', _gatewayKey);
+        else sessionStorage.removeItem('gateway-key');
+    }
+    if (!_gatewayKey) return response;
+    headers.set('X-Gateway-Key', _gatewayKey);
+    return _origFetch.call(this, url, {...opts, headers});
+};
 
 // ============================================
 // 全局状态
@@ -195,9 +201,32 @@ async function saveModelProfile() {
             const error = await response.json();
             throw new Error(`${response.status}: ${error.detail || '保存失败'}${error.invalid_fields ? ' [' + error.invalid_fields.join(', ') + ']' : ''}`);
         }
-        _modelMessage('Profile 已保存为“未验证”。请按需运行人工探针。');
+        _modelMessage('配置已保存。点击“测试并启用”验证渠道后，即可绑定角色。');
         await loadModelProfilesAndUsage();
         editModelProfile(_editingModelProfile?.profile_id || _modelField('model-profile-id').value);
+    } catch (error) {
+        _modelMessage(error.message, true);
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function testModelProfile(button) {
+    const profile = _gatewayModelProfiles.find(p => p.profile_id === button.dataset.healthProfileId);
+    if (!profile || button.disabled) return;
+    button.disabled = true;
+    try {
+        const response = await fetch('/api/model-health', {method: 'POST',
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+                profile_id: profile.profile_id, profile_revision: profile.revision, confirm_provider_charges: true})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(`${response.status}: ${result.detail || '测试失败'}`);
+        const errors = {provider_model_retired: '模型已下线，请换模型', provider_bad_request: '渠道或参数错误',
+            provider_auth_failed: '密钥失效或没有访问权限', provider_payment_required: '余额不足',
+            provider_rate_limited: '请求太频繁，稍后再试', provider_transport_failed: '连接失败，稍后再试'};
+        _modelMessage(result.status === 'verified' ? '测试通过，配置已启用，可绑定角色。' :
+            (errors[result.reason_code] || '模型暂时不可用，请检查配置后重试。'), result.status !== 'verified');
+        await loadModelProfilesAndUsage();
     } catch (error) {
         _modelMessage(error.message, true);
     } finally {
@@ -241,6 +270,7 @@ function _renderModelProfiles() {
                 <div class="form-hint">${escapeHtml(profile.provider)} · ${escapeHtml(profile.protocol)} · ${escapeHtml(profile.model)}</div>
                 <div class="form-hint">${escapeHtml(profile.cache_strategy)} · TTL ${escapeHtml(profile.requested_cache_ttl || 'none')} · key ${profile.credential_configured ? 'configured' : 'missing'}</div>
                 <button class="btn btn-secondary" data-profile-id="${escapeHtml(profile.profile_id)}" onclick="editModelProfile(this.dataset.profileId)">编辑</button>
+                <button class="btn btn-secondary" data-health-profile-id="${escapeHtml(profile.profile_id)}" ${profile.enabled ? '' : 'disabled'} onclick="testModelProfile(this)">测试并启用（1次调用）</button>
             </div>`).join('') : '<p class="form-hint">尚无 Model Profile。</p>';
     }
     const options = _gatewayModelProfiles.map(profile => `<option value="${escapeHtml(profile.profile_id)}">${escapeHtml(profile.display_name)} · ${escapeHtml(profile.test_status)}</option>`).join('');

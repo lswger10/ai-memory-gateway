@@ -659,3 +659,25 @@ async def test_real_http_tool_rounds_have_individual_receipts_and_unknown_totals
             assert events[-1].data["execution_receipt_id"] == receipts[0].receipt_id
     finally:
         await transport.close()
+
+
+@pytest.mark.anyio
+async def test_skipped_unhealthy_primary_preserves_one_compression_for_first_backup():
+    service, _, runner, _ = await _service(fail_profiles=("backup",), fallbacks=("backup", "second"))
+    await service._profiles.set_test_status("primary", "failed", expected_revision=1)
+    permissions = []
+
+    class Builder(_ContextBuilder):
+        async def build(self, request, profile, **kwargs):
+            permissions.append((profile.profile_id, kwargs["allow_compression"]))
+            return await super().build(request)
+
+    service._context_builder = Builder()
+    events = [event async for event in service.stream(_request(binding_revision=None))]
+    assert permissions == [("backup", True), ("second", False)]
+    assert [call[0] for call in runner.calls] == ["backup", "second"]
+    assert events[-1].event == "done"
+    for event in events:
+        if event.event == "profile":
+            assert event.data["fallback_used"] is True
+            assert event.data["fallback_from_profile_id"] == "primary"

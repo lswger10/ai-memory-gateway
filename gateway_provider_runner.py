@@ -7,6 +7,7 @@ import logging
 import uuid
 from urllib.parse import quote, urlsplit
 import anyio
+import httpx
 from typing import Any, AsyncIterator, Mapping
 
 from actor_memory_tools import ActorMemoryToolLibrary, actor_memory_tool_definitions
@@ -35,6 +36,7 @@ from provider_adapters import (
     render_history_message,
 )
 from provider_transport import EnvironmentCredentialResolver, PooledHttpTransport
+from provider_errors import http_reason_code, provider_error_summary
 
 
 def _observed_cache_support(usage: ProviderUsage) -> str:
@@ -254,7 +256,15 @@ class GatewayProviderRunner:
                         method=rendered.method, path=rendered.path, json_body=body)
                     async with stream_context as response:
                         if response.status_code >= 400:
-                            raise ProviderRunUnavailable(f"provider HTTP {response.status_code}")
+                            reason_code = http_reason_code(response.status_code)
+                            summary = await provider_error_summary(response, credential=credential,
+                                headers=headers, body=body, context=context)
+                            logging.getLogger(__name__).warning(
+                                "Provider request failed generation=%s profile=%s reason=%s provider_status=%s provider_error=%s",
+                                request.generation_request_id, profile.profile_id, reason_code,
+                                response.status_code, summary)
+                            raise ProviderRunUnavailable(f"provider HTTP {response.status_code}",
+                                reason_code=reason_code, provider_status=response.status_code)
                         parser = (self._anthropic if profile.protocol in {"anthropic_messages", "anthropic_messages_compatible"}
                                   else self._gemini if profile.protocol == "gemini_native"
                                   else self._openai_responses if profile.protocol == "openai_responses" else self._openai_chat)
@@ -330,16 +340,20 @@ class GatewayProviderRunner:
                     await self.memory_tools.discard(context.actor_memory_context)
             if cached and isinstance(exc, ProviderRunUnavailable):
                 reason = await self.explicit_cache.pause_generation(request=request, namespace=cache_namespace, error=exc)
-                raise ExplicitCacheUnavailable(reason) from exc
+                raise ExplicitCacheUnavailable(reason, reason_code=exc.reason_code,
+                    provider_status=exc.provider_status) from exc
             raise
         except Exception as exc:
             if self.memory_tools is not None and context.actor_memory_context is not None:
                 with anyio.fail_after(5, shield=True):
                     await self.memory_tools.discard(context.actor_memory_context)
+            reason_code = ("provider_transport_failed"
+                           if isinstance(exc, (httpx.TransportError, TimeoutError, ConnectionError))
+                           else "generation_unavailable")
             if cached:
                 reason = await self.explicit_cache.pause_generation(request=request, namespace=cache_namespace, error=exc)
-                raise ExplicitCacheUnavailable(reason) from exc
-            raise ProviderRunUnavailable("provider transport failed") from exc
+                raise ExplicitCacheUnavailable(reason, reason_code=reason_code) from exc
+            raise ProviderRunUnavailable("provider transport failed", reason_code=reason_code) from exc
 
     async def _gemini(self, response, profile, request):
         text, parts, calls = "", [], []

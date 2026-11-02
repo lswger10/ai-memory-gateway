@@ -21,6 +21,12 @@ from provider_adapters import build_provider_provenance
 class ProviderRunUnavailable(RuntimeError):
     """A sanitized, retryable provider-attempt failure."""
 
+    def __init__(self, message: str, *, reason_code: str = "generation_unavailable",
+                 provider_status: int | None = None) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.provider_status = provider_status
+
 
 class ExplicitCacheUnavailable(ProviderRunUnavailable):
     """A cache failure must not authorize another paid route or retry."""
@@ -120,15 +126,20 @@ class GatewayModelExecutionService:
         attempts = (resolved.primary, *resolved.fallbacks)
         origin_profile_id = resolved.primary.profile_id
         last_unavailable: ProviderRunUnavailable | None = None
+        allow_compression = True
 
         for index, profile in enumerate(attempts):
+            if not profile.selectable:
+                if last_unavailable is None:
+                    last_unavailable = ProviderRunUnavailable("provider profile is not selectable")
+                continue
             try:
                 context = await self._context_builder.build(
                     request,
                     profile,
                     resolved_room_id=room_id,
                     resolved_conversation_id=conversation_id,
-                    allow_compression=index == 0,
+                    allow_compression=allow_compression,
                 )
             except (SummaryInputBudgetExceeded, SummaryCompressionError) as exc:
                 logging.getLogger(__name__).warning(
@@ -147,6 +158,7 @@ class GatewayModelExecutionService:
             except TypeError:
                 # Transitional support for injected deterministic test builders.
                 context = await self._context_builder.build(request)
+            allow_compression = False
             fallback_used = index > 0
             fallback_from = origin_profile_id if fallback_used else None
             provenance = build_provider_provenance(
@@ -232,8 +244,8 @@ class GatewayModelExecutionService:
                     raise ProviderRunUnavailable("provider stream ended without final")
             except ProviderRunUnavailable as exc:
                 logging.getLogger(__name__).warning(
-                    "Model execution unavailable generation=%s profile=%s reason=%s cause=%s",
-                    request.generation_request_id, profile.profile_id, str(exc),
+                    "Model execution unavailable generation=%s profile=%s reason=%s provider_status=%s cause=%s",
+                    request.generation_request_id, profile.profile_id, exc.reason_code, exc.provider_status,
                     type(exc.__cause__).__name__ if exc.__cause__ else "none",
                 )
                 last_unavailable = exc
@@ -272,7 +284,9 @@ class GatewayModelExecutionService:
             "unavailable",
             {
                 "generation_request_id": request.generation_request_id,
-                "reason_code": "generation_unavailable",
+                "reason_code": last_unavailable.reason_code if last_unavailable else "generation_unavailable",
+                **({"provider_status": last_unavailable.provider_status}
+                   if last_unavailable and last_unavailable.provider_status is not None else {}),
             },
         )
         if last_unavailable is None:

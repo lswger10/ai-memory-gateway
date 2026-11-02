@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 
 from model_profiles import ModelProfile
 
@@ -48,7 +49,7 @@ class InMemoryModelProfileStore:
         self._profiles: dict[str, ModelProfile] = {}
         self._bindings: dict[str, StoredBinding] = {}
         self._overrides: dict[tuple[str, str], RoomOverride] = {}
-        self._probe_results: dict[tuple[str, int, str], str] = {}
+        self._probe_results: dict[tuple[str, int, str], dict] = {}
         self._lock = asyncio.Lock()
 
     async def put_profile(self, profile: ModelProfile) -> ModelProfile:
@@ -69,6 +70,10 @@ class InMemoryModelProfileStore:
             if profile is None:
                 raise ProfileStoreError(f"unknown Profile: {profile_id}")
             return profile
+
+    async def list_profiles(self) -> tuple[ModelProfile, ...]:
+        async with self._lock:
+            return tuple(self._profiles.values())
 
     async def set_test_status(self, profile_id: str, status: str, *, expected_revision: int) -> ModelProfile:
         async with self._lock:
@@ -91,18 +96,42 @@ class InMemoryModelProfileStore:
         observed_capabilities: dict,
         sanitized_detail: str | None = None,
     ) -> None:
-        del observed_capabilities, sanitized_detail
         async with self._lock:
-            self._probe_results[(profile_id, profile_revision, probe_kind)] = status
+            self._probe_results[(profile_id, profile_revision, probe_kind)] = {
+                "status": status, "observed_capabilities": observed_capabilities,
+                "sanitized_detail": sanitized_detail, "tested_at": datetime.now(timezone.utc),
+            }
 
     async def has_verified_probe(
         self, profile_id: str, profile_revision: int, probe_kind: str
     ) -> bool:
         async with self._lock:
             return (
-                self._probe_results.get((profile_id, profile_revision, probe_kind))
+                self._probe_results.get((profile_id, profile_revision, probe_kind), {}).get("status")
                 == "verified"
             )
+
+    async def claim_health_check(self, profile_id: str, revision: int) -> bool:
+        async with self._lock:
+            key = (profile_id, revision, "model_health")
+            now = datetime.now(timezone.utc)
+            profile = self._profiles.get(profile_id)
+            if profile is None or profile.revision != revision or not profile.enabled:
+                return False
+            if any(row["tested_at"] > now - timedelta(days=1)
+                   for (pid, _, kind), row in self._probe_results.items()
+                   if pid == profile_id and kind == "model_health"):
+                return False
+            self._probe_results.setdefault(key, {"status": "unverified", "observed_capabilities": {}})["tested_at"] = now
+            return True
+
+    async def list_health_results(self) -> tuple[dict, ...]:
+        async with self._lock:
+            return tuple({"profile_id": p.profile_id, "profile_revision": p.revision,
+                "display_name": p.display_name, "status": row["status"],
+                "tested_at": row["tested_at"].isoformat(), **row["observed_capabilities"]}
+                for p in self._profiles.values() if p.enabled
+                if (row := self._probe_results.get((p.profile_id, p.revision, "model_health"))))
 
     def _selectable(self, profile_id: str) -> ModelProfile:
         profile = self._profiles.get(profile_id)
@@ -217,13 +246,16 @@ class InMemoryModelProfileStore:
                 raise ProfileStoreError(f"actor has no Model Profile binding: {actor_id}")
             override = self._overrides.get((room_id, actor_id))
             profile_id = override.profile_id if override else binding.default_profile_id
-            primary = self._selectable(profile_id)
+            primary = self._profiles.get(profile_id)
+            if primary is None:
+                raise ProfileStoreError(f"unknown Profile: {profile_id}")
             fallback_ids = tuple(
                 item
                 for item in binding.approved_fallback_profile_ids
                 if item != primary.profile_id
             )
-            fallbacks = tuple(self._selectable(item) for item in fallback_ids)
+            fallbacks = tuple(p for item in fallback_ids
+                              if (p := self._profiles.get(item)) is not None and p.selectable)
             revision = override.revision if override else binding.revision
             return ResolvedProfiles(
                 actor_id=actor_id,

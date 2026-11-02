@@ -84,6 +84,7 @@ from conversation_partitions import (
     PostgresConversationPartitionStore,
 )
 from cache_probe import GatewayCacheProbeService
+from model_health import ModelHealthService
 from model_profile_store import InMemoryModelProfileStore
 from model_usage_store import InMemoryModelUsageStore
 from model_runtime_fixture import bootstrap_ephemeral_model_profiles
@@ -126,7 +127,7 @@ PORT = int(os.getenv("PORT", "8080"))
 # 网关访问密钥（强烈建议设置！）
 # 设置后所有非公开端点都需要鉴权，二选一：
 #   - 请求头方式：X-Gateway-Key: 你的密钥（客户端/API 调用）
-#   - URL参数方式：?gateway_key=你的密钥（方便浏览器访问 dashboard）
+#   - 管理请求只接受 X-Gateway-Key 请求头。
 # 缺少管理密钥时拒绝管理请求；健康检查独立公开。
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
 
@@ -189,12 +190,24 @@ async def _conversation_cache_pin_worker() -> None:
             print(f"[warning] Conversation Cache Pin pass failed: {type(exc).__name__}")
         await asyncio.sleep(poll_seconds)
 
+
+async def _model_health_worker() -> None:
+    while True:
+        try:
+            await (await _get_model_health_service()).run_due_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[warning] Model health pass failed: {type(exc).__name__}")
+        await asyncio.sleep(300)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动时初始化数据库，关闭时断开连接"""
     app.state.database_initialized = False
     group_worker_task = None
     cache_pin_worker_task = None
+    model_health_worker_task = None
     if MEMORY_ENABLED:
         try:
             await init_tables()
@@ -262,8 +275,16 @@ async def lifespan(app: FastAPI):
         group_worker_task = asyncio.create_task(_group_extraction_worker())
     if app.state.database_initialized and MEMORY_ENABLED and resolve_feature_flags()["model_execution"]:
         cache_pin_worker_task = asyncio.create_task(_conversation_cache_pin_worker())
+        model_health_worker_task = asyncio.create_task(_model_health_worker())
 
     yield
+
+    if model_health_worker_task is not None:
+        model_health_worker_task.cancel()
+        try:
+            await model_health_worker_task
+        except asyncio.CancelledError:
+            pass
 
     if group_worker_task is not None:
         group_worker_task.cancel()
@@ -300,6 +321,7 @@ _model_context_builder: GatewayExecutionContextBuilder | None = None
 _actor_memory_tools: ActorMemoryToolLibrary | None = None
 _actor_memory_relay: RelayGroupClient | None = None
 _cache_probe_service: GatewayCacheProbeService | None = None
+_model_health_service: ModelHealthService | None = None
 _cache_pin_service: CachePinService | None = None
 _conversation_compression_service: ConversationCompressionService | None = None
 _actor_prompt_store = None
@@ -390,11 +412,10 @@ async def gateway_auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    # 从 header 或 query 参数获取密钥
-    provided_key = (
-        request.headers.get("X-Gateway-Key", "")
-        or request.query_params.get("gateway_key", "")
-    )
+    # The public dashboard shell contains no data; its API requests authenticate by header.
+    if path == "/dashboard" and request.method == "GET" and GATEWAY_SECRET:
+        return await call_next(request)
+    provided_key = request.headers.get("X-Gateway-Key", "")
     persona_key = request.headers.get("X-Gateway-Persona-Key", "")
 
     # The full administrator credential preserves existing behavior. The
@@ -1279,6 +1300,41 @@ async def run_cache_probe(request: Request):
         "first": _usage_dict(result.first),
         "second": _usage_dict(result.second),
     }
+
+
+async def _get_model_health_service():
+    global _model_health_service
+    if _model_health_service is None:
+        await _get_model_execution_service()
+        _model_health_service = ModelHealthService(profiles=_model_profile_store,
+            provider_runner=_model_provider_runner, usage_store=_model_usage_store)
+    return _model_health_service
+
+
+@app.get("/api/model-health")
+async def list_model_health():
+    _require_model_management()
+    service = await _get_model_health_service()
+    return {"results": await service.profiles.list_health_results()}
+
+
+@app.post("/api/model-health")
+async def check_model_health(request: Request):
+    _require_model_management()
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError
+        if body.get("confirm_provider_charges") is not True:
+            raise HTTPException(status_code=409, detail="provider_charge_confirmation_required")
+        revision = body["profile_revision"]
+        if type(revision) is not int or revision < 1 or not isinstance(body["profile_id"], str):
+            raise ValueError
+        return await (await _get_model_health_service()).check(body["profile_id"], profile_revision=revision)
+    except ProfileStoreError as exc:
+        raise HTTPException(status_code=409, detail="model_profile_revision_conflict") from exc
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="invalid_model_health_check") from exc
 
 
 def _get_group_context_service() -> GroupContextPackService:

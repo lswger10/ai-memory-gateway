@@ -79,10 +79,12 @@
 !model_execution_contracts.py
 !model_profile_store.py
 !model_profiles.py
+!model_health.py
 !model_runtime_fixture.py
 !model_usage_store.py
 !postgres_model_stores.py
 !provider_adapters.py
+!provider_errors.py
 !provider_transport.py
 !relay_group_client.py
 !requirements.txt

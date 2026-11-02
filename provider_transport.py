@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -39,6 +40,7 @@ class EnvironmentCredentialResolver:
 class _ClientSlot:
     signature: tuple[str, tuple[tuple[str, str], ...]]
     client: Any
+    active: int = 0
 
 
 class PooledHttpTransport:
@@ -54,25 +56,38 @@ class PooledHttpTransport:
         self._lock = asyncio.Lock()
         self._closed = False
 
+    @asynccontextmanager
     async def _client(
         self, pool_key: str, base_url: str, headers: dict[str, str]
-    ) -> Any:
+    ):
         signature = (base_url.rstrip("/"), tuple(sorted(headers.items())))
+        retired = None
         async with self._lock:
             if self._closed:
                 raise RuntimeError("provider transport is closed")
             slot = self._clients.get(pool_key)
-            if slot is not None:
-                if slot.signature != signature:
-                    raise RuntimeError("pool_key cannot be reused with different route settings")
-                return slot.client
-            client = self._client_factory(
-                base_url=signature[0],
-                headers=headers,
-                timeout=self._timeout_seconds,
-            )
-            self._clients[pool_key] = _ClientSlot(signature=signature, client=client)
-            return client
+            if slot is None or slot.signature != signature:
+                client = self._client_factory(
+                    base_url=signature[0],
+                    headers=headers,
+                    timeout=self._timeout_seconds,
+                )
+                if slot is not None and slot.active == 0:
+                    retired = slot.client
+                slot = _ClientSlot(signature=signature, client=client)
+                self._clients[pool_key] = slot
+            slot.active += 1
+        try:
+            if retired is not None:
+                await retired.aclose()
+            yield slot.client
+        finally:
+            async with self._lock:
+                slot.active -= 1
+                # Replaced clients stay alive until their last request or stream exits.
+                should_close = slot.active == 0 and self._clients.get(pool_key) is not slot
+            if should_close:
+                await slot.client.aclose()
 
     async def request(
         self,
@@ -84,9 +99,9 @@ class PooledHttpTransport:
         path: str,
         json_body: dict[str, Any],
     ) -> Any:
-        client = await self._client(pool_key, base_url, headers)
-        endpoint_path = _endpoint_path_for_base_url(base_url, path)
-        return await client.request(method, endpoint_path, json=json_body)
+        async with self._client(pool_key, base_url, headers) as client:
+            endpoint_path = _endpoint_path_for_base_url(base_url, path)
+            return await client.request(method, endpoint_path, json=json_body)
 
     async def open_stream(
         self,
@@ -98,15 +113,20 @@ class PooledHttpTransport:
         path: str,
         json_body: dict[str, Any],
     ):
-        client = await self._client(pool_key, base_url, headers)
-        endpoint_path = _endpoint_path_for_base_url(base_url, path)
-        return client.stream(method, endpoint_path, json=json_body)
+        @asynccontextmanager
+        async def stream():
+            async with self._client(pool_key, base_url, headers) as client:
+                endpoint_path = _endpoint_path_for_base_url(base_url, path)
+                async with client.stream(method, endpoint_path, json=json_body) as response:
+                    yield response
+
+        return stream()
 
     async def close(self) -> None:
         async with self._lock:
             if self._closed:
                 return
-            clients = [slot.client for slot in self._clients.values()]
+            clients = [slot.client for slot in self._clients.values() if slot.active == 0]
             self._clients.clear()
             self._closed = True
         for client in clients:
