@@ -266,10 +266,9 @@ class AnthropicMessagesAdapter:
             )
         if apply_cache_control:
             breakpoint = _cache_control(layout.breakpoint.requested_ttl)
+            system[-1]["cache_control"] = breakpoint
             if messages:
                 messages[-1]["content"][-1]["cache_control"] = breakpoint
-            else:
-                system[-1]["cache_control"] = breakpoint
         for segment in layout.dynamic_messages:
             messages.append(
                 {

@@ -64,14 +64,19 @@ def _profile(
     )
 
 
-def _anthropic_layout(ttl="5m"):
+def _anthropic_layout(ttl="5m", *, include_history=True):
     return AnthropicPrefixAnchoredV1().build_layout(
         tools=({"name": "fixed_tool", "input_schema": {"type": "object"}},),
         stable_segments=(
             PromptSegment("runtime_kernel", "kernel"),
             PromptSegment("actor_prompt", "actor"),
             PromptSegment("room_policy", "room"),
-            PromptSegment("factual_history", "history"),
+        ) + (
+            (
+                PromptSegment("compressed_summary", "summary"),
+                PromptSegment("factual_history", "old history"),
+                PromptSegment("factual_history", "history"),
+            ) if include_history else ()
         ),
         dynamic_segments=(
             PromptSegment("retrieved_memory", "memory"),
@@ -84,13 +89,14 @@ def _anthropic_layout(ttl="5m"):
     )
 
 
-def test_anthropic_adapter_renders_only_verified_cache_control_and_ttl():
+@pytest.mark.parametrize("include_history", [True, False])
+def test_anthropic_adapter_renders_only_verified_cache_control_and_ttl(include_history):
     profile = _profile(
         "anthropic_messages", "anthropic_prefix_anchored_v1", ttl="1h"
     )
     request = AnthropicMessagesAdapter().render(
         profile=profile,
-        layout=_anthropic_layout("1h"),
+        layout=_anthropic_layout("1h", include_history=include_history),
         max_output_tokens=300,
     )
 
@@ -99,13 +105,26 @@ def test_anthropic_adapter_renders_only_verified_cache_control_and_ttl():
     assert request.json_body["messages"][-1]["content"][0]["text"].endswith(
         "current"
     )
+    assert request.json_body["system"][-1]["cache_control"] == {
+        "type": "ephemeral", "ttl": "1h"
+    }
+    assert all("cache_control" not in block for block in request.json_body["system"][:-1])
     breakpoints = [
         block["cache_control"]
         for message in request.json_body["messages"]
         for block in message["content"]
         if "cache_control" in block
     ]
-    assert breakpoints == [{"type": "ephemeral", "ttl": "1h"}]
+    assert breakpoints == ([{"type": "ephemeral", "ttl": "1h"}] if include_history else [])
+    if include_history:
+        assert request.json_body["messages"][-3]["content"][-1]["cache_control"] == {
+            "type": "ephemeral", "ttl": "1h"
+        }
+    assert all(
+        "cache_control" not in block
+        for message in request.json_body["messages"][-2:]
+        for block in message["content"]
+    )
     assert "stream_options" not in request.json_body
 
 
