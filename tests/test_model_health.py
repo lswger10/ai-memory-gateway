@@ -26,6 +26,40 @@ class Runner:
 
 
 @pytest.mark.anyio
+async def test_gemini_health_allows_thinking_before_visible_reply():
+    import json
+    import httpx
+    from gateway_provider_runner import GatewayProviderRunner
+    from provider_transport import PooledHttpTransport
+    from test_gateway_provider_runner import Resolver
+    from test_gemini_native import native_profile
+
+    profiles = InMemoryModelProfileStore()
+    profile = replace(native_profile(), test_status="unverified")
+    await profiles.put_profile(profile)
+
+    def respond(req):
+        budget = json.loads(req.content)["generationConfig"]["maxOutputTokens"]
+        # The live provider used 114 thinking tokens before its one-token reply.
+        enough = budget >= 115
+        frame = {"candidates": [{"content": {"parts": [{"text": "OK" if enough else ""}]},
+                                "finishReason": "STOP" if enough else "MAX_TOKENS"}]}
+        return httpx.Response(200, text="data: " + json.dumps(frame) + "\n\n")
+
+    transport = PooledHttpTransport(client_factory=lambda **kwargs:
+        httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs))
+    try:
+        service = ModelHealthService(profiles=profiles,
+            provider_runner=GatewayProviderRunner(transport=transport, credential_resolver=Resolver()),
+            usage_store=InMemoryModelUsageStore())
+        result = await service.check(profile.profile_id, profile_revision=profile.revision)
+        assert result["status"] == "verified"
+        assert (await profiles.get_profile(profile.profile_id)).selectable
+    finally:
+        await transport.close()
+
+
+@pytest.mark.anyio
 async def test_daily_check_is_bounded_synthetic_and_claimed_once_across_workers():
     profiles = InMemoryModelProfileStore()
     await profiles.put_profile(_profile("active"))

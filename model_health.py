@@ -34,10 +34,12 @@ class ModelHealthService:
                 actor_prompt_version="model-health.v1", runtime_kernel_version="model-health.v1",
                 room_policy_version="model-health.v1", tool_schema_hash="tools.none.v1")
             status, reason, http_status = "verified", None, None
+            # Gemini counts thinking against the output limit before producing reply text.
+            max_output_tokens = 512 if profile.protocol == "gemini_native" else 32
             try:
                 async with asyncio.timeout(150):
                     await self.probe._once(profile=profile, request=request, context=context,
-                        cache_namespace=request.conversation_id, execution_purpose="model_health", max_output_tokens=32)
+                        cache_namespace=request.conversation_id, execution_purpose="model_health", max_output_tokens=max_output_tokens)
             except UsageRecordingError:
                 raise
             except ProviderRunUnavailable as exc:
